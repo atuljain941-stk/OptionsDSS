@@ -1,0 +1,323 @@
+//@version=5
+indicator("UAE - Trend/Vol Analyzer v4", overlay=false, max_labels_count=500, max_lines_count=200)
+
+// ================================================================
+// UAE - TREND/VOL ANALYZER v4
+// Changes from v3:
+// - ROC default 3->5, signal smooth 5->3, slope lookback 5->10
+// - ADX smoothed (EMA-3) before threshold: kills false SIDEWAYS on sharp reversals
+// - Fast EMA 10->8 for slightly more response
+// - Strong-hist filter: alerts/markers only above 60th-pct histogram bar
+// - Bull = BLUE, Bear = RED, Sideways = GREY
+// - MACD line = solid blue, Signal line = black
+// - Labels staggered by regime level to prevent overlap
+// - AUTO TF: rocLen, slopeLen, fastLen, slowLen, adxThr auto-set from chart TF
+// - No multi-line strings (PineScript incompatible)
+// ================================================================
+
+// ================================================================
+// AUTO TIMEFRAME DETECTION
+// Resolves chart period to canonical bucket: W, D, 240, 60, 15, 5
+// All per-TF params are derived from this single variable.
+// Manual override inputs let user lock any param if needed.
+// ================================================================
+
+tfMins = timeframe.in_seconds() / 60
+
+// Bucket: 0=5min 1=15min 2=1H 3=4H 4=Daily 5=Weekly
+tfBucket = tfMins >= 7 * 24 * 60 ? 5 :
+           tfMins >= 24 * 60      ? 4 :
+           tfMins >= 240          ? 3 :
+           tfMins >= 60           ? 2 :
+           tfMins >= 15           ? 1 : 0
+
+// Auto values per bucket
+// rocLen:   5min=3 | 15min=4 | 1H=5 | 4H=5 | Daily=6 | Weekly=7
+autoRoc   = tfBucket == 5 ? 7 : tfBucket == 4 ? 6 : tfBucket == 3 ? 5 : tfBucket == 2 ? 5 : tfBucket == 1 ? 4 : 3
+
+// slopeLen: 5min=4 | 15min=5 | 1H=7 | 4H=8 | Daily=10 | Weekly=12
+autoSlope = tfBucket == 5 ? 12 : tfBucket == 4 ? 10 : tfBucket == 3 ? 8 : tfBucket == 2 ? 7 : tfBucket == 1 ? 5 : 4
+
+// fastLen:  5min=5 | 15min=7 | 1H=8 | 4H=8 | Daily=8 | Weekly=8
+autoFast  = tfBucket == 0 ? 5 : tfBucket == 1 ? 7 : 8
+
+// slowLen:  5min=13 | 15min=15 | 1H=20 | 4H=20 | Daily=21 | Weekly=21
+autoSlow  = tfBucket == 0 ? 13 : tfBucket == 1 ? 15 : tfBucket == 4 or tfBucket == 5 ? 21 : 20
+
+// signalLen: 5min=2 | all others=3
+autoSignal = tfBucket == 0 ? 2 : 3
+
+// adxThr:   5min=18 | 15min=18 | 1H=20 | 4H=20 | Daily=20 | Weekly=20
+autoAdxThr = tfBucket == 0 or tfBucket == 1 ? 18.0 : 20.0
+
+// TF label for status line display
+tfLabel = tfBucket == 5 ? "Weekly" : tfBucket == 4 ? "Daily" : tfBucket == 3 ? "4H" : tfBucket == 2 ? "1H" : tfBucket == 1 ? "15min" : "5min"
+
+// ================================================================
+// INPUTS — Auto TF toggle (master switch)
+// ================================================================
+useAutoTF    = input.bool(true, "Auto-set params from chart TF", group="Auto TF", tooltip="ON = rocLen/slopeLen/fastLen/slowLen/signalLen/adxThr are set automatically based on the chart timeframe. Override inputs below are ignored when this is ON.")
+
+// ================================================================
+// INPUTS — Core (used only when useAutoTF = false)
+// ================================================================
+inFastLen    = input.int(8,  "Fast EMA length (manual)",    minval=1, group="Core (manual override)", tooltip="Active only when Auto TF is OFF. 5min=5 | 15min=7 | 1H=8 | 4H=8 | Daily=8")
+inSlowLen    = input.int(20, "Slow EMA length (manual)",    minval=1, group="Core (manual override)", tooltip="Active only when Auto TF is OFF. 5min=13 | 15min=15 | 1H=20 | 4H=20 | Daily=21")
+inSignalLen  = input.int(3,  "Signal smooth (manual)",      minval=1, group="Core (manual override)", tooltip="Active only when Auto TF is OFF. 3 for most TFs, 2 for 5min scalping.")
+inRocLen     = input.int(5,  "ROC period (manual)",         minval=1, group="Core (manual override)", tooltip="Active only when Auto TF is OFF. 5min=3 | 15min=4 | 1H=5 | 4H=5 | Daily=6 | Weekly=7")
+atrLen       = input.int(14, "ATR length",                  minval=1, group="Core (manual override)")
+
+// ================================================================
+// INPUTS — Regime (adxThr auto when useAutoTF; rest always manual)
+// ================================================================
+adxLen       = input.int(14,   "ADX length",           minval=2,          group="Regime")
+inAdxThr     = input.float(20, "ADX threshold (manual)", minval=5, maxval=50, step=1, group="Regime", tooltip="Active only when Auto TF is OFF. 18 for 5min/15min, 20 for 1H+.")
+adxSmoothLen = input.int(3,    "ADX smooth bars",      minval=1, maxval=10, group="Regime", tooltip="EMA on raw ADX before threshold. 3 kills false SIDEWAYS on sharp bars. Set 1 to disable.")
+inSlopeLen   = input.int(10,   "EMA slope lookback (manual)", minval=1,  group="Regime", tooltip="Active only when Auto TF is OFF. Daily=10 | 4H=8 | 1H=7 | 15min=5 | 5min=4")
+
+// ================================================================
+// INPUTS — Vol
+// ================================================================
+volMult      = input.float(1.5, "Vol amplify strength", minval=0, maxval=5, step=0.1, group="Vol Amp", tooltip="0=off. 1.0-2.0 recommended. Higher = taller bars in high-vol moves.")
+
+// ================================================================
+// INPUTS — Histogram filter
+// ================================================================
+histPctThr   = input.int(60,  "Strong-hist percentile filter", minval=10, maxval=90, step=5, group="Filter", tooltip="Diamonds and strong alerts fire only above this percentile of recent bars. 60=default | 50=more | 75=fewer/higher quality.")
+histLookback = input.int(100, "Percentile lookback bars",      minval=20, maxval=500,          group="Filter")
+
+// ================================================================
+// INPUTS — Label stagger heights
+// ================================================================
+lblBull      = input.float(0.30, "BULL label height",      minval=0.0, maxval=2.0, step=0.05, group="Label Heights", tooltip="Y offset above zero for BULL label.")
+lblWeakBull  = input.float(0.18, "WEAK BULL label height", minval=0.0, maxval=2.0, step=0.05, group="Label Heights", tooltip="Y offset above zero for WEAK BULL label.")
+lblSide      = input.float(0.08, "SIDEWAYS label height",  minval=0.0, maxval=2.0, step=0.05, group="Label Heights", tooltip="Y offset above zero for SIDEWAYS label.")
+lblWeakBear  = input.float(0.18, "WEAK BEAR label depth",  minval=0.0, maxval=2.0, step=0.05, group="Label Heights", tooltip="Y offset below zero for WEAK BEAR label.")
+lblBear      = input.float(0.30, "BEAR label depth",       minval=0.0, maxval=2.0, step=0.05, group="Label Heights", tooltip="Y offset below zero for BEAR label.")
+
+// ================================================================
+// INPUTS — Display toggles
+// ================================================================
+showZero     = input.bool(true,  "Show zero line",           group="Display")
+showSignal   = input.bool(true,  "Show signal line",         group="Display")
+showMacd     = input.bool(true,  "Show MACD line",           group="Display")
+showBg       = input.bool(true,  "Show regime background",   group="Display")
+showLbl      = input.bool(true,  "Show regime labels",       group="Display")
+showAdx      = input.bool(true,  "Show ADX scaled",          group="Display")
+showFilter   = input.bool(true,  "Show strong-hist diamonds",group="Display", tooltip="Diamonds only when histogram clears the percentile filter = highest-quality signals.")
+showTfInfo   = input.bool(true,  "Show TF info label",       group="Display", tooltip="Shows active TF bucket and auto-selected params in top-right corner.")
+
+// ================================================================
+// RESOLVE ACTIVE PARAMS (auto vs manual)
+// ================================================================
+fastLen   = useAutoTF ? autoFast   : inFastLen
+slowLen   = useAutoTF ? autoSlow   : inSlowLen
+signalLen = useAutoTF ? autoSignal : inSignalLen
+rocLen    = useAutoTF ? autoRoc    : inRocLen
+slopeLen  = useAutoTF ? autoSlope  : inSlopeLen
+adxThr    = useAutoTF ? autoAdxThr : inAdxThr
+
+// ================================================================
+// CORE CALCULATION
+// ================================================================
+atrv     = ta.atr(atrLen)
+atrBase  = ta.ema(atrv, slowLen)
+safeATR  = math.max(atrBase, syminfo.mintick * 10)
+
+slowEma  = ta.ema(close, slowLen)
+fastEma  = ta.ema(close, fastLen)
+
+trendPos = (close - slowEma) / safeATR
+trendMom = trendPos - nz(trendPos[rocLen])
+
+volAmp   = math.max(0.1, atrv / safeATR)
+rawSig   = trendMom * math.pow(volAmp, volMult)
+
+macdLine   = ta.ema(rawSig,   fastLen)
+signalLine = ta.ema(macdLine, signalLen)
+hist       = macdLine - signalLine
+
+// ================================================================
+// STRONG HISTOGRAM FILTER
+// ================================================================
+histAbs      = math.abs(hist)
+histThresh   = ta.percentile_linear_interpolation(histAbs, histLookback, histPctThr)
+isStrongHist = histAbs > histThresh
+
+// ================================================================
+// REGIME DETECTION — smoothed ADX kills false SIDEWAYS on reversals
+// ================================================================
+upMove  = high - nz(high[1])
+dnMove  = nz(low[1]) - low
+plusDM  = (upMove > dnMove and upMove > 0) ? upMove  : 0.0
+minusDM = (dnMove > upMove and dnMove > 0) ? dnMove  : 0.0
+smTR    = ta.rma(ta.tr(true), adxLen)
+pDI     = 100 * ta.rma(plusDM,  adxLen) / math.max(smTR, syminfo.mintick)
+mDI     = 100 * ta.rma(minusDM, adxLen) / math.max(smTR, syminfo.mintick)
+diSum   = pDI + mDI
+adxRaw  = 100 * ta.rma(math.abs(pDI - mDI) / math.max(diSum, syminfo.mintick), adxLen)
+adxVal  = ta.ema(adxRaw, adxSmoothLen)
+
+emaSlope    = (slowEma - nz(slowEma[slopeLen])) / slopeLen / safeATR
+isTrending  = adxVal > adxThr
+isBullSlope = emaSlope > 0
+isBearSlope = emaSlope < 0
+
+regBull     = isTrending and isBullSlope and hist >  0
+regWeakBull = isTrending and isBullSlope and hist <= 0
+regBear     = isTrending and isBearSlope and hist <  0
+regWeakBear = isTrending and isBearSlope and hist >= 0
+regSide     = not isTrending
+
+regime = regBull ? 1 : regWeakBull ? 2 : regBear ? -1 : regWeakBear ? -2 : 0
+
+// ================================================================
+// COLOURS — Blue / Red / Grey
+// ================================================================
+histCol = regBull     ? color.new(#1d6fdb, 0)  :
+          regWeakBull ? color.new(#1d6fdb, 50) :
+          regBear     ? color.new(#e03030, 0)  :
+          regWeakBear ? color.new(#e03030, 50) :
+                        color.new(#8a8a8a, 20)
+
+bgCol   = regBull     ? color.new(#1d6fdb, 91) :
+          regWeakBull ? color.new(#1d6fdb, 95) :
+          regBear     ? color.new(#e03030, 91) :
+          regWeakBear ? color.new(#e03030, 95) :
+                        color.new(#8a8a8a, 90)
+
+regLblCol = regime ==  1 ? color.new(#1550a8, 0) :
+            regime ==  2 ? color.new(#3a7fcc, 0) :
+            regime == -1 ? color.new(#b01e1e, 0) :
+            regime == -2 ? color.new(#cc5555, 0) :
+                           color.new(#555555, 0)
+
+adxCol  = regBull or regWeakBull ? color.new(#4a90d9, 35) :
+          regBear or regWeakBear ? color.new(#d96060, 35) :
+                                   color.new(#9a9a9a, 40)
+
+// ================================================================
+// PLOTS
+// ================================================================
+hline(0, "Zero", color=showZero ? color.new(color.gray, 55) : color.new(color.gray, 100), linestyle=hline.style_dashed)
+
+bgcolor(showBg ? bgCol : na, title="Regime Bg")
+
+plot(hist,                         "Histogram", color=histCol,                style=plot.style_columns, linewidth=2)
+plot(showMacd   ? macdLine   : na, "MACD",      color=color.new(#1d6fdb, 0), linewidth=2)
+plot(showSignal ? signalLine : na, "Signal",    color=color.new(#000000, 0), linewidth=2)
+plot(showAdx    ? adxVal/200 : na, "ADX",       color=adxCol,                linewidth=1)
+
+// ================================================================
+// MOMENTUM FLIP MARKERS — triangle = MACD zero cross (primary signal)
+// ================================================================
+plotshape(ta.crossover(macdLine,  0) and isTrending and isStrongHist,
+         "Bull Mom Strong", shape.triangleup,   location.bottom, color.new(#1d6fdb, 0),  size=size.small)
+plotshape(ta.crossunder(macdLine, 0) and isTrending and isStrongHist,
+         "Bear Mom Strong", shape.triangledown, location.top,    color.new(#e03030, 0),  size=size.small)
+plotshape(ta.crossover(macdLine,  0) and isTrending and not isStrongHist,
+         "Bull Mom Weak",   shape.triangleup,   location.bottom, color.new(#1d6fdb, 60), size=size.tiny)
+plotshape(ta.crossunder(macdLine, 0) and isTrending and not isStrongHist,
+         "Bear Mom Weak",   shape.triangledown, location.top,    color.new(#e03030, 60), size=size.tiny)
+
+// ================================================================
+// HISTOGRAM ZERO-CROSS CIRCLES — secondary confirmation (trending only)
+// ================================================================
+plotshape(ta.crossover(hist,  0) and isTrending,
+         "Hist Bull", shape.circle, location.bottom, color.new(#4a90d9, 0),  size=size.tiny)
+plotshape(ta.crossunder(hist, 0) and isTrending,
+         "Hist Bear", shape.circle, location.top,    color.new(#cc5555, 0),  size=size.tiny)
+
+// ================================================================
+// STRONG-HIST DIAMONDS — highest-quality confluence markers
+// ================================================================
+plotshape(showFilter and isStrongHist and hist > 0 and isTrending,
+         "Strong Bull Bar", shape.diamond, location.bottom, color.new(#1d6fdb, 20), size=size.tiny)
+plotshape(showFilter and isStrongHist and hist < 0 and isTrending,
+         "Strong Bear Bar", shape.diamond, location.top,    color.new(#e03030, 20), size=size.tiny)
+
+// ================================================================
+// REGIME CHANGE LABELS — staggered heights prevent overlap
+//  BULL       +lblBull     (highest above zero)
+//  WEAK BULL  +lblWeakBull (mid above zero)
+//  SIDEWAYS   +lblSide     (just above zero)
+//  WEAK BEAR  -lblWeakBear (mid below zero)
+//  BEAR       -lblBear     (deepest below zero)
+// ================================================================
+prevReg    = nz(regime[1])
+regChanged = regime != prevReg and not na(regime[1])
+
+regLbl = regime ==  1 ? "BULL"      :
+         regime ==  2 ? "WEAK BULL" :
+         regime == -1 ? "BEAR"      :
+         regime == -2 ? "WEAK BEAR" :
+                        "SIDEWAYS"
+
+regY = regime ==  1 ?  lblBull     :
+       regime ==  2 ?  lblWeakBull :
+       regime ==  0 ?  lblSide     :
+       regime == -2 ? -lblWeakBear :
+                      -lblBear
+
+regStyle = regime == -1 or regime == -2 ? label.style_label_down : label.style_label_up
+
+if showLbl and regChanged
+    label.new(bar_index, regY, regLbl,
+         style     = regStyle,
+         color     = regLblCol,
+         textcolor = color.white,
+         size      = size.normal,
+         tooltip   = "ADX: " + str.tostring(adxVal, "#.1") + " | Slope: " + str.tostring(emaSlope, "#.4") + " | rocLen: " + str.tostring(rocLen) + " | slopeLen: " + str.tostring(slopeLen))
+
+// ================================================================
+// TF INFO LABEL — top-right, shows active TF bucket + resolved params
+// Redrawn every bar but only last one is visible (no count issue)
+// ================================================================
+var label tfInfoLbl = na
+if showTfInfo
+    label.delete(tfInfoLbl)
+    autoStr  = useAutoTF ? "AUTO" : "MANUAL"
+    infoTxt  = "TF: " + tfLabel + "  [" + autoStr + "]" + "  fast=" + str.tostring(fastLen) + "  slow=" + str.tostring(slowLen) + "  roc=" + str.tostring(rocLen) + "  slope=" + str.tostring(slopeLen) + "  sig=" + str.tostring(signalLen) + "  adxThr=" + str.tostring(adxThr, "#.0")
+    tfInfoLbl := label.new(bar_index, lblBull * 1.4, infoTxt,
+         style     = label.style_label_left,
+         color     = color.new(#1a1a2e, 85),
+         textcolor = color.new(#c8d8f0, 0),
+         size      = size.small,
+         xloc      = xloc.bar_index)
+
+// ================================================================
+// ALERTS
+// ================================================================
+alertcondition(ta.crossover(macdLine,  0) and isTrending and isStrongHist, "Strong Bull Momentum", "v4: MACD bull cross - trending + strong histogram")
+alertcondition(ta.crossunder(macdLine, 0) and isTrending and isStrongHist, "Strong Bear Momentum", "v4: MACD bear cross - trending + strong histogram")
+alertcondition(ta.crossover(macdLine,  0) and isTrending,                  "Bull Momentum All",    "v4: MACD bull cross in trending market")
+alertcondition(ta.crossunder(macdLine, 0) and isTrending,                  "Bear Momentum All",    "v4: MACD bear cross in trending market")
+alertcondition(regBull     and not regBull[1],                              "Regime BULL",          "v4: regime confirmed BULL")
+alertcondition(regBear     and not regBear[1],                              "Regime BEAR",          "v4: regime confirmed BEAR")
+alertcondition(regSide     and not regSide[1],                              "Regime SIDEWAYS",      "v4: regime turned SIDEWAYS - reduce size")
+
+// ================================================================
+// TIMEFRAME AUTO PARAM TABLE (comments reference)
+// TF      | fastLen | slowLen | rocLen | slopeLen | adxThr | signalLen
+// 5min    |    5    |   13    |   3    |    4     |  18.0  |     2
+// 15min   |    7    |   15    |   4    |    5     |  18.0  |     3
+// 1H      |    8    |   20    |   5    |    7     |  20.0  |     3
+// 4H      |    8    |   20    |   5    |    8     |  20.0  |     3
+// Daily   |    8    |   21    |   6    |   10     |  20.0  |     3
+// Weekly  |    8    |   21    |   7    |   12     |  20.0  |     3
+//
+// SIGNAL PRIORITY (highest to lowest):
+// 1. Triangle + Diamond + Regime match  = High-conviction entry
+// 2. Triangle + Regime match            = Standard entry, normal size
+// 3. Circle only                        = Confirmation add, not standalone
+// 4. Regime label change                = Bias shift, not entry signal
+// 5. Any signal on GREY background      = Skip or paper-trade only
+//
+// MULTI-TF WORKFLOW:
+// Daily/4H  = Read regime bg colour for directional BIAS
+// 1H/15min  = Wait for triangle that AGREES with higher TF bias
+// Entry bar = Best when triangle + circle + diamond all align
+// Stop      = Trail when histogram bars START SHRINKING
+// Hard stop = MACD zero-cross in opposite direction
+// Regime WEAK = Tighten stop by 50%
+// ================================================================

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Maya Vertical Scanner</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    .maya-shell{max-width:none;margin:0 auto;padding:20px 24px}
+    .hero{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px}
+    .hero h1{margin:0;font-size:32px}
+    .hero p{margin:6px 0 0;color:var(--muted);font-size:14px}
+    .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px}
+    .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-bottom:14px}
+    .controls label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
+    .controls select,.controls input{padding:9px 11px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px}
+    .btn{padding:10px 16px;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-weight:700;cursor:pointer;font-size:13px}
+    .btn.secondary{background:rgba(255,255,255,.06);color:var(--text);border:1px solid var(--border)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:14px}
+    .cardx{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;box-shadow:0 6px 20px rgba(0,0,0,.08);width:100%;box-sizing:border-box}
+    .redbox{border-color:rgba(239,68,68,.8)!important;box-shadow:0 0 0 1px rgba(239,68,68,.2),0 6px 20px rgba(0,0,0,.08)}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
+    .g{background:rgba(34,197,94,.12);color:#22c55e}
+    .r{background:rgba(239,68,68,.12);color:#ef4444}
+    .y{background:rgba(245,158,11,.12);color:#f59e0b}
+    .muted{color:var(--muted)}
+    .kv{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-top:10px;font-size:13px}
+    .kv div{padding:6px 8px;background:rgba(255,255,255,.03);border-radius:8px}
+    .mini{font-size:12px;color:var(--muted)}
+    table{width:100%;border-collapse:collapse;table-layout:auto}
+    th,td{padding:9px 11px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:top}
+    th{text-align:left;position:sticky;top:0;background:var(--card);z-index:1}
+    .table-wrap{max-height:560px;overflow:auto;border:1px solid var(--border);border-radius:12px}
+    .logic{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:12px}
+    .logic .panel{background:rgba(255,255,255,.03)}
+  </style>
+</head>
+<body>
+<div class="maya-shell">
+  <div class="hero">
+    <div>
+      <div class="mini">Page 1</div>
+      <h1>Maya Vertical Scanner</h1>
+      <p>Watchlist-driven vertical spread scanner for 1-wide or 5-wide bull setups.</p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a class="btn secondary" href="/">Back to dashboard</a>
+      <a class="btn secondary" href="/scanner-builder">Scanner builder</a>
+      <a class="btn secondary" href="/maya/journal">Trade journal</a>
+    </div>
+  </div>
+
+  <div class="panel controls">
+    <div>
+      <label>Watchlist</label>
+      <select id="watchlistSel"><option value="">Loading…</option></select>
+    </div>
+    <div>
+      <label>Mode</label>
+      <select id="modeSel">
+        <option value="core">Core only</option>
+        <option value="composite">Composite</option>
+      </select>
+    </div>
+    <div>
+      <label>Trade type</label>
+      <select id="tradeTypeSel">
+        <option value="any">Any</option>
+        <option value="call">Call spreads</option>
+        <option value="put">Put spreads</option>
+      </select>
+    </div>
+    <div>
+      <label>Bias</label>
+      <select id="biasSel">
+        <option value="any">Any</option>
+        <option value="bullish">Bullish</option>
+        <option value="bearish">Bearish</option>
+      </select>
+    </div>
+    <div>
+      <label>Width</label>
+      <select id="widthSel">
+        <option value="0">Auto</option>
+        <option value="1">1 wide</option>
+        <option value="5">5 wide</option>
+      </select>
+    </div>
+    <div>
+      <label>RSI min</label>
+      <input id="minRsiSel" type="number" min="0" max="100" step="1" placeholder="0" />
+    </div>
+    <div>
+      <label>RSI max</label>
+      <input id="maxRsiSel" type="number" min="0" max="100" step="1" placeholder="100" />
+    </div>
+    <div>
+      <label>Strictness</label>
+      <input id="strictnessSel" type="range" min="0" max="4" step="1" value="2" style="width:160px" />
+      <div id="strictnessLabel" class="mini">Normal</div>
+    </div>
+    <div>
+      <label>Indicators</label>
+      <div style="display:grid;gap:4px;font-size:11px;color:var(--muted)">
+        <label><input id="useEmaSel" type="checkbox" checked /> EMA stack</label>
+        <label><input id="useMacdSel" type="checkbox" checked /> MACD</label>
+        <label><input id="useDmiSel" type="checkbox" checked /> DMI / ADX</label>
+        <label><input id="useRsiSel" type="checkbox" checked /> RSI</label>
+        <label><input id="useSqueezeSel" type="checkbox" /> Squeeze</label>
+      </div>
+    </div>
+    <div>
+      <label>Risk filters</label>
+      <label style="font-size:11px;color:var(--muted)"><input id="avoidEarningsSel" type="checkbox" /> Avoid earnings</label>
+      <div style="margin-top:6px">
+        <label style="font-size:11px;color:var(--muted)">Min Earn DTE</label>
+        <input id="maya-min-earn-days" type="number" min="0" max="365" step="1" placeholder="30" style="width:100%" />
+      </div>
+    </div>
+    <div>
+      <label>Minimum score</label>
+      <input id="scoreSel" type="number" min="0" max="100" step="1" value="60" />
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn" id="scanBtn">Run scanner</button>
+      <button class="btn secondary" type="button" onclick="window.location='/?tab=backtest'">Backtest</button>
+    </div>
+    <div>
+      <label>Save results</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn secondary" id="saveAppendBtn">Append to selected</button>
+        <button class="btn secondary" id="saveNewBtn">Save as new</button>
+      </div>
+    </div>
+    <div style="margin-left:auto">
+      <div class="mini">Logic</div>
+      <div id="scanState" style="font-weight:700">Ready</div>
+    </div>
+  </div>
+
+  <div class="logic">
+    <div class="panel">
+      <div class="mini">Entry logic</div>
+      <div>EMA, MACD, ADX / DMI, RSI, and squeeze-release confirmations are all tied to the controls above. Strictness changes the minimum confirmations and score floor.</div>
+    </div>
+    <div class="panel">
+      <div class="mini">Bias and trade type</div>
+      <div>Bias can filter bullish or bearish setups. Trade type can limit the scan to call spreads, put spreads, or either.</div>
+    </div>
+    <div class="panel">
+      <div class="mini">Risk logic</div>
+      <div>PNR = long strike - (long strike × DTE × ATR) / 2000. Width is still 1 or 5, and the expiry defaults to the nearest 28–45 DTE.</div>
+    </div>
+  </div>
+
+  <div id="summary" class="panel" style="margin-top:14px;display:none"></div>
+  <div id="results" class="grid" style="margin-top:14px"></div>
+  <div id="errors" class="panel" style="margin-top:14px;display:none"></div>
+</div>
+
+<script>
+async function loadWatchlists() {
+  const sel = document.getElementById('watchlistSel');
+  sel.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const r = await fetch('/watchlists/');
+    const d = await r.json();
+    const wls = d.watchlists || [];
+    sel.innerHTML = '<option value="">Default symbols table</option>' +
+      wls.map(w => `<option value="${w.id}" ${w.is_default ? 'selected' : ''}>${w.name} (${w.symbol_count})</option>`).join('');
+  } catch (e) {
+    sel.innerHTML = '<option value="">Unable to load</option>';
+  }
+}
+
+let _mayaLastResults = [];
+
+async function _mayaSaveResults(append) {
+  const sel = document.getElementById('watchlistSel');
+  const st = document.getElementById('scanState');
+  if (!_mayaLastResults.length) { alert('Run a scan first'); return; }
+  const source = 'maya_scanner';
+  if (append) {
+    const wlId = sel?.value || '';
+    if (!wlId) { alert('Select a watchlist to append to'); return; }
+    if (st) st.textContent = 'Saving to watchlist...';
+    const d = await fetch('/watchlists/import_scan_results', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({source, watchlist_id: wlId, symbols: _mayaLastResults.map(r => r.symbol)})
+    }).then(r => r.json());
+    if (d.error) throw new Error(d.error);
+    if (st) st.textContent = `Saved ${d.added||0} symbols to ${d.watchlist_name}`;
+    return;
+  }
+  const name = prompt('Save Maya results as a new watchlist', 'Maya Scanner Watchlist');
+  if (!name) return;
+  if (st) st.textContent = 'Creating watchlist...';
+  const d = await fetch('/watchlists/import_scan_results', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({source, name, symbols: _mayaLastResults.map(r => r.symbol)})
+  }).then(r => r.json());
+  if (d.error) throw new Error(d.error);
+  if (st) st.textContent = `Saved ${d.added||0} symbols to ${d.watchlist_name}`;
+}
+
+function pill(text, cls='g') {
+  return `<span class="badge ${cls}">${text}</span>`;
+}
+
+function fmt(v, d=2) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(d) : String(v);
+}
+
+function card(r) {
+  const sideCls = r.trade_side === 'CALL' ? 'g' : 'y';
+  const scoreCls = r.score >= 80 ? 'g' : r.score >= 65 ? 'y' : 'r';
+  const badgeTxt = `${r.spread_kind} · ${r.width}-wide`;
+  const notes = (r.notes || []).map(x => `<div>• ${x}</div>`).join('');
+  const redCls = (r.red_signal || r.contrarian) ? 'redbox' : '';
+  const redTxt = r.red_signal ? (r.red_reasons || []).join(' · ') : (r.composite?.flags || []).join(' · ') || (r.contrarian ? 'Composite contrarian' : '—');
+  const ivTxt = r.iv_proxy != null ? `${r.iv_proxy}%` : '—';
+  return `
+    <div class="cardx ${redCls}">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <div>
+          <div style="font-size:22px;font-weight:800">${r.symbol}</div>
+          <div class="mini">${r.rationale || ''}</div>
+        </div>
+        <div style="text-align:right">
+          ${pill((r.final_score ?? r.score) + '/100', scoreCls)}
+          <div style="margin-top:6px">${pill(badgeTxt, sideCls)}</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,.03);border:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.45">
+        Final <b style="color:#22c55e">${r.final_score ?? r.score ?? '—'}</b> · Native <b>${r.native_score ?? '—'}</b> · Comp <b>${r.composite_score ?? r.edge_score ?? '—'}</b><br>
+        RS <b>${r.rs_score ?? '—'}</b> · Vol <b>${r.vol_score ?? '—'}</b> · Sector <b>${r.sector_score ?? '—'}</b> · Inst <b>${r.institutional_score ?? '—'}</b> · EM <b>${r.expected_move_score ?? '—'}</b> · Age <b>${r.trend_age ?? r.days_ago ?? '—'}</b>
+      </div>
+      <div class="kv">
+        <div><b>Spot</b><br>${fmt(r.price)}</div>
+        <div><b>Expiry</b><br>${r.expiry || '—'} (${r.dte || '—'} DTE)</div>
+        <div><b>Long / Short</b><br>${fmt(r.long_strike, 0)} / ${fmt(r.short_strike, 0)}</div>
+        <div><b>Entry est.</b><br>${fmt(r.entry_est)} ${r.trade_side === 'CALL' ? 'debit' : 'credit'}</div>
+        <div><b>PNR</b><br>${fmt(r.pnr)} <span class="mini">(${fmt(r.pnr_gap_pct)}% away)</span></div>
+        <div><b>R:R</b><br>${r.rr ?? '—'}</div>
+        <div><b>IV proxy</b><br>${ivTxt} <span class="mini">${r.structure_bias || ''}</span></div>
+        <div><b>RSI / ADX</b><br>${fmt(r.rsi,1)} / ${fmt(r.adx,1)}</div>
+        <div><b>MACD / ATR</b><br>${fmt(r.macd_hist,4)} / ${fmt(r.atr,2)}</div>
+      </div>
+      <div style="margin-top:10px;font-size:12px">${notes}</div>
+      <div style="margin-top:8px;padding:8px;border-radius:8px;background:${r.red_signal ? 'rgba(239,68,68,.08)' : 'rgba(255,255,255,.03)'};border:1px solid ${r.red_signal ? 'rgba(239,68,68,.28)' : 'var(--border)'};font-size:11px;color:${r.red_signal ? '#ef4444' : 'var(--muted)'}">${r.red_signal ? `⚠ Overbought/Oversold: ${redTxt}` : 'Momentum risk normal'}</div>
+      <div class="mini" style="margin-top:10px">EMA9 ${fmt(r.ema9)} · EMA21 ${fmt(r.ema21)} · EMA50 ${fmt(r.ema50)}${r.ema200 ? ' · EMA200 ' + fmt(r.ema200) : ''}</div>
+      <div class="mini" style="margin-top:4px">${r.mode === 'composite' && r.composite ? `Market: ${r.composite.market_bias || '—'} · Sector: ${r.composite.sector_bias || '—'} · OI: ${r.composite.oi_bias || '—'} · S/R: ${r.composite.sr_bias || '—'}` : ''}</div>
+    </div>`;
+}
+
+function _strictnessLabel(v) {
+  return ['Very loose', 'Loose', 'Normal', 'Strict', 'Very strict'][Math.max(0, Math.min(4, Number(v) || 0))];
+}
+
+function syncStrictnessLabel() {
+  const el = document.getElementById('strictnessLabel');
+  const slider = document.getElementById('strictnessSel');
+  if (el && slider) el.textContent = _strictnessLabel(slider.value);
+}
+
+async function runScan() {
+  const watchlist_id = document.getElementById('watchlistSel').value;
+  const mode = document.getElementById('modeSel').value;
+  const width = document.getElementById('widthSel').value;
+  const min_score = document.getElementById('scoreSel').value || 60;
+  const state = document.getElementById('scanState');
+  const results = document.getElementById('results');
+  const summary = document.getElementById('summary');
+  const errors = document.getElementById('errors');
+  state.textContent = 'Scanning…';
+  results.innerHTML = '';
+  summary.style.display = 'none';
+  errors.style.display = 'none';
+  const q = new URLSearchParams();
+  if (watchlist_id) q.set('watchlist_id', watchlist_id);
+  if (mode) q.set('mode', mode);
+  if (width) q.set('width', width);
+  if (min_score) q.set('min_score', min_score);
+  q.set('trade_type', document.getElementById('tradeTypeSel').value || 'any');
+  q.set('bias', document.getElementById('biasSel').value || 'any');
+  q.set('strictness', document.getElementById('strictnessSel').value || '2');
+  q.set('use_rsi', document.getElementById('useRsiSel').checked ? '1' : '0');
+  q.set('use_dmi', document.getElementById('useDmiSel').checked ? '1' : '0');
+  q.set('use_ema', document.getElementById('useEmaSel').checked ? '1' : '0');
+  q.set('use_macd', document.getElementById('useMacdSel').checked ? '1' : '0');
+  q.set('use_squeeze', document.getElementById('useSqueezeSel').checked ? '1' : '0');
+  q.set('avoid_earnings', document.getElementById('avoidEarningsSel').checked ? '1' : '0');
+  const minRsi = document.getElementById('minRsiSel').value;
+  const maxRsi = document.getElementById('maxRsiSel').value;
+  if (minRsi !== '') q.set('min_rsi', minRsi);
+  if (maxRsi !== '') q.set('max_rsi', maxRsi);
+  try {
+    const r = await fetch('/maya/api/scanner?' + q.toString());
+    const d = await r.json();
+    const items = d.results || [];
+    _mayaLastResults = items;
+    state.textContent = `Done · ${items.length} candidate(s) · ${document.getElementById('modeSel').value === 'composite' ? 'Composite' : 'Core'} mode`;
+    summary.style.display = 'block';
+    summary.innerHTML = `
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <div><b>${items.length}</b><div class="mini">Candidates</div></div>
+        <div><b>${(d.symbols || []).length}</b><div class="mini">Symbols scanned</div></div>
+        <div><b>${d.scanned_at || '—'}</b><div class="mini">Scanned at</div></div>
+        <div><b>${(d.logic || {}).pnr || 'PNR formula loaded'}</b><div class="mini">PNR logic</div></div>
+        <div><b>${(d.logic || {}).strictness || _strictnessLabel(document.getElementById('strictnessSel').value)}</b><div class="mini">Strictness</div></div>
+      </div>`;
+    results.innerHTML = items.map(card).join('') || '<div class="panel">No candidates passed the minimum score.</div>';
+    if (d.errors && d.errors.length) {
+      errors.style.display = 'block';
+      errors.innerHTML = '<b>Skipped / errors</b><div class="mini">' + d.errors.map(e => `${e.symbol}: ${e.error}`).join('<br>') + '</div>';
+    }
+  } catch (e) {
+    state.textContent = 'Error';
+    errors.style.display = 'block';
+    errors.innerHTML = '<b>Scan failed</b><div class="mini">' + e.message + '</div>';
+  }
+}
+
+document.getElementById('scanBtn').addEventListener('click', runScan);
+document.getElementById('saveAppendBtn').addEventListener('click', () => _mayaSaveResults(true));
+document.getElementById('saveNewBtn').addEventListener('click', () => _mayaSaveResults(false));
+document.getElementById('strictnessSel').addEventListener('input', syncStrictnessLabel);
+syncStrictnessLabel();
+loadWatchlists();
+</script>
+  <script src="/static/panel_tools.js"></script>
+</body>
+</html>

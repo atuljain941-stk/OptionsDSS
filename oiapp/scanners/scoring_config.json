@@ -1,0 +1,20 @@
+{
+  "weights": {
+    "rs": 0.2,
+    "vol": 0.15,
+    "sector": 0.2,
+    "institutional": 0.25,
+    "expected_move": 0.2
+  },
+  "blend": {
+    "composite_weight": 0.7,
+    "native_weight": 0.3
+  },
+  "trend_exhaustion": {
+    "early_max": 20,
+    "mature_max": 60,
+    "exhausted_max": 120,
+    "reversal_rsi_drop": 3,
+    "continuation_relvol": 1.5
+  }
+}

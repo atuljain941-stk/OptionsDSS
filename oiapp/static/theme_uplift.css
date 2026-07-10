@@ -1,0 +1,92 @@
+/* ============================================================
+   THEME UPLIFT — colorblind-safe blue/orange redesign layer
+   Loaded AFTER style.css. Uses :root:root (specificity 2) so it
+   overrides each page's inline :root token blocks regardless of order.
+   Blue  = bull / long / positive        Orange-red = bear / short / negative
+   Backend, routes and JS are untouched — this only restyles.
+   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root:root {
+  --bg:      #05080c;
+  --surface: #0e141b;
+  --card:    #0b0f14;
+  --border:  #1c2836;
+  --accent:  #5aa2ff;   /* blue — primary / bull / positive */
+  --accent2: #2f6fe0;
+  --green:   #5aa2ff;   /* gains/positive remapped to BLUE (per preference) */
+  --red:     #ff7a45;   /* losses/negative = orange-red */
+  --yellow:  #f5b544;   /* neutral / caution */
+  --text:    #e7edf5;
+  --muted:   #93a1b3;
+  --radius:  12px;
+  --font:    'IBM Plex Sans', 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Common secondary tokens some pages define — nudge toward the palette */
+:root:root {
+  --bg2: #0a0e13; --border2: #1c2836; --muted2: #93a1b3; --text2: #e7edf5;
+  --card-radius: 12px;
+  --hub-bg:#05080c; --hub-card:#0e141b; --hub-card2:#0b0f14; --hub-border:#1c2836;
+  --hub-text:#e7edf5; --hub-muted:#93a1b3; --hub-accent:#5aa2ff; --hub-good:#5aa2ff; --hub-warn:#f5b544; --hub-bad:#ff7a45;
+}
+
+/* Monospace for tabular numbers in tables & badges (crisper reads) */
+table.data-tbl td, table.data-tbl th, .topbar-badge b, .topbar-badge { font-variant-numeric: tabular-nums; }
+
+/* Softer, deeper cards + clearer table header to match redesign */
+.card { box-shadow: 0 1px 0 rgba(255,255,255,.02) inset; }
+table.data-tbl thead th { background: #0a0e13 !important; }
+
+/* Directional color helpers if pages use hardcoded utility classes */
+.pos, .up, .green, .text-green { color: var(--accent) !important; }
+.neg, .down, .red, .text-red { color: var(--red) !important; }
+
+/* Nav pills / active state pick up blue accent automatically via tokens.
+   Slightly stronger active contrast: */
+#nav-favorites .nav-pill.active, #tab-bar .nav-item.active { background: var(--accent); border-color: var(--accent); color: #05080c; font-weight: 700; }
+
+/* ---- Embed mode: when the app is loaded inside a Home-canvas widget
+   (?embed=<tab>), hide the global chrome, the inner widget toolbars, and
+   show only the one view cleanly. ---- */
+body.wz-embed #topbar,
+body.wz-embed #nav-wrap { display: none !important; }
+body.wz-embed #content { padding: 8px 10px !important; }
+body.wz-embed #content .section { margin: 0 !important; }
+
+/* Add Widget / Layouts toolbars belong ONLY on the Home dashboard.
+   Remove them from every individual page (Home uses .pw-toolbar, untouched). */
+.wz-bar,
+#dw-bar { display: none !important; }
+
+/* inside an embedded widget, also strip each panel's own header so it
+   renders edge-to-edge (full pages keep their panel headers) */
+body.wz-embed .wz-w,
+body.wz-embed .dw-widget { border: 0 !important; border-radius: 0 !important; }
+body.wz-embed .wz-head,
+body.wz-embed .dw-head { display: none !important; }
+
+/* ---- Hide-menus toggle (Home 'Hide menus' button) reclaims vertical space ---- */
+body.chrome-collapsed #topbar,
+body.chrome-collapsed #nav-wrap { display: none !important; }
+
+/* ---- Global top-menu toggle (☰ in topbar) hides just the nav rows ---- */
+body.nav-collapsed #nav-wrap { display: none !important; }
+#pw-menu-toggle { background: transparent; border: 1px solid var(--border, #1c2836); color: var(--text, #e7edf5); border-radius: 8px; padding: 4px 9px; font-size: 15px; line-height: 1; cursor: pointer; margin-right: 10px; }
+#pw-menu-toggle:hover { border-color: var(--accent, #5aa2ff); }
+#topbar-brand .brand { cursor: pointer; }
+
+/* ---- Collapsible Home toolbar ---- */
+#tab-home .pw-toolbar.pw-min .pw-tools { display: none !important; }
+
+/* ---- Universal per-panel tools (panel_tools.js) on every page ---- */
+.pt-on { resize: both; }
+.pt-bar { display: flex; align-items: center; gap: 8px; padding: 5px 10px; margin: -1px -1px 8px; background: var(--surface, #0e141b); border-bottom: 1px solid var(--border, #1c2836); border-radius: 8px 8px 0 0; cursor: default; user-select: none; }
+.pt-bar .pt-h { cursor: grab; color: var(--muted, #93a1b3); font-size: 13px; }
+.pt-bar .pt-h:active { cursor: grabbing; }
+.pt-bar .pt-t { font-size: 12px; font-weight: 700; color: var(--text, #e7edf5); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pt-bar .pt-c { margin-left: auto; cursor: pointer; color: var(--muted, #93a1b3); font-size: 13px; line-height: 1; padding: 2px 4px; }
+.pt-bar .pt-c:hover { color: var(--text, #e7edf5); }
+.pt-on > .card-title { display: none !important; }
+.pt-collapsed { max-height: 34px !important; min-height: 0 !important; overflow: hidden !important; resize: none !important; }
+.pt-drag { outline: 2px dashed var(--accent, #5aa2ff); opacity: .6; }

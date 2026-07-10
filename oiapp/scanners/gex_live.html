@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>GEX Live -- {{SYM}}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0b1120;color:#e2e8f0;font-family:system-ui,sans-serif;padding:16px}
+h1{font-size:18px;font-weight:900;margin-bottom:12px;color:#a78bfa}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-bottom:16px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px}
+.card .label{font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+.card .value{font-size:18px;font-weight:800}
+.green{color:#22c55e}.red{color:#ef4444}.purple{color:#a855f7}
+.gold{color:#f59e0b}.orange{color:#fb923c}.teal{color:#2dd4bf}
+.blue{color:#3b82f6}.muted{color:#64748b}
+.string-box{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px;
+  margin-bottom:12px;font-family:monospace;font-size:11px;word-break:break-all;
+  line-height:1.6;color:#94a3b8}
+.btn{display:inline-block;padding:10px 20px;border-radius:6px;border:none;cursor:pointer;
+  font-weight:700;font-size:13px;margin-right:8px;margin-bottom:8px}
+.btn-copy{background:#6366f1;color:#fff}.btn-copy:hover{background:#4f46e5}
+.btn-refresh{background:#1e293b;color:#94a3b8;border:1px solid #334155}
+.status{font-size:11px;color:#64748b;margin-bottom:12px}
+.walls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.wall-chip{padding:4px 8px;border-radius:5px;font-size:11px;font-weight:800;line-height:1.25}
+.wall-put{background:#22c55e22;border:1px solid #22c55e44;color:#22c55e}
+.wall-call{background:#ef444422;border:1px solid #ef444444;color:#ef4444}
+.wall-major{box-shadow:0 0 0 1px #f59e0b88 inset}
+.wall-meta{display:block;font-size:9px;color:#94a3b8;margin-left:0;font-weight:600}
+.wall-panel{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;margin:10px 0 14px}
+.wall-row{display:grid;grid-template-columns:80px 70px 90px 100px 1fr;gap:8px;border-top:1px solid #334155;padding:6px 0;font-size:11px}
+.wall-row:first-child{border-top:none}
+.err{background:#1e1010;border:1px solid #ef444466;border-radius:6px;padding:10px;
+  color:#ef4444;font-size:11px;margin-bottom:10px;white-space:pre-wrap;display:none}
+.instructions{background:#1e293b;border:1px solid #334155;border-radius:8px;
+  padding:12px;font-size:11px;color:#94a3b8;line-height:1.7}
+.instructions b{color:#e2e8f0}
+.instructions code{background:#0f172a;padding:1px 5px;border-radius:3px;
+  font-family:monospace;color:#a78bfa}
+#countdown{color:#f59e0b;font-weight:700}
+</style>
+</head>
+<body>
+<h1>GEX Live Dashboard -- {{SYM}}</h1>
+<div class="status">
+  Last updated: <span id="updated">loading...</span> &nbsp;|&nbsp;
+  Auto-refresh in <span id="countdown">60</span>s &nbsp;|&nbsp;
+  <a href="{{REQ_PATH}}?symbol={{SYM}}" style="color:#6366f1">Reload</a>
+</div>
+<div id="err" class="err"></div>
+
+<div class="grid" id="cards">
+  <div class="card"><div class="label">Status</div>
+    <div class="value muted" style="font-size:13px">Fetching...</div></div>
+</div>
+
+<div style="margin-bottom:8px;font-size:12px;color:#94a3b8;font-weight:700">OI Walls</div>
+<div class="walls" id="walls"></div>
+<div id="wall-detail" class="wall-panel" style="display:none"></div>
+
+<div style="margin-bottom:8px;font-size:12px;color:#94a3b8;font-weight:700">
+  Pine String -- paste into TradingView indicator</div>
+<div class="string-box" id="pine-string">Loading...</div>
+
+<button class="btn btn-copy" onclick="copyStr()">Copy Pine String</button>
+<button class="btn btn-refresh" onclick="go()">Refresh Now</button>
+
+<br/><br/>
+<div class="instructions">
+  <b>How to use:</b><br/>
+  1. Click <b>Copy Pine String</b> above<br/>
+  2. In TradingView: GEX Levels indicator -&gt; Settings (gear icon)<br/>
+  3. Paste into <code>Paste GEX string (auto-fill)</code> -&gt; OK<br/>
+  4. All lines draw instantly. Repeat each morning.<br/><br/>
+  <b>Other symbols:</b> {{SYM_LINKS}}<br/><br/>
+  <b>API:</b> <code>{{API_BASE}}/pine?symbol={{SYM}}&amp;fmt=json</code>
+</div>
+
+<script>
+var SYM = "{{SYM}}";
+var API = "{{API_BASE}}/pine";
+
+function showErr(m) {
+  var e = document.getElementById("err");
+  e.textContent = m; e.style.display = "block";
+}
+function clearErr() { document.getElementById("err").style.display = "none"; }
+
+function fmtGex(v) {
+  var a = Math.abs(v), s = v >= 0 ? "+" : "-";
+  if (a >= 1e9) return s + (a/1e9).toFixed(2) + "B";
+  if (a >= 1e6) return s + (a/1e6).toFixed(2) + "M";
+  if (a >= 1e3) return s + (a/1e3).toFixed(1) + "K";
+  return v.toFixed(2);
+}
+
+function spotSourceLabel(src) {
+  var m = {
+    "premarket": "Pre-market",
+    "regular": "Regular",
+    "after-hours": "After-hours",
+    "fast_info": "Quote",
+    "previous_close": "Prev close",
+    "daily_close": "Daily close"
+  };
+  return m[src] || src || "Unknown";
+}
+
+function spotTimeLabel(iso) {
+  if (!iso) return "";
+  try {
+    var d = new Date(iso);
+    return d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  } catch(ex) {
+    return "";
+  }
+}
+
+async function go() {
+  clearErr();
+  var url = API + "?symbol=" + SYM + "&fmt=json";
+  try {
+    var r = await fetch(url);
+    if (!r.ok) {
+      var t = await r.text();
+      showErr("HTTP " + r.status + " from:\n" + url + "\n\n" + t.slice(0, 500));
+      document.getElementById("updated").textContent = "HTTP " + r.status;
+      return;
+    }
+    var ct = r.headers.get("content-type") || "";
+    if (!ct.includes("json")) {
+      var t2 = await r.text();
+      showErr("Expected JSON but got: " + ct + "\nURL: " + url + "\n\n" + t2.slice(0, 500));
+      document.getElementById("updated").textContent = "Wrong content-type";
+      return;
+    }
+    var d = await r.json();
+    if (d.error) {
+      showErr("Server error: " + d.error + "\n" + (d.trace || ""));
+      document.getElementById("updated").textContent = "Server error";
+      return;
+    }
+    render(d);
+    resetSecs();
+  } catch(ex) {
+    showErr("Fetch failed: " + ex.message + "\nURL: " + url);
+    document.getElementById("updated").textContent = "Fetch error";
+  }
+}
+
+function fmtSigned(v) {
+  if (v === null || v === undefined || isNaN(Number(v))) return "—";
+  var n = Number(v); return (n >= 0 ? "+" : "") + Math.round(n).toLocaleString();
+}
+function wallScoreClass(score) { return Number(score||0) >= 75 ? "wall-major" : ""; }
+function renderWallDetails(d) {
+  var box = document.getElementById("wall-detail");
+  var ws = d.wall_strength || d.significant_walls || {};
+  var puts = ws.top_put_walls || [], calls = ws.top_call_walls || [];
+  var all = puts.slice(0,3).concat(calls.slice(0,3));
+  if (!all.length) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  var vix = d.vix_overlay && d.vix_overlay.vix ? (" · VIX " + d.vix_overlay.vix) : "";
+  box.innerHTML = '<div style="font-size:11px;font-weight:800;color:#f59e0b;margin-bottom:4px">Significant Walls · score ' + (ws.score || 0) + '/100' + vix + '</div>' +
+    '<div style="font-size:10px;color:#94a3b8;margin-bottom:6px">Score = current OI + fresh ΔOI + proximity/Z + GEX contribution. VIX is a reliability overlay.</div>' +
+    all.map(function(w){
+      var c = w.type === "put" ? "#22c55e" : "#ef4444";
+      var zText = (w.zscore !== undefined && w.zscore !== null) ? ('z ' + (w.zscore >= 0 ? '+' : '') + Number(w.zscore).toFixed(2)) : ('zOI ' + (w.z_oi ?? '—') + ' · zΔ ' + (w.z_delta ?? '—'));
+      var dist = w.pct_from_spot !== undefined ? w.pct_from_spot : w.distance_pct;
+      return '<div class="wall-row">' +
+        '<div style="font-weight:800;color:' + c + '">' + (w.type||'').toUpperCase() + ' $' + w.strike + '</div>' +
+        '<div>Score <b>' + (w.score || 0) + '</b></div>' +
+        '<div>OI <b>' + (w.oi || 0).toLocaleString() + '</b></div>' +
+        '<div>ΔOI <b style="color:' + ((w.oi_change||0)>=0?'#22c55e':'#ef4444') + '">' + fmtSigned(w.oi_change) + '</b></div>' +
+        '<div style="color:#94a3b8">' + (w.label || '') + ' · ' + zText + ' · ' + (dist ?? '—') + '% from spot</div>' +
+      '</div>';
+    }).join('');
+}
+
+function render(d) {
+  var src = spotSourceLabel(d.spot_source);
+  var st = spotTimeLabel(d.spot_time);
+  var chg = (typeof d.spot_change_pct === "number")
+    ? "  |  chg " + (d.spot_change_pct >= 0 ? "+" : "") + d.spot_change_pct.toFixed(2) + "%"
+    : "";
+  document.getElementById("updated").textContent =
+    (d.updated || "?") + "  |  expiry " + (d.expiry || "?") + "  |  " +
+    (d.dte || "?") + "d  |  price " + src + (st ? " " + st : "") + chg;
+
+  var gC = (d.total_gex || 0) >= 0 ? "green" : "red";
+  var sC = (d.score||0)>3 ? "green" : (d.score||0)>0 ? "teal" :
+           (d.score||0)<-3 ? "red" : (d.score||0)<0 ? "orange" : "muted";
+  var pC = (d.pcr||1)>1.3 ? "red" : (d.pcr||1)<0.7 ? "green" : "";
+
+  var spotExtra = spotSourceLabel(d.spot_source) + (st ? " " + st : "");
+  var rows = [
+    ["Spot",       "$" + (d.spot || "?"),                                    "blue"],
+    ["Price Source", spotExtra,                                               "muted"],
+    ["Gamma Flip", (d.gamma_flip||0) > 0 ? "$"+d.gamma_flip : "N/A",        "purple"],
+    ["GEX Pin",    (d.pin_strike||0) > 0 ? "$"+d.pin_strike : "N/A",        "gold"],
+    ["Max Pain",   (d.max_pain||0)   > 0 ? "$"+d.max_pain   : "N/A",        "orange"],
+    ["1s High",    (d.sigma_high||0) > 0 ? "$"+d.sigma_high : "N/A",        "teal"],
+    ["1s Low",     (d.sigma_low||0)  > 0 ? "$"+d.sigma_low  : "N/A",        "teal"],
+    ["Total GEX",  fmtGex(d.total_gex || 0),                                gC],
+    ["GEX Ratio",  (d.gex_ratio || 0).toFixed(3),                           gC],
+    ["PCR",        (d.pcr || 0).toFixed(2),                                 pC],
+    ["IV ATM",     (d.iv_atm || 0).toFixed(1) + "%",                        "purple"],
+    ["Score",      ((d.score||0) >= 0 ? "+" : "") + (d.score||0) + " / 10", sC],
+    ["Confidence", (d.confidence || 0) + "%",                               "muted"],
+    ["Wall Quality", ((d.wall_strength||{}).score || 0) + "/100",            ((d.wall_strength||{}).score||0) >= 75 ? "gold" : ((d.wall_strength||{}).score||0) >= 55 ? "green" : "muted"],
+    ["VIX Overlay", (d.vix_overlay && d.vix_overlay.vix) ? d.vix_overlay.vix + ((d.vix_overlay.reliability_score)?" · rel "+d.vix_overlay.reliability_score+"%":"") : "N/A", "orange"],
+  ];
+
+  document.getElementById("cards").innerHTML = rows.map(function(r) {
+    return '<div class="card"><div class="label">' + r[0] +
+           '</div><div class="value ' + (r[2]||"") + '">' + r[1] + '</div></div>';
+  }).join("");
+
+  var ws = d.wall_strength || d.significant_walls || {};
+  var callW = (ws.top_call_walls || []).slice(0,3);
+  var putW = (ws.top_put_walls || []).slice(0,3);
+  if (!callW.length && !putW.length) {
+    callW = (d.call_walls || []).filter(function(v){return v > 0;}).map(function(v){return {strike:v,score:null,label:"Call wall"};});
+    putW = (d.put_walls || []).filter(function(v){return v > 0;}).map(function(v){return {strike:v,score:null,label:"Put wall"};});
+  }
+  function chipMeta(w) {
+    if (w.score == null) return '';
+    var dlt = (typeof w.oi_change === 'number') ? ' · ΔOI ' + (w.oi_change >= 0 ? '+' : '') + w.oi_change.toLocaleString() : '';
+    var z = (typeof w.zscore === 'number') ? ' · z ' + (w.zscore >= 0 ? '+' : '') + w.zscore.toFixed(2) : '';
+    return '<span class="wall-meta">' + Math.round(w.score) + '/100' + dlt + z + '</span>';
+  }
+  document.getElementById("walls").innerHTML =
+    callW.map(function(w){
+      return '<span class="wall-chip wall-call ' + wallScoreClass(w.score) + '" title="' + (w.note || w.label || '') + '">Call $' + w.strike + chipMeta(w) + '</span>';}).join("") +
+    putW.map(function(w){
+      return '<span class="wall-chip wall-put ' + wallScoreClass(w.score) + '" title="' + (w.note || w.label || '') + '">Put $' + w.strike + chipMeta(w) + '</span>';}).join("");
+  renderWallDetails(d);
+
+  document.getElementById("pine-string").textContent = d.csv || "no data";
+}
+
+function copyStr() {
+  var s = document.getElementById("pine-string").textContent;
+  navigator.clipboard.writeText(s).then(function() {
+    var b = document.querySelector(".btn-copy");
+    b.textContent = "Copied!";
+    setTimeout(function() { b.textContent = "Copy Pine String"; }, 2000);
+  });
+}
+
+var secs = 60;
+function resetSecs() { secs = 60; }
+setInterval(function() {
+  secs--;
+  document.getElementById("countdown").textContent = secs;
+  if (secs <= 0) { go(); }
+}, 1000);
+
+go();
+</script>
+</body>
+</html>

@@ -1,0 +1,226 @@
+{
+  "passed": 37,
+  "total": 44,
+  "results": [
+    {
+      "name": "route exists: /",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /scanner",
+      "ok": false,
+      "detail": "missing (have 201 routes total)"
+    },
+    {
+      "name": "route exists: /journal",
+      "ok": false,
+      "detail": "missing (have 201 routes total)"
+    },
+    {
+      "name": "route exists: /scanner-builder/dashboard",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /api/scanner",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /api/journal",
+      "ok": false,
+      "detail": "missing (have 201 routes total)"
+    },
+    {
+      "name": "route exists: /api/fetch_status",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /api/bootstrap",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /api/options",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /api/oi_intelligence",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /api/expirations",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /api/iv_rank/<symbol>",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /journal/trades",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /journal/trade-alerts",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /journal/trade/<int:tid>/live",
+      "ok": true,
+      "detail": "present"
+    },
+    {
+      "name": "route exists: /journal/trade/<int:tid>/live_pnl",
+      "ok": false,
+      "detail": "missing (have 201 routes total)"
+    },
+    {
+      "name": "GET /",
+      "ok": true,
+      "detail": "status=200 content-type=text/html; charset=utf-8 body=<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\"/>\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>\n  <title>OI Dashboard</title>\n  <link rel=\"stylesheet\" href=\"/static/style.css\"/>\n  <script src=\"https:\u2026"
+    },
+    {
+      "name": "GET /scanner",
+      "ok": false,
+      "detail": "status=404 content-type=text/html; charset=utf-8 body=<!doctype html>\n<html lang=en>\n<title>404 Not Found</title>\n<h1>Not Found</h1>\n<p>The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.</p>"
+    },
+    {
+      "name": "GET /journal",
+      "ok": false,
+      "detail": "status=404 content-type=text/html; charset=utf-8 body=<!doctype html>\n<html lang=en>\n<title>404 Not Found</title>\n<h1>Not Found</h1>\n<p>The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.</p>"
+    },
+    {
+      "name": "GET /scanner-builder/dashboard",
+      "ok": true,
+      "detail": "status=200 content-type=text/html; charset=utf-8 body=<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n  <title>Scanner Dashboard</title>\n  <link rel=\"stylesheet\" href=\"/static/style.css\" />\n  <style>\n  \u2026"
+    },
+    {
+      "name": "GET /api/scanner",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"results\":[{\"delta_oi\":0,\"delta_vol\":0,\"signal\":\"Neutral\",\"symbol\":\"AAPL\"},{\"delta_oi\":0,\"delta_vol\":0,\"signal\":\"Neutral\",\"symbol\":\"ABBV\"},{\"delta_oi\":0,\"delta_vol\":0,\"signal\":\"Neutral\",\"symbol\":\"AMD\"},{\"delta_oi\":0,\"delta_vol\":0,\"signal\":\u2026"
+    },
+    {
+      "name": "GET /api/journal",
+      "ok": false,
+      "detail": "status=404 content-type=text/html; charset=utf-8 body=<!doctype html>\n<html lang=en>\n<title>404 Not Found</title>\n<h1>Not Found</h1>\n<p>The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.</p>"
+    },
+    {
+      "name": "GET /journal/trades",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body=[{\"actual_move\":null,\"analytics_json\":null,\"analytics_rec\":null,\"call_buy\":null,\"call_credit\":null,\"call_sell\":null,\"close_reason\":null,\"conviction_label\":null,\"conviction_score\":null,\"current_health_score\":76,\"current_oi\":null,\"current_pnl\u2026"
+    },
+    {
+      "name": "GET /journal/trade-alerts",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"alerts\":[{\"direction\":\"bull\",\"entry_date\":\"2026-06-11\",\"expiry\":\"2026-07-10\",\"id\":16,\"pnr\":94.39,\"pnr_alert_enabled\":1,\"pnr_alert_last_breached\":0,\"pnr_alert_last_sent_at\":null,\"pnr_breached\":false,\"pnr_status\":\"Lower PNR $94.39 safe\",\"pn\u2026"
+    },
+    {
+      "name": "GET /journal/portfolio_stats",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"bear_reward\":25000.0,\"bear_risk\":25000.0,\"bear_trades\":1,\"bull_reward\":25360.0,\"bull_risk\":25360.0,\"bull_trades\":5,\"capital_deployed_pct\":168.61,\"closed_count\":6,\"current_pnl\":1367.0,\"ic_reward\":222.0,\"ic_risk\":222.0,\"ic_trades\":1,\"itm_co\u2026"
+    },
+    {
+      "name": "GET /journal/analytics",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"avg_loss\":-200.0,\"avg_win\":240.67,\"by_dte_bucket\":{\"0-7\":{\"losses\":1,\"wins\":2},\"22-45\":{\"losses\":2,\"wins\":1},\"46+\":{\"losses\":0,\"wins\":0},\"8-21\":{\"losses\":0,\"wins\":0}},\"by_strategy\":{\"CS\":{\"avg_pnl\":111.0,\"count\":2,\"total_pnl\":222.0,\"win_r\u2026"
+    },
+    {
+      "name": "GET /journal/portfolio_alignment",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"aligned\":true,\"alignment_issues\":[],\"bear_pct\":49,\"bear_risk\":25000.0,\"bull_pct\":50,\"bull_risk\":25360.0,\"ic_pct\":0,\"ic_risk\":222.0,\"market_bias\":\"BULLISH\",\"open_count\":7,\"portfolio_bias\":\"NEUTRAL/BALANCED\",\"spy_rsi_diff\":-8.4,\"spy_trend\":\u2026"
+    },
+    {
+      "name": "GET /api/fetch_status",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"fetch_oi\":true,\"fetched\":0,\"last_msg\":\"\",\"last_run\":null,\"post_earnings_completed_at\":\"2026-06-12 09:27:00\",\"pre_earnings_completed_at\":\"2026-06-12 09:26:45\",\"regime_scan_completed_at\":\"2026-06-12 07:00:44\",\"running\":false,\"total\":0,\"watc\u2026"
+    },
+    {
+      "name": "GET /api/bootstrap",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"expirations\":[\"2026-06-12\",\"2026-06-15\",\"2026-06-16\",\"2026-06-17\",\"2026-06-18\",\"2026-06-22\",\"2026-06-26\",\"2026-06-30\"],\"symbol\":\"SPY\",\"symbols\":[\"AAPL\",\"ABBV\",\"AMD\",\"AMZN\",\"APP\",\"ARM\",\"AVGO\",\"CAT\",\"COIN\",\"COST\",\"CVX\",\"ETN\",\"FCX\",\"GOOGL\",\"\u2026"
+    },
+    {
+      "name": "GET /api/futures/config",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"barchart_key_hint\":\"\",\"barchart_key_set\":false,\"instructions\":\"Get free key at https://www.barchart.com/ondemand/free-api-key\",\"supported_symbols\":[\"SPY\",\"QQQ\",\"IWM\",\"GLD\",\"USO\",\"TLT\"]}"
+    },
+    {
+      "name": "GET /scanner-builder/dashboard/api/watchlists",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"watchlists\":[{\"color\":\"#22c55e\",\"created_at\":\"2026-06-04 12:28:39\",\"description\":\"\",\"fetch_options_oi\":1,\"id\":1,\"is_default\":1,\"last_fetch_at\":\"2026-06-12 16:21\",\"last_fetch_count\":46,\"last_fetch_mode\":\"Options OI\",\"name\":\"Options Watchli\u2026"
+    },
+    {
+      "name": "GET /scanner-builder/dashboard/api/dashboards",
+      "ok": true,
+      "detail": "status=200 content-type=application/json body={\"dashboards\":[{\"created_at\":\"2026-06-07 13:54:06\",\"id\":2,\"last_opened_at\":\"2026-06-12 20:17:52\",\"name\":\"TestBoard\",\"settings\":{\"auto_refresh\":false,\"default_watchlist_id\":\"1\",\"edit_layout\":false,\"name\":\"TestBoard\",\"timeframe\":\"1d\"},\"tiles\"\u2026"
+    },
+    {
+      "name": "GET /api/expirations?symbol=SPY",
+      "ok": true,
+      "detail": "status=200 body={\"expirations\":[\"2026-06-12\",\"2026-06-15\",\"2026-06-16\",\"2026-06-17\",\"2026-06-18\",\"2026-06-22\",\"2026-06-26\",\"2026-06-30\",\"2026-07-02\",\"2026-07-10\",\"2026-07-17\",\"2026-07-24\",\"2026-07-31\",\"2026-08-21\",\"2026-08-31\",\"2026-09-18\",\"2026-09-30\",\"20\u2026"
+    },
+    {
+      "name": "GET /api/options?symbol=SPY&expiration=2026-06-12",
+      "ok": true,
+      "detail": "status=200 body={\"calls\":[{\"oi\":3334,\"price\":9.89,\"strike\":731.0,\"volume\":5579},{\"oi\":1924,\"price\":8.98,\"strike\":732.0,\"volume\":5595},{\"oi\":3197,\"price\":7.85,\"strike\":733.0,\"volume\":9948},{\"oi\":4672,\"price\":6.93,\"strike\":734.0,\"volume\":10324},{\"oi\":8314,\"p\u2026"
+    },
+    {
+      "name": "GET /api/oi_intelligence?symbol=SPY&expiration=2026-06-12",
+      "ok": true,
+      "detail": "status=200 body={\"bear_pts\":1,\"bull_pts\":248,\"confidence\":\"HIGH\",\"days_to_expiry\":0,\"direction\":\"BULLISH\",\"direction_color\":\"#22c55e\",\"evidence\":[\"$726.0C added +418 \\u00b7 price up \\u2192 call buying (bullish)\",\"$727.0C added +505 \\u00b7 price up \\u2192 c\u2026"
+    },
+    {
+      "name": "GET /api/oi_change?symbol=SPY&expiration=2026-06-12",
+      "ok": true,
+      "detail": "status=200 body={\"call_change\":[{\"latest_oi\":63409,\"oi_change\":46312,\"oi_change_pct\":270.88,\"prev_oi\":17097,\"strike\":750.0,\"type\":\"call\",\"vol_change\":199786},{\"latest_oi\":56128,\"oi_change\":30351,\"oi_change_pct\":117.74,\"prev_oi\":25777,\"strike\":755.0,\"type\":\u2026"
+    },
+    {
+      "name": "GET /api/pcr_snapshot?symbol=SPY&expiration=2026-06-12",
+      "ok": true,
+      "detail": "status=200 body={\"pcr_data\":[{\"calls\":600027,\"expiration\":\"2026-06-12\",\"pcr\":0.95,\"puts\":570383},{\"calls\":153298,\"expiration\":\"2026-06-15\",\"pcr\":1.02,\"puts\":155711},{\"calls\":85025,\"expiration\":\"2026-06-16\",\"pcr\":1.24,\"puts\":105744},{\"calls\":65718,\"expirati\u2026"
+    },
+    {
+      "name": "GET /api/iv_rank/SPY",
+      "ok": true,
+      "detail": "status=200 body={\"advice\":\"IV is moderate. Credit spreads still viable. Consider defined-risk structures over naked premium.\",\"current_hv\":14.9,\"data_days\":230,\"hv_10\":18.09,\"hv_21\":14.67,\"hv_30d_avg\":10.69,\"hv_5\":17.0,\"hv_63\":15.02,\"hv_high\":19.87,\"hv_low\u2026"
+    },
+    {
+      "name": "GET /journal/trade/1/live",
+      "ok": true,
+      "detail": "status=200 body={\"action\":\"CLOSE / EXPIRE\",\"action_reason\":\"Expiry today \\u2014 close ITM spreads, let OTM expire\",\"atr\":7.32,\"current_mark\":0.04,\"dte\":0,\"max_loss\":250.0,\"max_profit\":250.0,\"outlook\":\"\\u2713 CLOSED AT LOSS\",\"pct_of_max_profit\":101.6,\"pnr\":\u2026"
+    },
+    {
+      "name": "GET /journal/trade/1/live_pnl",
+      "ok": true,
+      "detail": "status=404 body=<!doctype html>\n<html lang=en>\n<title>404 Not Found</title>\n<h1>Not Found</h1>\n<p>The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.</p>"
+    },
+    {
+      "name": "GET /journal/trade/1/pnr_alert/test",
+      "ok": true,
+      "detail": "status=200 body={\"direction\":\"bull\",\"message\":\"SAFE\",\"ok\":true,\"pnr\":null,\"pnr_breached\":false,\"pnr_status\":\"SAFE\",\"pnr_upper\":null,\"spot\":325.44,\"status\":\"safe\",\"symbol\":\"AXP\",\"telegram\":{\"configured\":true,\"error\":\"not breached\",\"sent\":0},\"trade_id\":1,\"tr\u2026"
+    },
+    {
+      "name": "POST /api/fetch_now",
+      "ok": true,
+      "detail": "status=200 body={\"started\":true,\"watchlist_id\":null}"
+    },
+    {
+      "name": "POST /api/fetch_stop",
+      "ok": true,
+      "detail": "status=200 body={\"stopped\":true}"
+    },
+    {
+      "name": "POST /api/run_scheduler",
+      "ok": true,
+      "detail": "status=200 body={\"message\":\"Scheduler started in background\",\"ok\":true}"
+    }
+  ]
+}

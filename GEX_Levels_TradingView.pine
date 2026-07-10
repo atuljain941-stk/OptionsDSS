@@ -1,0 +1,495 @@
+// ============================================================
+//  GEX Levels & Gamma Value Table  —  OI App Companion
+//  Pine Script v5
+//
+//  Plots all key levels from your GEX / Daily Plan engine:
+//    • Gamma Flip (Zero-Gamma Line)     — purple
+//    • GEX Pin Strike (Max |GEX|)       — gold
+//    • Max Pain (Expiry Attractor)      — orange
+//    • 1σ High / Low (Daily Range)      — teal dashed
+//    • Put Walls × 3  (OI Support)      — green
+//    • Call Walls × 3 (OI Resistance)   — red
+//    • Spot Reference                   — white dotted
+//
+//  Info table (top-right): GEX regime, total GEX, ratio,
+//    all levels, PCR, IV, DTE, bias, confidence.
+//
+//  ──────────────────────────────────────────────────────────
+//  HOW TO USE
+//  1. Open TradingView on your symbol (SPY, QQQ, etc.)
+//  2. Open Pine Editor → paste this script → Add to chart
+//  3. In the indicator inputs enter the values from your
+//     OI App → GEX Plan tab after clicking "Generate Plan"
+//  4. Levels persist as horizontal lines across all bars
+//
+//  The script accepts manual inputs — no live API needed.
+//  Run the OI App, copy the numbers, paste them here.
+// ============================================================
+
+//@version=5
+indicator(
+    title           = "GEX Levels & Gamma Value Table",
+    shorttitle      = "GEX Levels",
+    overlay         = true,
+    max_lines_count = 500,
+    max_labels_count= 200
+)
+
+// ── Separator helper ──────────────────────────────────────────────────────────
+sep(t) => "──── " + t + " ────"
+
+// ═══════════════════════════════════════════════════════════════════
+//  GROUP 1 — Core GEX Levels
+// ═══════════════════════════════════════════════════════════════════
+var grp1 = sep("Core GEX Levels")
+
+gamma_flip   = input.float(0.0,  "Gamma Flip (Zero-Gamma)",  group=grp1, tooltip="Price where net dealer GEX = 0. Above = positive gamma (mean reversion). Below = negative gamma (trend amplification).")
+pin_strike   = input.float(0.0,  "GEX Pin Strike",           group=grp1, tooltip="Strike with highest absolute GEX. Market magnetically attracted here into expiry.")
+max_pain     = input.float(0.0,  "Max Pain",                 group=grp1, tooltip="Strike where aggregate option payout is minimised. Expiry settlement attractor.")
+
+// ═══════════════════════════════════════════════════════════════════
+//  GROUP 2 — OI Walls (Put = Support, Call = Resistance)
+// ═══════════════════════════════════════════════════════════════════
+var grp2 = sep("Put Walls (Support) — Green")
+
+put_wall_1   = input.float(0.0,  "Put Wall 1 (Strongest)",   group=grp2)
+put_wall_2   = input.float(0.0,  "Put Wall 2",               group=grp2)
+put_wall_3   = input.float(0.0,  "Put Wall 3",               group=grp2)
+put_wall_1_score = input.int(0, "Put Wall 1 Score", group=grp2, minval=0, maxval=100, tooltip="Wall significance score from OI + OI change + proximity + GEX.")
+put_wall_2_score = input.int(0, "Put Wall 2 Score", group=grp2, minval=0, maxval=100)
+put_wall_3_score = input.int(0, "Put Wall 3 Score", group=grp2, minval=0, maxval=100)
+
+var grp3 = sep("Call Walls (Resistance) — Red")
+
+call_wall_1  = input.float(0.0,  "Call Wall 1 (Strongest)",  group=grp3)
+call_wall_2  = input.float(0.0,  "Call Wall 2",              group=grp3)
+call_wall_3  = input.float(0.0,  "Call Wall 3",              group=grp3)
+call_wall_1_score = input.int(0, "Call Wall 1 Score", group=grp3, minval=0, maxval=100, tooltip="Wall significance score from OI + OI change + proximity + GEX.")
+call_wall_2_score = input.int(0, "Call Wall 2 Score", group=grp3, minval=0, maxval=100)
+call_wall_3_score = input.int(0, "Call Wall 3 Score", group=grp3, minval=0, maxval=100)
+
+// ═══════════════════════════════════════════════════════════════════
+//  GROUP 4 — 1σ Daily Range (from your sigma_range output)
+// ═══════════════════════════════════════════════════════════════════
+var grp4 = sep("1σ Daily Range")
+
+sigma_high   = input.float(0.0,  "1σ High",                  group=grp4, tooltip="Spot + 1 standard deviation daily move (from IV/ATR). 68% of days close within this range.")
+sigma_low    = input.float(0.0,  "1σ Low",                   group=grp4, tooltip="Spot - 1 standard deviation daily move.")
+
+// ═══════════════════════════════════════════════════════════════════
+//  GROUP 5 — GEX Regime & Table Data
+// ═══════════════════════════════════════════════════════════════════
+var grp5 = sep("GEX Regime & Table Data")
+
+total_gex    = input.float(0.0,   "Total GEX ($/1% move)",   group=grp5, tooltip="Sum of all signed dealer gamma exposure across strikes. Positive = dealers cushion moves. Negative = dealers amplify moves.")
+gross_gex    = input.float(0.0,   "Gross GEX ($/1% move)",   group=grp5, tooltip="Sum of absolute values. Represents total gamma risk in the market.")
+gex_ratio    = input.float(0.0,   "GEX Ratio (-1 to +1)",    group=grp5, tooltip="Total/Gross. +1 = all positive, -1 = all negative, 0 = perfectly balanced.")
+pcr          = input.float(1.0,   "Put/Call Ratio",           group=grp5)
+iv_atm       = input.float(0.0,   "IV ATM (%)",               group=grp5)
+dte_days     = input.int(0,       "DTE (days to expiry)",     group=grp5)
+spot_ref     = input.float(0.0,   "Spot at Snapshot Time",    group=grp5)
+bias_label   = input.string("NEUTRAL", "Bias Label",          group=grp5, options=["BULLISH","MILD BULL","NEUTRAL","MILD BEAR","BEARISH"])
+score_val    = input.int(0,       "5-Factor Score (-10→+10)", group=grp5, minval=-10, maxval=10)
+confidence   = input.int(50,      "Confidence %",             group=grp5, minval=0, maxval=100)
+
+// ═══════════════════════════════════════════════════════════════════
+//  GROUP 6 — Style & Visibility
+// ═══════════════════════════════════════════════════════════════════
+var grp6 = sep("Style")
+
+show_labels     = input.bool(true,  "Show price labels on lines", group=grp6)
+show_table      = input.bool(true,  "Show info table",            group=grp6)
+show_bg         = input.bool(true,  "Show gamma regime background", group=grp6)
+label_offset    = input.int(5,      "Label offset (bars right)",  group=grp6, minval=1, maxval=50)
+line_width_main = input.int(2,      "Main line width (flip/pin/pain)", group=grp6, minval=1, maxval=4)
+line_width_wall = input.int(1,      "Wall line width",            group=grp6, minval=1, maxval=3)
+table_pos       = input.string("Top Right", "Table position", group=grp6,
+     options=["Top Right","Top Left","Bottom Right","Bottom Left","Top Center","Bottom Center"])
+
+// ── Colour palette (matches your OI App dark theme) ──────────────────────────
+COL_FLIP     = color.new(#a855f7, 0)    // purple   — gamma flip
+COL_FLIP_BG  = color.new(#a855f7, 88)
+COL_PIN      = color.new(#f59e0b, 0)    // gold     — pin strike
+COL_PAIN     = color.new(#fb923c, 0)    // orange   — max pain
+COL_SIGMA    = color.new(#2dd4bf, 0)    // teal     — 1σ range
+COL_PWALL_1  = color.new(#22c55e, 0)    // bright green
+COL_PWALL_2  = color.new(#22c55e, 35)
+COL_PWALL_3  = color.new(#22c55e, 60)
+COL_CWALL_1  = color.new(#ef4444, 0)    // bright red
+COL_CWALL_2  = color.new(#ef4444, 35)
+COL_CWALL_3  = color.new(#ef4444, 60)
+COL_SPOT     = color.new(#94a3b8, 50)   // grey     — spot ref
+COL_POS_BG   = color.new(#22c55e, 96)   // very faint green bg (positive gamma)
+COL_NEG_BG   = color.new(#ef4444, 96)   // very faint red bg (negative gamma)
+COL_TABLE_BG = color.new(#0f172a, 90)   // dark bg for table
+COL_TABLE_HDR= color.new(#1e293b, 80)
+COL_TEXT     = color.new(#e2e8f0, 0)
+COL_MUTED    = color.new(#64748b, 0)
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+is_live(v) => v != 0.0
+
+// Draw a persistent horizontal line and optional label
+// Returns line for possible manipulation
+draw_level(price, col, lw, label_text, lbl_style, extend_right) =>
+    if is_live(price) and barstate.islast
+        l = line.new(bar_index - 300, price, bar_index + (extend_right ? 50 : 5),
+                     price, color=col, width=lw, extend=extend.none)
+        if show_labels
+            lbl_x = bar_index + label_offset
+            label.new(lbl_x, price, label_text,
+                      style=lbl_style,
+                      color=col,
+                      textcolor=color.white,
+                      size=size.small)
+    price  // return price for table use
+
+// ── Background tint for gamma regime ─────────────────────────────────────────
+if show_bg and barstate.islast
+    bg_col = total_gex < 0 ? COL_NEG_BG : COL_POS_BG
+    bgcolor(bg_col, title="Gamma Regime Background")
+
+// ═══════════════════════════════════════════════════════════════════
+//  DRAW ALL LEVELS (runs only on the last bar for efficiency)
+// ═══════════════════════════════════════════════════════════════════
+if barstate.islast
+
+    // ── Gamma Flip ──────────────────────────────────────────────────
+    if is_live(gamma_flip)
+        line.new(bar_index - 300, gamma_flip, bar_index + 50,
+                 gamma_flip, color=COL_FLIP, width=line_width_main,
+                 style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + label_offset, gamma_flip,
+                      "⚡ Gamma Flip  $" + str.tostring(gamma_flip, "#.##"),
+                      style=label.style_label_left,
+                      color=COL_FLIP, textcolor=color.white, size=size.small)
+
+    // ── Pin Strike ──────────────────────────────────────────────────
+    if is_live(pin_strike)
+        line.new(bar_index - 300, pin_strike, bar_index + 50,
+                 pin_strike, color=COL_PIN, width=line_width_main)
+        if show_labels
+            label.new(bar_index + label_offset, pin_strike,
+                      "📌 GEX Pin  $" + str.tostring(pin_strike, "#.##"),
+                      style=label.style_label_left,
+                      color=COL_PIN, textcolor=color.white, size=size.small)
+
+    // ── Max Pain ────────────────────────────────────────────────────
+    if is_live(max_pain)
+        line.new(bar_index - 300, max_pain, bar_index + 50,
+                 max_pain, color=COL_PAIN, width=line_width_main,
+                 style=line.style_dotted)
+        if show_labels
+            label.new(bar_index + label_offset, max_pain,
+                      "💊 Max Pain  $" + str.tostring(max_pain, "#.##"),
+                      style=label.style_label_left,
+                      color=COL_PAIN, textcolor=color.white, size=size.small)
+
+    // ── 1σ Range ────────────────────────────────────────────────────
+    if is_live(sigma_high)
+        line.new(bar_index - 300, sigma_high, bar_index + 50,
+                 sigma_high, color=COL_SIGMA, width=1,
+                 style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + label_offset, sigma_high,
+                      "1σ High  $" + str.tostring(sigma_high, "#.##"),
+                      style=label.style_label_left,
+                      color=COL_SIGMA, textcolor=color.white, size=size.tiny)
+
+    if is_live(sigma_low)
+        line.new(bar_index - 300, sigma_low, bar_index + 50,
+                 sigma_low, color=COL_SIGMA, width=1,
+                 style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + label_offset, sigma_low,
+                      "1σ Low  $" + str.tostring(sigma_low, "#.##"),
+                      style=label.style_label_left,
+                      color=COL_SIGMA, textcolor=color.white, size=size.tiny)
+
+    // ── Put Walls (Support) ─────────────────────────────────────────
+    if is_live(put_wall_1)
+        line.new(bar_index - 300, put_wall_1, bar_index + 50,
+                 put_wall_1, color=COL_PWALL_1, width=line_width_wall)
+        if show_labels
+            label.new(bar_index + label_offset, put_wall_1,
+                      "🟢 Put Wall 1  $" + str.tostring(put_wall_1, "#.##") + (put_wall_1_score > 0 ? "  S" + str.tostring(put_wall_1_score) : ""),
+                      style=label.style_label_left,
+                      color=COL_PWALL_1, textcolor=color.white, size=size.tiny)
+
+    if is_live(put_wall_2)
+        line.new(bar_index - 300, put_wall_2, bar_index + 50,
+                 put_wall_2, color=COL_PWALL_2, width=line_width_wall,
+                 style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + label_offset, put_wall_2,
+                      "🟢 Put Wall 2  $" + str.tostring(put_wall_2, "#.##") + (put_wall_2_score > 0 ? "  S" + str.tostring(put_wall_2_score) : ""),
+                      style=label.style_label_left,
+                      color=COL_PWALL_2, textcolor=color.white, size=size.tiny)
+
+    if is_live(put_wall_3)
+        line.new(bar_index - 300, put_wall_3, bar_index + 50,
+                 put_wall_3, color=COL_PWALL_3, width=line_width_wall,
+                 style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + label_offset, put_wall_3,
+                      "🟢 Put Wall 3  $" + str.tostring(put_wall_3, "#.##") + (put_wall_3_score > 0 ? "  S" + str.tostring(put_wall_3_score) : ""),
+                      style=label.style_label_left,
+                      color=COL_PWALL_3, textcolor=color.white, size=size.tiny)
+
+    // ── Call Walls (Resistance) ─────────────────────────────────────
+    if is_live(call_wall_1)
+        line.new(bar_index - 300, call_wall_1, bar_index + 50,
+                 call_wall_1, color=COL_CWALL_1, width=line_width_wall)
+        if show_labels
+            label.new(bar_index + label_offset, call_wall_1,
+                      "🔴 Call Wall 1  $" + str.tostring(call_wall_1, "#.##") + (call_wall_1_score > 0 ? "  S" + str.tostring(call_wall_1_score) : ""),
+                      style=label.style_label_left,
+                      color=COL_CWALL_1, textcolor=color.white, size=size.tiny)
+
+    if is_live(call_wall_2)
+        line.new(bar_index - 300, call_wall_2, bar_index + 50,
+                 call_wall_2, color=COL_CWALL_2, width=line_width_wall,
+                 style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + label_offset, call_wall_2,
+                      "🔴 Call Wall 2  $" + str.tostring(call_wall_2, "#.##") + (call_wall_2_score > 0 ? "  S" + str.tostring(call_wall_2_score) : ""),
+                      style=label.style_label_left,
+                      color=COL_CWALL_2, textcolor=color.white, size=size.tiny)
+
+    if is_live(call_wall_3)
+        line.new(bar_index - 300, call_wall_3, bar_index + 50,
+                 call_wall_3, color=COL_CWALL_3, width=line_width_wall,
+                 style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + label_offset, call_wall_3,
+                      "🔴 Call Wall 3  $" + str.tostring(call_wall_3, "#.##") + (call_wall_3_score > 0 ? "  S" + str.tostring(call_wall_3_score) : ""),
+                      style=label.style_label_left,
+                      color=COL_CWALL_3, textcolor=color.white, size=size.tiny)
+
+    // ── Spot Reference ──────────────────────────────────────────────
+    if is_live(spot_ref)
+        line.new(bar_index - 300, spot_ref, bar_index + 50,
+                 spot_ref, color=COL_SPOT, width=1,
+                 style=line.style_dotted)
+
+// ═══════════════════════════════════════════════════════════════════
+//  GAMMA VALUE TABLE
+//  Shown in corner selected by user; all values from inputs
+// ═══════════════════════════════════════════════════════════════════
+
+// Map input string → table position constant
+tbl_pos() =>
+    switch table_pos
+        "Top Right"     => position.top_right
+        "Top Left"      => position.top_left
+        "Bottom Right"  => position.bottom_right
+        "Bottom Left"   => position.bottom_left
+        "Top Center"    => position.top_center
+        "Bottom Center" => position.bottom_center
+        => position.top_right
+
+// Regime properties
+regime_str  = total_gex >= 0 ? "POSITIVE GAMMA" : "NEGATIVE GAMMA"
+regime_col  = total_gex >= 0 ? color.new(#22c55e, 0) : color.new(#ef4444, 0)
+regime_note = total_gex >= 0 ? "Dealers CUSHION moves" : "Dealers AMPLIFY moves"
+
+// Ratio bar (10 chars)
+ratio_abs   = math.abs(gex_ratio)
+ratio_filled= math.round(ratio_abs * 10)
+ratio_bar   = ""
+for i = 0 to 9
+    ratio_bar := ratio_bar + (i < ratio_filled ? "█" : "░")
+
+// Bias colour
+bias_col =
+     bias_label == "BULLISH"   ? color.new(#22c55e, 0) :
+     bias_label == "MILD BULL" ? color.new(#4ade80, 0) :
+     bias_label == "BEARISH"   ? color.new(#ef4444, 0) :
+     bias_label == "MILD BEAR" ? color.new(#f97316, 0) :
+                                 color.new(#94a3b8, 0)
+
+// Score colour
+score_col   = score_val > 3 ? color.new(#22c55e, 0) :
+              score_val > 0 ? color.new(#4ade80, 0) :
+              score_val < -3? color.new(#ef4444, 0) :
+              score_val < 0 ? color.new(#f97316, 0) :
+                              color.new(#94a3b8, 0)
+
+// GEX magnitude formatter (e.g. 1234567 → "1.23M")
+fmt_gex(v) =>
+    av = math.abs(v)
+    if av >= 1e9
+        (v >= 0 ? "+" : "-") + str.tostring(av / 1e9, "#.##") + "B"
+    else if av >= 1e6
+        (v >= 0 ? "+" : "-") + str.tostring(av / 1e6, "#.##") + "M"
+    else if av >= 1e3
+        (v >= 0 ? "+" : "-") + str.tostring(av / 1e3, "#.#") + "K"
+    else
+        str.tostring(v, "#.##")
+
+if show_table and barstate.islast
+    var t = table.new(tbl_pos(), 3, 26,
+                      bgcolor=COL_TABLE_BG,
+                      border_color=color.new(#334155, 0),
+                      border_width=1,
+                      frame_color=color.new(#6366f1, 60),
+                      frame_width=1)
+
+    // ── helper to fill a row ────────────────────────────────────────
+    row_header(r, txt) =>
+        table.cell(t, 0, r, txt, text_color=COL_MUTED, text_size=size.tiny,
+                   bgcolor=COL_TABLE_HDR, text_halign=text.align_left)
+        table.cell(t, 1, r, "",  text_color=COL_MUTED, text_size=size.tiny,
+                   bgcolor=COL_TABLE_HDR)
+        table.cell(t, 2, r, "",  text_color=COL_MUTED, text_size=size.tiny,
+                   bgcolor=COL_TABLE_HDR)
+
+    row_kv(r, k, v, vc) =>
+        table.cell(t, 0, r, k, text_color=COL_MUTED, text_size=size.tiny,
+                   text_halign=text.align_left)
+        table.cell(t, 1, r, v, text_color=vc,       text_size=size.small,
+                   text_halign=text.align_right)
+        table.cell(t, 2, r, "", text_color=COL_MUTED, text_size=size.tiny)
+
+    row_kv2(r, k, v1, c1, v2, c2) =>
+        table.cell(t, 0, r, k,  text_color=COL_MUTED, text_size=size.tiny,
+                   text_halign=text.align_left)
+        table.cell(t, 1, r, v1, text_color=c1,        text_size=size.small,
+                   text_halign=text.align_right)
+        table.cell(t, 2, r, v2, text_color=c2,        text_size=size.tiny,
+                   text_halign=text.align_right)
+
+    // Row 0 — title banner
+    table.cell(t, 0, 0, "  GEX LEVELS  ", text_color=color.new(#a78bfa, 0),
+               bgcolor=color.new(#1e1b4b, 80), text_size=size.normal,
+               text_halign=text.align_left)
+    table.cell(t, 1, 0, str.tostring(syminfo.ticker), text_color=color.new(#6366f1, 0),
+               bgcolor=color.new(#1e1b4b, 80), text_size=size.normal,
+               text_halign=text.align_right)
+    table.cell(t, 2, 0, str.tostring(dte_days) + "d", text_color=COL_MUTED,
+               bgcolor=color.new(#1e1b4b, 80), text_size=size.small,
+               text_halign=text.align_right)
+
+    // Row 1 — regime
+    table.cell(t, 0, 1, regime_str,  text_color=regime_col,  text_size=size.small,
+               text_halign=text.align_left, bgcolor=color.new(#0f172a, 60))
+    table.cell(t, 1, 1, regime_note, text_color=COL_MUTED,   text_size=size.tiny,
+               text_halign=text.align_right, bgcolor=color.new(#0f172a, 60))
+    table.cell(t, 2, 1, "", bgcolor=color.new(#0f172a, 60))
+
+    // ── Section: Bias & Score ──────────────────────────────────────
+    row_header(2, "  BIAS & SCORE")
+    row_kv2(3, "Bias", bias_label, bias_col,
+               str.tostring(confidence) + "% conf", COL_MUTED)
+    row_kv(4, "5-Factor Score",
+              (score_val >= 0 ? "+" : "") + str.tostring(score_val) + " / 10",
+              score_col)
+
+    // ── Section: GEX Values ────────────────────────────────────────
+    row_header(5, "  GAMMA EXPOSURE  ($/1% move)")
+
+    total_gex_str = fmt_gex(total_gex)
+    gross_gex_str = fmt_gex(gross_gex)
+
+    row_kv(6, "Total GEX",  total_gex_str,  regime_col)
+    row_kv(7, "Gross GEX",  gross_gex_str,  COL_TEXT)
+    row_kv2(8, "GEX Ratio",
+               str.tostring(gex_ratio, "#.###"), regime_col,
+               ratio_bar,                         regime_col)
+
+    // ── Section: Key Levels ────────────────────────────────────────
+    row_header(9, "  KEY LEVELS")
+
+    row_kv2(10, "⚡ Gamma Flip",
+               is_live(gamma_flip) ? "$" + str.tostring(gamma_flip, "#.##") : "—",
+               COL_FLIP,
+               is_live(spot_ref) and is_live(gamma_flip) ?
+                   (spot_ref > gamma_flip ? "▲ ABOVE" : "▼ BELOW") : "",
+               COL_MUTED)
+
+    row_kv2(11, "📌 GEX Pin",
+               is_live(pin_strike) ? "$" + str.tostring(pin_strike, "#.##") : "—",
+               COL_PIN,
+               is_live(spot_ref) and is_live(pin_strike) ?
+                   str.tostring(math.abs(spot_ref - pin_strike), "#.##") + " away" : "",
+               COL_MUTED)
+
+    row_kv2(12, "💊 Max Pain",
+               is_live(max_pain) ? "$" + str.tostring(max_pain, "#.##") : "—",
+               COL_PAIN,
+               is_live(spot_ref) and is_live(max_pain) ?
+                   str.tostring(math.abs(spot_ref - max_pain), "#.##") + " away" : "",
+               COL_MUTED)
+
+    // ── Section: 1σ Range ─────────────────────────────────────────
+    row_header(13, "  1σ DAILY RANGE")
+    row_kv2(14, "Range High",
+               is_live(sigma_high) ? "$" + str.tostring(sigma_high, "#.##") : "—",
+               COL_SIGMA,
+               is_live(spot_ref) and is_live(sigma_high) ?
+                   "+" + str.tostring(math.abs(sigma_high - spot_ref), "#.##") : "",
+               COL_MUTED)
+    row_kv2(15, "Range Low",
+               is_live(sigma_low) ? "$" + str.tostring(sigma_low, "#.##") : "—",
+               COL_SIGMA,
+               is_live(spot_ref) and is_live(sigma_low) ?
+                   "-" + str.tostring(math.abs(spot_ref - sigma_low), "#.##") : "",
+               COL_MUTED)
+
+    // ── Section: OI Walls ─────────────────────────────────────────
+    row_header(16, "  OI WALLS")
+
+    row_kv(17, "🔴 Call Wall 1",
+              is_live(call_wall_1) ? "$" + str.tostring(call_wall_1, "#.##") : "—",
+              COL_CWALL_1)
+    row_kv(18, "🔴 Call Wall 2",
+              is_live(call_wall_2) ? "$" + str.tostring(call_wall_2, "#.##") : "—",
+              COL_CWALL_2)
+    row_kv(19, "🔴 Call Wall 3",
+              is_live(call_wall_3) ? "$" + str.tostring(call_wall_3, "#.##") : "—",
+              COL_CWALL_3)
+    row_kv(20, "🟢 Put Wall 1",
+              is_live(put_wall_1) ? "$" + str.tostring(put_wall_1, "#.##") : "—",
+              COL_PWALL_1)
+    row_kv(21, "🟢 Put Wall 2",
+              is_live(put_wall_2) ? "$" + str.tostring(put_wall_2, "#.##") : "—",
+              COL_PWALL_2)
+    row_kv(22, "🟢 Put Wall 3",
+              is_live(put_wall_3) ? "$" + str.tostring(put_wall_3, "#.##") : "—",
+              COL_PWALL_3)
+
+    // ── Section: Vol & Options Context ────────────────────────────
+    row_header(23, "  OPTIONS CONTEXT")
+
+    pcr_col = pcr > 1.3 ? color.new(#ef4444, 0) :
+              pcr < 0.7 ? color.new(#22c55e, 0) :
+                          COL_TEXT
+    row_kv2(24, "PCR  |  IV ATM",
+               str.tostring(pcr, "#.##"), pcr_col,
+               str.tostring(iv_atm, "#.#") + "%", color.new(#a78bfa, 0))
+
+    row_kv(25, "Spot Ref",
+              is_live(spot_ref) ? "$" + str.tostring(spot_ref, "#.##") : "—",
+              COL_SPOT)
+
+// ════════════════════════════════════════════════════════════════════
+//  LIVE PRICE ANNOTATIONS on last bar
+//  Distance from current close to each level, shown as a label
+// ════════════════════════════════════════════════════════════════════
+
+live_price = close
+
+// Annotate gamma flip distance on chart if price is near it
+if barstate.islast and is_live(gamma_flip)
+    dist  = live_price - gamma_flip
+    dist_pct = dist / gamma_flip * 100
+    flip_lbl = dist >= 0 ?
+               "▲ " + str.tostring(dist_pct, "#.##") + "% above flip" :
+               "▼ " + str.tostring(math.abs(dist_pct), "#.##") + "% below flip"
+    label.new(bar_index, live_price,
+              flip_lbl,
+              style    = label.style_label_lower_right,
+              color    = COL_FLIP_BG,
+              textcolor= COL_FLIP,
+              size     = size.small)

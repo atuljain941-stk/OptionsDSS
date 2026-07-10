@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Agentic AI Scanner</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <style>
+    :root {
+      --bg:#0b1020; --card:rgba(15,23,42,.92); --card2:rgba(17,24,39,.92); --line:rgba(148,163,184,.20);
+      --text:#e5e7eb; --muted:#94a3b8; --good:#22c55e; --warn:#f59e0b; --bad:#ef4444; --accent:#818cf8;
+      --chip:#1f2937; --chip2:#111827;
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif; }
+    .shell { padding:16px; display:flex; flex-direction:column; gap:14px; }
+    .top { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+    .title { font-size:22px; font-weight:800; }
+    .sub { color:var(--muted); font-size:13px; max-width:1100px; line-height:1.4; }
+    .pill { display:inline-flex; align-items:center; gap:6px; background:rgba(129,140,248,.12); color:#c7d2fe; border:1px solid rgba(129,140,248,.25); padding:6px 10px; border-radius:999px; font-size:12px; white-space:nowrap; }
+    .grid { display:grid; gap:12px; }
+    .card { background:linear-gradient(180deg,var(--card),var(--card2)); border:1px solid var(--line); border-radius:16px; padding:14px; box-shadow:0 12px 24px rgba(0,0,0,.18); }
+    .section-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; flex-wrap:wrap; margin-bottom:10px; }
+    .section-head b { font-size:15px; }
+    .muted { color:var(--muted); }
+    .controls { display:grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap:10px; }
+    .controls label, .filter-row label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:#cbd5e1; }
+    .controls input, .controls select, .controls textarea, .filter-row input, .filter-row select {
+      background:#0f172a; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px 11px; font-size:13px; outline:none;
+    }
+    .controls input:focus, .controls select:focus, .controls textarea:focus, .filter-row input:focus, .filter-row select:focus { border-color:rgba(129,140,248,.65); box-shadow:0 0 0 3px rgba(129,140,248,.12); }
+    .controls .wide { grid-column: span 2; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+    .btn { background:#111827; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:9px 12px; cursor:pointer; font-weight:700; }
+    .btn.primary { background:linear-gradient(135deg,#4f46e5,#7c3aed); border-color:rgba(129,140,248,.4); }
+    .btn.good { background:linear-gradient(135deg,#15803d,#22c55e); border-color:rgba(34,197,94,.35); }
+    .btn.warn { background:linear-gradient(135deg,#b45309,#f59e0b); border-color:rgba(245,158,11,.4); }
+    .btn:disabled { opacity:.55; cursor:not-allowed; }
+    .stats { display:grid; grid-template-columns: repeat(7, minmax(120px,1fr)); gap:10px; }
+    .stat { background:rgba(2,6,23,.4); border:1px solid var(--line); border-radius:14px; padding:12px; min-height:78px; }
+    .stat .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
+    .stat .v { font-size:18px; font-weight:800; margin-top:6px; }
+    .stat .s { font-size:11px; color:var(--muted); margin-top:5px; line-height:1.35; }
+    .filters { display:grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap:10px; }
+    .factor { background:rgba(2,6,23,.38); border:1px solid var(--line); border-radius:12px; padding:10px; }
+    .factor .row { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+    .factor .name { font-weight:700; font-size:13px; }
+    .factor .mini { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.3; }
+    .factor input[type="range"] { width:100%; margin-top:8px; }
+    .families { display:flex; gap:8px; flex-wrap:wrap; }
+    .chip { background:var(--chip); color:#cbd5e1; border:1px solid var(--line); border-radius:999px; padding:8px 11px; cursor:pointer; font-size:12px; }
+    .chip.active { background:rgba(129,140,248,.15); color:#e0e7ff; border-color:rgba(129,140,248,.45); }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:14px; }
+    table { width:100%; border-collapse:collapse; min-width:1280px; }
+    thead th { position:sticky; top:0; background:#111827; color:#cbd5e1; font-size:11px; text-align:left; padding:11px 10px; border-bottom:1px solid var(--line); text-transform:uppercase; letter-spacing:.04em; }
+    tbody td { padding:12px 10px; border-bottom:1px solid rgba(148,163,184,.12); vertical-align:top; font-size:13px; }
+    tbody tr:hover { background:rgba(15,23,42,.72); }
+    .wrap { white-space:normal; line-height:1.35; }
+    .score { font-weight:900; font-size:16px; }
+    .good { color:var(--good); }
+    .warn { color:var(--warn); }
+    .bad { color:var(--bad); }
+    .pill2 { display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; font-size:11px; border:1px solid var(--line); background:rgba(2,6,23,.35); }
+    .pill2.good { border-color:rgba(34,197,94,.28); background:rgba(34,197,94,.10); }
+    .pill2.warn { border-color:rgba(245,158,11,.28); background:rgba(245,158,11,.10); }
+    .pill2.bad { border-color:rgba(239,68,68,.28); background:rgba(239,68,68,.10); }
+    .summary { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
+    .summary .pill { background:rgba(2,6,23,.35); color:#dbeafe; border-color:var(--line); }
+    .detail { display:grid; grid-template-columns: 1.2fr .8fr; gap:14px; }
+    .prebox { white-space:pre-wrap; background:#0a1020; border:1px solid var(--line); border-radius:12px; padding:12px; max-height:58vh; overflow:auto; font-size:12px; line-height:1.4; }
+    .modal-backdrop { position:fixed; inset:0; background:rgba(2,6,23,.78); display:none; align-items:center; justify-content:center; padding:18px; z-index:999; }
+    .modal { width:min(1240px, 98vw); max-height:92vh; background:linear-gradient(180deg,#0f172a,#111827); border:1px solid var(--line); border-radius:18px; padding:16px; overflow:auto; }
+    .modal-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; flex-wrap:wrap; margin-bottom:12px; }
+    .small { font-size:11px; color:var(--muted); }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .toolbar input, .toolbar select { background:#0f172a; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:9px 10px; font-size:13px; }
+    @media (max-width: 1200px) { .controls, .filters, .stats { grid-template-columns: repeat(2, minmax(0,1fr)); } .detail { grid-template-columns:1fr; } .controls .wide { grid-column: span 2; } }
+    @media (max-width: 720px) { .controls, .filters, .stats { grid-template-columns: 1fr; } .controls .wide { grid-column: span 1; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top">
+      <div>
+        <div class="title">Agentic AI Scanner</div>
+        <div class="sub">A top-down trade scanner that weighs market regime, sector regime, prior price action, volume, support and resistance, OI/flow, IV and event risk. Prior price action is included so the engine can decide whether the current move is a continuation, breakout, stretch or mean-reversion setup.</div>
+        <div class="summary">
+          <span class="pill">4 trade families: momentum, mean reversion, sideways</span>
+          <span class="pill">Relative scoring with filter weights</span>
+          <span class="pill">Detailed evidence trail per result</span>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button class="btn good" onclick="startScanner()">Start scanner - full scan</button>
+        <button class="btn warn" onclick="stopScanner()">Stop scanner</button>
+        <button class="btn primary" onclick="runNow(false)">Incremental Scan</button>
+        <button class="btn warn" onclick="runNow(true)">Force full run</button>
+        <button class="btn primary" onclick="saveSettings()">Save settings</button>
+        <button class="btn" onclick="loadAll()">Refresh</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-head">
+        <div>
+          <b>Scanner controls</b>
+          <div class="muted">Universe, thresholds, trade type, regime alignment, and alert cadence.</div>
+        </div>
+      </div>
+      <div class="controls">
+        <label>Enabled<select id="enabled"><option value="1">Yes</option><option value="0">No</option></select></label>
+        <label>Watchlist<select id="watchlist"></select></label>
+        <label>Interval<select id="interval"><option value="3600">1h</option><option value="7200">2h</option><option value="14400">4h</option><option value="86400">1d</option></select></label>
+        <label>Max symbols<input id="max-symbols" type="number" min="1" max="300"/></label>
+        <label>Target DTE<input id="target-dte" type="number" min="7" max="75"/></label>
+        <label>Min confidence<input id="min-confidence" type="number" min="0" max="100"/></label>
+        <label>Min UAE score<input id="min-uae" type="number" min="0" max="100"/></label>
+        <label>Max alerts / run<input id="max-alerts" type="number" min="0" max="25"/></label>
+        <label>Trade type<select id="trade-type"><option>AUTO</option><option>PS</option><option>CS</option><option>IC</option><option>CALL</option><option>PUT</option></select></label>
+        <label>Require regime align<select id="require-align"><option value="1">Yes</option><option value="0">No</option></select></label>
+        <label>Spread width<select id="width"><option value="AUTO">Auto</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label>
+        <label>Short delta<input id="short-delta" type="number" min="0.10" max="0.49" step="0.01"/></label>
+        <label>Target R:R<input id="target-rr" type="number" min="0.1" step="0.1"/></label>
+        <label>Min R:R<input id="min-rr" type="number" min="0" step="0.1"/></label>
+        <label>Earnings guard (days)<input id="earn-guard" type="number" min="0" max="45"/></label>
+        <label>Auto-tune<select id="autotune-mode"><option value="OFF">Off</option><option value="SUGGEST">Suggest only</option><option value="AUTO">Auto apply</option></select></label>
+        <label>Incremental run<select id="incremental-enabled"><option value="1">Skip already scanned today</option><option value="0">Always rescan</option></select></label>
+      </div>
+      <div class="actions">
+        <span class="small">Use the filter panel below to enable/disable the evidence families and tune their weights.</span>
+        <span id="status-line" class="muted"></span>
+      </div>
+    </div>
+
+    <div class="stats" id="stat-row">
+      <div class="stat"><div class="k">Background loop</div><div class="v">...</div></div>
+    </div>
+
+    <div class="card" id="progress-card">
+      <div class="section-head">
+        <div>
+          <b>Scan progress</b>
+          <div class="muted">Live status while the agentic scanner processes symbols.</div>
+        </div>
+        <div class="pill2" id="progress-pill">Idle</div>
+      </div>
+      <div style="display:grid;gap:8px;">
+        <div style="height:14px;background:#0f172a;border:1px solid var(--line);border-radius:999px;overflow:hidden;">
+          <div id="progress-bar" style="width:0%;height:100%;background:linear-gradient(90deg,#22c55e,#60a5fa);transition:width .25s ease;"></div>
+        </div>
+        <div class="summary">
+          <span class="pill" id="progress-count">Analyzed 0 / 0 symbols</span>
+          <span class="pill" id="progress-current">Current: idle</span>
+          <span class="pill" id="progress-scan-state">Not running</span>
+        </div>
+        <div class="small" id="progress-tune-state">Auto-tune idle.</div>
+        <div id="progress-suggestions" class="prebox" style="max-height:160px;"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-head">
+        <div>
+          <b>Evidence filters</b>
+          <div class="muted">Toggle which factor families are used by the scorer and set weights. Price action uses prior price behavior, not just the current bar.</div>
+        </div>
+      </div>
+      <div class="filters" id="filters-grid"></div>
+    </div>
+
+    <div class="card">
+      <div class="section-head">
+        <div>
+          <b>Result filters</b>
+          <div class="muted">Use these to narrow the visible results without changing the underlying scan.</div>
+        </div>
+      </div>
+      <div class="controls" style="grid-template-columns:repeat(4,minmax(140px,1fr));">
+        <label>Search<input id="filter-q" placeholder="symbol or rationale"/></label>
+        <label>Family<select id="filter-family"><option value="">All families</option><option value="Bullish Momentum">Bullish Momentum</option><option value="Bearish Momentum">Bearish Momentum</option><option value="Mean Reversion">Mean Reversion</option><option value="Sideways">Sideways</option></select></label>
+        <label>Status<select id="filter-status"><option value="">Any status</option><option>NEW</option><option>REVIEWED</option><option>WATCH</option><option>TAKEN</option><option>DISMISSED</option></select></label>
+        <label>Min confidence<input id="filter-min-confidence" type="number" min="0" max="100" value="0"/></label>
+      </div>
+      <div class="actions"><button class="btn" onclick="loadHistory()">Apply filters</button></div>
+    </div>
+
+    <div class="card">
+      <div class="section-head">
+        <div>
+          <b>Ranked results</b>
+          <div class="muted">Each row carries score, family, suggested strategy, expiry, strikes, POP, expected move and the full evidence trail.</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Found</th>
+              <th>Symbol</th>
+              <th>Family</th>
+              <th>Score</th>
+              <th>Direction</th>
+              <th>Strategy</th>
+              <th>POP / Move</th>
+              <th>Why it scored</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="history-body"><tr><td colspan="10" class="muted">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="detail-modal" class="modal-backdrop" onclick="if(event.target.id==='detail-modal')closeDetail()">
+    <div class="modal">
+      <div class="modal-head">
+        <div>
+          <b id="detail-title">Finding details</b>
+          <div id="detail-sub" class="muted"></div>
+        </div>
+        <button class="btn" onclick="closeDetail()">Close</button>
+      </div>
+      <div class="detail">
+        <div>
+          <div class="card" style="margin-bottom:12px;">
+            <div class="section-head" style="margin-bottom:6px;"><b>Evidence trail</b><span class="muted">The exact factors used by the scorer</span></div>
+            <div id="detail-evidence" class="prebox"></div>
+          </div>
+          <div class="card">
+            <div class="section-head" style="margin-bottom:6px;"><b>Expanded context</b><span class="muted">Price action, OI, IV, regime and score breakdown</span></div>
+            <div id="detail-summary" class="prebox"></div>
+          </div>
+        </div>
+        <div>
+          <div class="card" style="margin-bottom:12px;">
+            <div class="section-head" style="margin-bottom:6px;"><b>Raw JSON</b><span class="muted">Full object for audit and debugging</span></div>
+            <div id="detail-json" class="prebox"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let _items = [];
+let _settings = {};
+let _filters = {};
+let _activeFamily = '';
+let _progress = {};
+let _pollTimer = null;
+let _settingsDirty = false;
+let _isApplyingSettings = false;
+let _settingsDirtyWired = false;
+let _lastWatchlists = [];
+function markSettingsDirty(){ if (!_isApplyingSettings) _settingsDirty = true; }
+function wireSettingsDirtyEvents(){
+  if (_settingsDirtyWired) return;
+  _settingsDirtyWired = true;
+  ['enabled','interval','watchlist','max-symbols','target-dte','min-confidence','min-uae','max-alerts','trade-type','require-align','width','short-delta','target-rr','min-rr','earn-guard','autotune-mode','incremental-enabled'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', markSettingsDirty);
+    el.addEventListener('input', markSettingsDirty);
+  });
+}
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function num(v, d=0){ const x = Number(v); return Number.isFinite(x) ? x : d; }
+function fmt(v, d=0){ return (v === null || v === undefined || v === '') ? 'n/a' : (Number.isFinite(Number(v)) ? Number(v).toFixed(d) : String(v)); }
+function clsFor(v){ v = String(v ?? '').toLowerCase(); return v === 'bull' || v === 'bullish' ? 'good' : v === 'bear' || v === 'bearish' ? 'bad' : 'warn'; }
+function famClass(f){ f = String(f ?? '').toLowerCase(); if(f.includes('bullish')) return 'good'; if(f.includes('bearish')) return 'bad'; if(f.includes('sideways')) return 'warn'; return 'pill2'; }
+async function api(url, opts={}){
+  const r = await fetch(url, {headers:{'Content-Type':'application/json'}, ...opts});
+  const d = await r.json().catch(()=>({ok:false,error:'Bad JSON response'}));
+  if(!r.ok) throw new Error(d.error || ('HTTP '+r.status));
+  return d;
+}
+function setLine(s, cls='muted'){ $('status-line').className = cls; $('status-line').textContent = s || ''; }
+function renderProgress(d){
+  _progress = d.progress || _progress || {};
+  const p = _progress || {};
+  const pct = Math.max(0, Math.min(100, Number(p.percent || 0)));
+  $('progress-bar').style.width = pct + '%';
+  $('progress-pill').textContent = p.running ? 'Running' : 'Idle';
+  $('progress-pill').className = 'pill2 ' + (p.running ? 'warn' : 'good');
+  $('progress-count').textContent = `Analyzed ${Number(p.scanned || 0)} / ${Number(p.total || 0)} symbols`;
+  $('progress-current').textContent = `Current: ${p.current_symbol || 'idle'}`;
+  $('progress-scan-state').textContent = p.message || (p.running ? 'Running' : 'Not running');
+  const tune = p.auto_tune || {};
+  const tuneParts = [];
+  if (tune.mode) tuneParts.push(`Mode ${tune.mode}`);
+  if (tune.profile_version) tuneParts.push(`Profile v${tune.profile_version}`);
+  if (tune.summary) tuneParts.push(tune.summary);
+  $('progress-tune-state').textContent = tuneParts.length ? tuneParts.join(' | ') : 'Auto-tune idle.';
+  const sugg = (d.suggestions || p.suggestions || []);
+  $('progress-suggestions').textContent = sugg.length ? sugg.map((x, i) => `${i+1}. ${x}`).join('\n\n') : 'No tuning suggestions right now.';
+}
+function filterDefs(){
+  return [
+    ['market','Market regime','SPY/QQQ/IWM regime and higher-timeframe bias'],
+    ['sector','Sector regime','Sector RS and sector trend'],
+    ['price_action','Price action','Prior 1/5/20/60-day behavior and breakout significance'],
+    ['volume','Volume','Relative volume and participation'],
+    ['support_resistance','Support / resistance','Range location and breakout/breakdown context'],
+    ['flow','Options / flow','OI, walls, pressure and GEX context'],
+    ['iv','IV suitability','IV proxy and structure fit'],
+    ['risk','Risk penalties','Earnings and extension risk']
+  ];
+}
+function renderFilters(){
+  const grid = $('filters-grid');
+  grid.innerHTML = filterDefs().map(([key,label,desc]) => {
+    const cfg = (_filters[key] || {enabled:true, weight:1});
+    return `
+      <div class="factor">
+        <div class="row"><div><div class="name">${esc(label)}</div><div class="mini">${esc(desc)}</div></div><label style="display:flex;flex-direction:row;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="f-${key}-enabled" ${cfg.enabled ? 'checked':''}/> Use</label></div>
+        <input type="range" id="f-${key}-weight" min="0" max="2.5" step="0.05" value="${Number(cfg.weight ?? 1).toFixed(2)}"/>
+        <div class="mini">Weight: <span id="f-${key}-weight-label">${Number(cfg.weight ?? 1).toFixed(2)}x</span></div>
+      </div>`;
+  }).join('');
+  filterDefs().forEach(([key]) => {
+    const range = $('f-' + key + '-weight');
+    const label = $('f-' + key + '-weight-label');
+    const chk = $('f-' + key + '-enabled');
+    if(range && label){
+      range.addEventListener('input', () => { label.textContent = Number(range.value).toFixed(2) + 'x'; markSettingsDirty(); });
+      range.addEventListener('change', markSettingsDirty);
+    }
+    if(chk) chk.addEventListener('change', markSettingsDirty);
+  });
+}
+function readFilters(){
+  const out = {};
+  filterDefs().forEach(([key]) => {
+    out[key] = {
+      enabled: !!$('f-' + key + '-enabled').checked,
+      weight: Number($('f-' + key + '-weight').value || 1)
+    };
+  });
+  return out;
+}
+function _intervalChoice(sec){ const v = Number(sec || 3600); if (v >= 86400) return "86400"; if (v >= 14400) return "14400"; if (v >= 7200) return "7200"; return "3600"; }
+function fillSettings(d){
+  const s = d.settings || {};
+  _isApplyingSettings = true;
+  try {
+    _settings = s;
+    _filters = s.filters || {};
+    if (Array.isArray(d.watchlists)) _lastWatchlists = d.watchlists;
+    const watchlists = Array.isArray(d.watchlists) ? d.watchlists : (_lastWatchlists || []);
+    $('enabled').value = s.enabled ? '1' : '0';
+    $('interval').value = _intervalChoice(s.interval_seconds || 3600);
+    $('watchlist').innerHTML = '<option value="">Default watchlist</option>' + watchlists.map(w => `<option value="${w.id}">${esc(w.name)} (${w.symbol_count || 0})${w.is_default ? ' - default' : ''}</option>`).join('');
+    $('watchlist').value = s.watchlist_id || '';
+    $('max-symbols').value = s.max_symbols || 80;
+    $('target-dte').value = s.target_dte || 45;
+    $('min-confidence').value = s.min_confidence || 72;
+    $('min-uae').value = s.min_uae_score || 65;
+    $('max-alerts').value = s.max_alerts_per_run ?? 8;
+    $('trade-type').value = s.trade_type || 'AUTO';
+    $('require-align').value = s.require_regime_alignment ? '1' : '0';
+    $('width').value = String(s.strike_width ?? 'AUTO').toUpperCase() === 'AUTO' ? 'AUTO' : String(s.strike_width || 5);
+    $('short-delta').value = s.short_delta || 0.45;
+    $('target-rr').value = s.target_rr || 1.0;
+    $('min-rr').value = s.min_rr || 0.70;
+    $('earn-guard').value = s.earn_guard || 14;
+    $('autotune-mode').value = s.autotune_mode || 'AUTO';
+    $('incremental-enabled').value = s.incremental_enabled ? '1' : '0';
+    renderFilters();
+  } finally {
+    _isApplyingSettings = false;
+    _settingsDirty = false;
+  }
+}
+function fillStats(d){
+  const s = d.settings || {};
+  const c = d.counts || {}; const lr = d.last_run || {}; const cache = d.last_run_cache || {}; const summary = cache.summary || {};
+  $('stat-row').innerHTML = `
+    <div class="stat"><div class="k">Background loop</div><div class="v ${d.watcher_started ? 'good' : 'warn'}">${d.watcher_started ? 'On' : 'Off'}</div><div class="s">${d.watcher_started ? 'watcher active' : 'watcher stopped until started manually'}</div></div>
+    <div class="stat"><div class="k">Telegram</div><div class="v ${d.telegram_configured ? 'good' : 'warn'}">${d.telegram_configured ? 'Ready' : 'Not set'}</div><div class="s">Alert channel availability</div></div>
+    <div class="stat"><div class="k">Findings total</div><div class="v">${c.total || 0}</div><div class="s">Stored in SQLite</div></div>
+    <div class="stat"><div class="k">Today</div><div class="v">${c.today || 0}</div><div class="s">New setups today</div></div>
+    <div class="stat"><div class="k">Last run</div><div class="v" style="font-size:13px">${esc(lr.completed_at || lr.started_at || 'Never')}</div><div class="s">Candidates ${summary.candidates ?? lr.candidates ?? 0}; new ${summary.new_findings ?? lr.new_findings ?? 0}; alerts ${summary.alerts_sent ?? lr.alerts_sent ?? 0}</div></div>
+    <div class="stat"><div class="k">Prior price action</div><div class="v">On</div><div class="s">1/5/20/60D context, breakout significance and stretch risk</div></div>
+    <div class="stat"><div class="k">Auto-tune</div><div class="v ${s.autotune_mode === 'AUTO' ? 'good' : s.autotune_mode === 'SUGGEST' ? 'warn' : 'bad'}">${esc(s.autotune_mode || 'AUTO')}</div><div class="s">${esc((s.last_autotune && s.last_autotune.summary) || 'Adaptive tuning ready')}</div></div>`;
+  renderProgress(d);
+}
+async function loadStatus(opts={}){
+  const d = await api('/agentic-ai-scanner/api/status');
+  if (opts.forceSettings || !_settingsDirty) {
+    fillSettings(d);
+  } else {
+    _settings = d.settings || _settings;
+    if (Array.isArray(d.watchlists)) _lastWatchlists = d.watchlists;
+  }
+  fillStats(d);
+  return d;
+}
+function buildSettingsPayload(){
+  return {
+    enabled: $('enabled').value === '1',
+    watchlist_id: $('watchlist').value,
+    interval_seconds: Number($('interval').value || 3600),
+    max_symbols: Number($('max-symbols').value || 80),
+    target_dte: Number($('target-dte').value || 45),
+    min_confidence: Number($('min-confidence').value || 72),
+    min_uae_score: Number($('min-uae').value || 65),
+    max_alerts_per_run: Number($('max-alerts').value || 8),
+    trade_type: $('trade-type').value,
+    require_regime_alignment: $('require-align').value === '1',
+    strike_width: $('width').value === 'AUTO' ? 'AUTO' : Number($('width').value || 5),
+    short_delta: Number($('short-delta').value || 0.45),
+    target_rr: Number($('target-rr').value || 1.0),
+    min_rr: Number($('min-rr').value || 0.70),
+    earn_guard: Number($('earn-guard').value || 14),
+    autotune_mode: $('autotune-mode').value,
+    incremental_enabled: $('incremental-enabled').value === '1',
+    filters_json: JSON.stringify(readFilters())
+  };
+}
+
+async function startScanner(){
+  await runNow(true);
+}
+async function stopScanner(){
+  setLine('Stopping scanner watcher...', 'warn');
+  try {
+    const d = await api('/agentic-ai-scanner/api/stop', {method:'POST', body:JSON.stringify({})});
+    setLine(d.message || 'Scanner watcher stopped.', 'good');
+    await loadStatus();
+  } catch(e){ setLine(e.message, 'bad'); }
+}
+async function saveSettings(){
+  setLine('Saving settings...','warn');
+  try {
+    const payload = buildSettingsPayload();
+    const d = await api('/agentic-ai-scanner/api/settings', {method:'POST', body:JSON.stringify(payload)});
+    _settings = d.settings || _settings;
+    _filters = (_settings && _settings.filters) ? _settings.filters : readFilters();
+    try { localStorage.setItem('agentic_ai_ui_settings', JSON.stringify(payload)); } catch(e) {}
+    _settingsDirty = false;
+    fillSettings({settings:_settings, watchlists:_lastWatchlists});
+    setLine('Settings saved and reloaded.','good');
+  } catch (e) { setLine(e.message, 'bad'); }
+}
+async function pollRunUntilDone(){
+  if (_pollTimer) clearInterval(_pollTimer);
+  _pollTimer = setInterval(async () => {
+    try {
+      const d = await loadStatus();
+      const p = d.progress || {};
+      if (!p.running) {
+        clearInterval(_pollTimer);
+        _pollTimer = null;
+        const summary = d.last_run_cache?.summary || d.last_run || {};
+        const cands = summary.candidates ?? 0;
+        const newf = summary.new_findings ?? 0;
+        const alerts = summary.alerts_sent ?? 0;
+        setLine(cands ? `Run complete: ${cands} candidates, ${newf} new, ${alerts} alerts.` : `Run complete: no results found. Check the tuning suggestions below.`, cands ? 'good' : 'warn');
+        if (!cands && (d.suggestions || []).length) {
+          $('progress-suggestions').textContent = d.suggestions.map((x, i) => `${i+1}. ${x}`).join('\n\n');
+        }
+        await loadHistory();
+      }
+    } catch (e) {
+      setLine(e.message, 'bad');
+      if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+    }
+  }, 1200);
+}
+async function runNow(forceFullRun=false){
+  setLine(forceFullRun ? 'Starting a fresh full scan...' : 'Starting incremental scan for remaining symbols in the selected watchlist...','warn');
+  try {
+    const payload = buildSettingsPayload();
+    payload.incremental = !forceFullRun;
+    payload.force_full_run = !!forceFullRun;
+    const d = await api('/agentic-ai-scanner/api/run', {method:'POST', body:JSON.stringify(payload)});
+    if (d.started) {
+      await loadStatus();
+      pollRunUntilDone();
+    } else {
+      setLine(d.message || 'Unable to start scan.', 'bad');
+    }
+  } catch(e){ setLine(e.message, 'bad'); }
+}
+function baseTradeText(r){
+  const s = r.strategy || {};
+  const family = s.trade_family || r.trade_family || 'n/a';
+  const fit = s.strategy_fit || 'n/a';
+  const exp = s.expiry || r.expiry || 'n/a';
+  const dte = s.dte || r.dte || 'n/a';
+  const legs = s.legs || r.legs || '';
+  return `${esc(fit)}<div class="muted">${esc(exp)} | DTE ${esc(dte)}</div><div class="muted">${esc(legs)}</div>`;
+}
+function evidenceText(r){
+  const m = r.metrics || {};
+  const fb = m.factor_bundle || {};
+  const ev = fb.evidence || [];
+  const arr = [
+    `Family: ${(r.strategy && r.strategy.trade_family) || r.trade_family || 'n/a'}`,
+    `Reason: ${(r.strategy && r.strategy.trade_family_reason) || r.trade_family_reason || 'n/a'}`,
+    `POP: ${fmt((r.strategy && r.strategy.pop) || r.pop, 1)}%`,
+    `Expected move: ${fmt(((r.strategy && r.strategy.expected_move) || r.expected_move || {}).expected_move_pct, 2)}% over target DTE`,
+    `Market / sector: ${((m.score_detail || {}).market_alignment_score ?? 'n/a')} / ${((m.score_detail || {}).sector_alignment_score ?? 'n/a')}`,
+    `Price action score: ${((fb.factors || {}).price_action ?? 'n/a')} | Volume: ${((fb.factors || {}).volume ?? 'n/a')} | Flow: ${((fb.factors || {}).flow ?? 'n/a')} | IV: ${((fb.factors || {}).iv ?? 'n/a')} | Risk: ${((fb.factors || {}).risk ?? 'n/a')}`
+  ];
+  return arr.concat(ev).join('\n\n');
+}
+function summaryText(r){
+  const m = r.metrics || {};
+  const sd = m.score_detail || {};
+  const fb = m.factor_bundle || {};
+  const daily = (m.daily || {});
+  const pa = m.price_action_quality || {};
+  const oiq = m.option_oi_quality || {};
+  const exp = sd.expected_move || r.expected_move || {};
+  const parts = [];
+  parts.push(`Trade family: ${r.trade_family || (r.strategy && r.strategy.trade_family) || 'n/a'}`);
+  parts.push(`Strategy fit: ${(r.strategy && r.strategy.strategy_fit) || 'n/a'}`);
+  parts.push(`Score: ${r.score || r.confidence || 0}/100`);
+  parts.push(`POP: ${fmt((r.strategy && r.strategy.pop) || r.pop, 1)}%`);
+  parts.push(`Expected move: ${fmt(exp.expected_move_pct, 2)}% in ${r.dte || (r.strategy && r.strategy.dte) || 'x'} days`);
+  parts.push(`IV proxy: ${fmt((r.strategy && r.strategy.iv_proxy) || (r.metrics && r.metrics.option_oi_buildup_45d && r.metrics.option_oi_buildup_45d.iv_proxy), 2)}`);
+  parts.push(`Prior price action: 1D ${fmt(pa.ret_1d_pct, 2)}%, 5D ${fmt(pa.ret_5d_pct, 2)}%, 20D ${fmt(pa.ret_20d_pct, 2)}%, 60D ${fmt(pa.ret_60d_pct, 2)}%`);
+  if (daily && daily.volume_ratio20 !== undefined) parts.push(`Volume ratio: ${fmt(daily.volume_ratio20, 2)}x`);
+  parts.push(`OI/flow: ${oiq.summary || 'n/a'}`);
+  if (fb && fb.factors) parts.push(`Factor weights: market ${fb.factors.market}, sector ${fb.factors.sector}, price ${fb.factors.price_action}, vol ${fb.factors.volume}, sr ${fb.factors.support_resistance}, flow ${fb.factors.flow}, iv ${fb.factors.iv}, risk ${fb.factors.risk}`);
+  return parts.join('\n\n');
+}
+function rowMatches(r){
+  const q = $('filter-q').value.trim().toLowerCase();
+  const fam = $('filter-family').value.trim();
+  const status = $('filter-status').value.trim();
+  const minConf = Number($('filter-min-confidence').value || 0);
+  const family = r.trade_family || (r.strategy && r.strategy.trade_family) || '';
+  const blob = [r.symbol, r.rationale, family, r.strategy && r.strategy.strategy_fit, r.strategy && r.strategy.legs].filter(Boolean).join(' ').toLowerCase();
+  if (q && !blob.includes(q)) return false;
+  if (fam && family !== fam) return false;
+  if (status && String(r.status || '').toUpperCase() !== status) return false;
+  if ((r.confidence || 0) < minConf) return false;
+  return true;
+}
+function renderHistory(){
+  const tb = $('history-body');
+  const rows = _items.filter(rowMatches);
+  if (!rows.length){ tb.innerHTML = '<tr><td colspan="10" class="muted">No matching findings.</td></tr>'; return; }
+  tb.innerHTML = rows.map(r => {
+    const s = r.strategy || {};
+    const family = r.trade_family || s.trade_family || 'n/a';
+    const familyClass = famClass(family);
+    const dir = String(r.direction || '').toLowerCase();
+    const move = (s.expected_move && s.expected_move.expected_move_pct !== undefined) ? `${fmt(s.expected_move.expected_move_pct, 2)}%` : 'n/a';
+    const pop = fmt(s.pop || r.pop, 1);
+    const exp = s.expiry || r.expiry || 'n/a';
+    return `<tr>
+      <td>${esc(r.found_at)}<div class="muted">Seen ${r.seen_count || 1}x</div></td>
+      <td><b>${esc(r.symbol)}</b><div class="muted">${esc(r.sector || '')}</div></td>
+      <td><span class="pill2 ${familyClass}">${esc(family)}</span><div class="muted">${esc((s.strategy_fit || ''))}</div></td>
+      <td><span class="score ${r.confidence >= 80 ? 'good' : r.confidence >= 72 ? 'warn' : 'bad'}">${r.confidence || 0}</span><div class="muted">${esc(r.grade || '')}</div></td>
+      <td><span class="pill2 ${clsFor(dir)}">${esc(dir ? dir.charAt(0).toUpperCase() + dir.slice(1) : 'Neutral')}</span><div class="muted">${esc(r.recommendation || '')}</div></td>
+      <td>${baseTradeText(r)}</td>
+      <td><b>${esc(pop)}%</b><div class="muted">${esc(move)} expected move</div><div class="muted">Exp ${esc(exp)}</div></td>
+      <td class="wrap">${esc((r.rationale || '').slice(0, 380))}${(r.rationale || '').length > 380 ? '...' : ''}</td>
+      <td><span class="pill2">${esc(r.status || 'NEW')}</span><div class="muted">${r.alert_sent_at ? 'Alert sent' : 'No alert'}</div></td>
+      <td><button class="btn" onclick="showDetail(${r.id})">Details</button> <button class="btn" onclick="setStatus(${r.id}, 'REVIEWED')">Reviewed</button> <button class="btn warn" onclick="setStatus(${r.id}, 'DISMISSED')">Dismiss</button></td>
+    </tr>`;
+  }).join('');
+}
+async function loadHistory(){
+  const qs = new URLSearchParams({limit:'200'});
+  const sym = $('filter-q').value.trim();
+  if (sym && /^[A-Za-z0-9._-]+$/.test(sym) && sym.length <= 15) qs.set('symbol', sym.toUpperCase());
+  const status = $('filter-status').value.trim(); if (status) qs.set('status', status);
+  const d = await api('/agentic-ai-scanner/api/history?' + qs.toString());
+  _items = d.items || [];
+  renderHistory();
+}
+async function setStatus(id, status){ await api(`/agentic-ai-scanner/api/finding/${id}/status`, {method:'POST', body:JSON.stringify({status})}); await loadHistory(); }
+async function showDetail(id){
+  const d = await api(`/agentic-ai-scanner/api/finding/${id}`);
+  const f = d.finding || {};
+  $('detail-title').textContent = `${f.symbol || 'Finding'} • ${f.trade_family || (f.strategy && f.strategy.trade_family) || ''}`;
+  $('detail-sub').textContent = `${f.found_at || ''} | Score ${f.score || f.confidence || 0} | ${f.direction || ''}`;
+  $('detail-evidence').textContent = evidenceText(f);
+  $('detail-summary').textContent = summaryText(f);
+  $('detail-json').textContent = JSON.stringify(f, null, 2);
+  $('detail-modal').style.display = 'flex';
+}
+function closeDetail(){ $('detail-modal').style.display = 'none'; }
+async function loadAll(){
+  const issues = [];
+  let statusData = null;
+  try { statusData = await loadStatus({forceSettings:true}); } catch (e) { issues.push('status: ' + e.message); }
+  try { await loadHistory(); } catch (e) { issues.push('history: ' + e.message); }
+  if (issues.length) {
+    setLine('Loaded with warnings: ' + issues.join(' | '), issues.length ? 'warn' : 'muted');
+  } else {
+    setLine('Loaded.', 'muted');
+  }
+  return statusData;
+}
+$('filter-status').addEventListener('change', ()=>renderHistory());
+$('filter-family').addEventListener('change', ()=>{ _activeFamily = $('filter-family').value; renderHistory(); });
+$('filter-q').addEventListener('input', ()=>renderHistory());
+$('filter-min-confidence').addEventListener('input', ()=>renderHistory());
+wireSettingsDirtyEvents();
+loadAll();
+setInterval(()=>loadStatus().catch(()=>{}), 60000);
+</script>
+</body>
+</html>

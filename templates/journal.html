@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Trading Journal</title>
+    <link rel="stylesheet" href="/static/journal.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  </head>
+  <body>
+    <form
+      method="POST"
+      action="/journal/run_scheduler"
+      style="margin-bottom: 20px"
+    >
+      <button
+        type="submit"
+        style="
+          background-color: #4caf50;
+          color: white;
+          padding: 10px 20px;
+          border: none;
+          border-radius: 5px;
+          cursor: pointer;
+        "
+      >
+        Run Scheduler
+      </button>
+    </form>
+    <h2>Add Trade</h2>
+    <span id="journal-root-start"></span>
+    <form method="POST" action="/journal/add">
+      <input name="entry_date" type="date" placeholder="Entry Date" />
+      <input name="symbol" placeholder="Symbol" required />
+      <select name="trade_type">
+        <option value="PS">Short Put</option>
+        <option value="CS">Short Call</option>
+        <option value="PB">Long Put</option>
+        <option value="CB">Long Call</option>
+      </select>
+      <input name="quantity" type="number" placeholder="Qty" required />
+      <input name="expiry" type="date" placeholder="Expiry" required />
+      <input name="long_strike" placeholder="Long Strike" required />
+      <input name="short_strike" placeholder="Short Strike (optional)" />
+      <input name="entry_price" placeholder="Entry Price" required />
+      <input name="notes" placeholder="Notes" />
+      <button>Add</button>
+    </form>
+
+    <h2>Open Trades</h2>
+    <table>
+      <tr>
+        <th>ID</th>
+        <th>Trade Date</th>
+        <th>Symbol</th>
+        <th>Expiry</th>
+        <th>Type</th>
+        <th>Long Strike</th>
+        <th>Short Strike</th>
+        <th>Premium</th>
+        <th>Qty</th>
+        <th>Entry Reason</th>
+        <th>Entry OI</th>
+        <th>Current OI</th>
+        <th>Current Price</th>
+        <th>Outlook</th>
+        <th>Suggested Action</th>
+        <th>Close</th>
+      </tr>
+
+      {% for t in open_trades %}
+      <tr>
+        <td>{{t[0]}}</td>
+        <td>{{t[1]}}</td>
+        <td>{{t[2]}}</td>
+        <td>{{t[3]}}</td>
+        <td>{{t[4]}}</td>
+        <td>{{t[5]}}</td>
+        <td>{{t[6]}}</td>
+        <td>{{t[7]}}</td>
+        <td>{{t[8]}}</td>
+        <td>{{t[9]}}</td>
+        <td>{{t[10]}}</td>
+        <td>
+          <form method="POST" action="/journal/close/{{t[0]}}">
+            <input name="exit_price" placeholder="Exit" />
+            <button>Close</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <h2>Closed Trades</h2>
+    <table>
+      <tr>
+        <th>ID</th>
+        <th>Symbol</th>
+        <th>Type</th>
+        <th>PnL</th>
+      </tr>
+      {% for t in closed_trades %}
+      <tr>
+        <td>{{t[0]}}</td>
+        <td>{{t[1]}}</td>
+        <td>{{t[2]}}</td>
+        <td>{{t[11]}}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </body>
+  <script src="/static/widgetizer.js"></script>
+  <script>
+    (function(){
+      var start=document.getElementById('journal-root-start');
+      if(start){ var h=start.previousElementSibling; start.parentNode.removeChild(start);
+        var root=document.createElement('div'); root.id='journal-root';
+        var nodes=[],n=h; while(n){nodes.push(n);n=n.nextElementSibling;}
+        h.parentNode.insertBefore(root,h); nodes.forEach(function(x){root.appendChild(x);}); }
+      Widgetizer.init({page:'journal',container:'#journal-root',mode:'heading',heading:'h2',defaultSpan:12,spans:[6,8,12]});
+    })();
+  </script>
+</html>

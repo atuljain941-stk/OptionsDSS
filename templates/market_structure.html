@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Market Structure Scanner</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #172033;
+      --card2: #101827;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --line: rgba(148,163,184,.18);
+      --good: #22c55e;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+      --accent: #818cf8;
+    }
+    body { margin:0; background: linear-gradient(180deg, #0b1120, #111827); color:var(--text); font-family: Inter, Arial, sans-serif; }
+    .wrap { max-width: 1480px; margin: 0 auto; padding: 18px; }
+    .topbar { display:flex; flex-wrap:wrap; gap:10px; justify-content:space-between; align-items:center; margin-bottom: 14px; }
+    .title { font-size: 24px; font-weight: 900; letter-spacing: .01em; }
+    .subtitle { color: var(--muted); margin-top: 4px; font-size: 13px; }
+    .toolbar, .summary { background: rgba(23, 32, 51, .92); border: 1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.24); }
+    .toolbar { display:grid; grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr auto; gap:10px; align-items:end; }
+    label { display:block; font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+    input, select, button, textarea { font: inherit; }
+    input, select { width:100%; background: rgba(8,12,24,.7); border: 1px solid var(--line); color: var(--text); border-radius: 12px; padding: 10px 12px; outline: none; }
+    button { border:0; border-radius: 12px; padding: 10px 14px; cursor:pointer; font-weight:800; color:#fff; background: linear-gradient(180deg, rgba(129,140,248,.92), rgba(99,102,241,.92)); box-shadow: 0 8px 22px rgba(99,102,241,.18); }
+    button.secondary { background: linear-gradient(180deg, rgba(71,85,105,.9), rgba(51,65,85,.9)); }
+    button:hover { filter: brightness(1.05); }
+    .summary { margin-top: 14px; display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+    .chip { background: rgba(8,12,24,.65); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+    .chip .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .chip .v { font-size: 20px; font-weight: 900; margin-top: 4px; }
+    .status { margin-top: 10px; color: var(--muted); font-size: 12px; }
+    .results { margin-top: 14px; display:grid; gap: 14px; }
+    .card { background: rgba(23, 32, 51, .94); border: 1px solid var(--line); border-radius: 18px; padding: 14px; box-shadow: 0 14px 34px rgba(0,0,0,.22); }
+    .card-head { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:flex-start; }
+    .sym { font-size: 22px; font-weight: 900; }
+    .meta { color: var(--muted); font-size: 12px; }
+    .badge { display:inline-flex; align-items:center; gap:6px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: rgba(8,12,24,.65); font-size: 11px; font-weight: 800; }
+    .grid { margin-top: 12px; display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
+    .panel { background: rgba(8,12,24,.52); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+    .panel h4 { margin: 0 0 8px; font-size: 13px; letter-spacing: .02em; }
+    .mini { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .levels { display:grid; gap:8px; }
+    .level { padding: 8px 10px; border-radius: 12px; background: rgba(255,255,255,.03); border: 1px solid rgba(148,163,184,.1); }
+    .level .row { display:flex; justify-content:space-between; gap:8px; font-size: 12px; }
+    .level b { font-size: 13px; }
+    .summary-text { margin-top: 10px; font-size: 13px; line-height: 1.55; color: #dbe3f0; }
+    .pill-good { color: var(--good); }
+    .pill-warn { color: var(--warn); }
+    .pill-bad { color: var(--bad); }
+    pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; color: #d7def0; }
+    @media (max-width: 1100px) { .toolbar { grid-template-columns: 1fr 1fr; } .grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div>
+        <div class="title">Institutional Market Structure Scanner</div>
+        <div class="subtitle">Watchlist-driven multi-timeframe analysis with volume profile, support/resistance, mean reversion, and reversal mapping.</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a href="/api/scanner/" style="text-decoration:none"><button class="secondary" type="button">Back to Scanner</button></a>
+        <a href="/" style="text-decoration:none"><button class="secondary" type="button">Dashboard</button></a>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div>
+        <label>Watchlist</label>
+        <select id="watchlist"></select>
+      </div>
+      <div>
+        <label>Benchmark</label>
+        <input id="benchmark" value="SPY" />
+      </div>
+      <div>
+        <label>Monthly filter</label>
+        <select id="monthly-filter">
+          <option value="all">All symbols</option>
+          <option value="overbought">Overbought only</option>
+          <option value="oversold">Oversold only</option>
+        </select>
+      </div>
+      <div>
+        <label>RSI diff threshold</label>
+        <input id="threshold" type="number" value="20" min="0" step="1" />
+      </div>
+      <div>
+        <label>Max symbols</label>
+        <input id="max-symbols" type="number" value="60" min="1" step="1" />
+      </div>
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+        <button id="run">Run analysis</button>
+        <button id="refresh" class="secondary" type="button">Refresh lists</button>
+      </div>
+    </div>
+
+    <div class="summary" id="summary">
+      <div class="chip"><div class="k">Results</div><div class="v" id="sum-results">0</div></div>
+      <div class="chip"><div class="k">Avg confidence</div><div class="v" id="sum-confidence">—</div></div>
+      <div class="chip"><div class="k">Overbought</div><div class="v" id="sum-ob">—</div></div>
+      <div class="chip"><div class="k">Oversold</div><div class="v" id="sum-os">—</div></div>
+      <div class="chip"><div class="k">Strong up / down</div><div class="v" id="sum-regime">—</div></div>
+      <div class="chip"><div class="k">Completed</div><div class="v" id="sum-time">—</div></div>
+    </div>
+
+    <div class="status" id="status">Select a watchlist and run the scanner.</div>
+    <div class="results" id="results"></div>
+  </div>
+
+  <script src="/static/market_structure.js"></script>
+  <script src="/static/panel_tools.js"></script>
+</body>
+</html>
