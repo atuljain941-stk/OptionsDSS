@@ -61,7 +61,12 @@ def score_symbol(symbol: str) -> dict:
             score += oi_score
             details["oi"] = {"score": oi_score, "growth_pct": round(oi_growth,1),
                              "call_pct": round(call_pct,1), "pcr": round(pcr,3)}
-            if oi_score >= 1.5: signals.append(f"OI building +{round(oi_growth)}% (calls {round(call_pct)}%)")
+            if oi_score >= 1.5:
+                signals.append(f"OI building +{round(oi_growth)}% (calls {round(call_pct)}%)")
+            else:
+                signals.append(f"⚠ OI not building meaningfully (+{round(oi_growth)}% over 5d, calls {round(call_pct)}%)")
+        else:
+            signals.append("⚠ Not enough recent options OI history for this symbol")
     except: details["oi"] = {"score": 0, "error": True}
 
     # ── 2. Regime (0-2) ─────────────────────────────────────────────────
@@ -90,7 +95,12 @@ def score_symbol(symbol: str) -> dict:
             score += rg_score
             details["regime"] = {"score": rg_score, "regime": regime,
                                   "bias": bias, "confidence": conf}
-            if rg_score >= 1.0: signals.append(f"Regime: {regime} ({bias})")
+            if rg_score >= 1.0:
+                signals.append(f"Regime: {regime} ({bias})")
+            else:
+                signals.append(f"⚠ Regime not bullish/trending ({regime or 'unknown'}, {bias or 'no clear bias'})")
+        else:
+            signals.append("⚠ No regime scan data available for this symbol")
     except: details["regime"] = {"score": 0}
 
     # ── 3. S/R Proximity / Breakout (0-2) ───────────────────────────────
@@ -107,6 +117,10 @@ def score_symbol(symbol: str) -> dict:
             if sym_sr:
                 sr_score = 1.5
                 signals.append(f"S/R Breakout detected")
+            else:
+                signals.append("⚠ No S/R breakout detected")
+        else:
+            signals.append("⚠ No S/R breakout scan data available")
         details["sr"] = {"score": sr_score}
         score += sr_score
     except: details["sr"] = {"score": 0}
@@ -126,6 +140,10 @@ def score_symbol(symbol: str) -> dict:
                 raw_score = sym_inst.get("score", 0)
                 inst_score = min(2, round(raw_score / 5, 1))
                 signals.append(f"Institutional setup: {sym_inst.get('breakout_type','?')} (score {raw_score})")
+            else:
+                signals.append("⚠ No institutional setup detected")
+        else:
+            signals.append("⚠ No institutional scan data available")
         details["institutional"] = {"score": inst_score}
         score += inst_score
     except: details["institutional"] = {"score": 0}
@@ -147,6 +165,10 @@ def score_symbol(symbol: str) -> dict:
                 if "bull" in str(setup).lower():
                     rsi_score = 2.0
                     signals.append(f"RSI MTF Bull setup")
+                else:
+                    signals.append(f"⚠ RSI MTF not in a bull setup ({setup or 'no clear setup'})")
+            else:
+                signals.append("⚠ No RSI MTF setup detected")
         details["rsi_mtf"] = {"score": rsi_score}
         score += rsi_score
     except: details["rsi_mtf"] = {"score": 0}
@@ -170,6 +192,10 @@ def score_symbol(symbol: str) -> dict:
                 elif "Bullish" in bias:              oib_score = 1.5
                 elif "Sideways" not in bias and bs > 0: oib_score = 0.5
                 signals.append(f"OI Buildup: {bias} (5d: {p5d:+.1f}%)")
+            else:
+                signals.append("⚠ No OI buildup data for this symbol")
+        else:
+            signals.append("⚠ No OI buildup scan data available")
         details["oi_buildup"] = {"score": oib_score}
         score += oib_score
     except: details["oi_buildup"] = {"score": 0}

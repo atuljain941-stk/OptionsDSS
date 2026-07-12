@@ -105,6 +105,42 @@ def create_app():
     except Exception as e:
         print(f"[app] WARNING: watchlist_manager not loaded — {e}")
 
+    #try:
+    #    from .scanners.scanner_builder import start_price_backfill_watcher
+        # started3 = start_price_backfill_watcher(interval_seconds=120, batch_size=5)
+        #print(f"[app] Scanner price backfill watcher {'started' if started3 else 'already running'}")
+    #except Exception as e:
+    #    print(f"[app] WARNING: price backfill watcher not started — {e}")
+
+    #try:
+    #    from .scanners.scanner_builder import start_intraday_backfill_watcher
+    #    started3b = start_intraday_backfill_watcher(interval_seconds=150, batch_size=3)
+    #    print(f"[app] Scanner intraday backfill watcher {'started' if started3b else 'already running'}")
+    #except Exception as e:
+    #    print(f"[app] WARNING: intraday backfill watcher not started — {e}")
+
+    #try:
+    #    from .scanners.scanner_builder import start_daily_price_refresh_watcher
+    #    started3c = start_daily_price_refresh_watcher(interval_seconds=300, batch_size=25)
+    #    print(f"[app] Scanner daily price refresh watcher {'started' if started3c else 'already running'}")
+    #except Exception as e:
+    #    print(f"[app] WARNING: daily price refresh watcher not started — {e}")
+
+    #try:
+    #    from .scanners.scanner_builder import start_intraday_price_refresh_watcher
+    #    started3d = start_intraday_price_refresh_watcher(interval_seconds=420, batch_size=15)
+    #    print(f"[app] Scanner intraday price refresh watcher {'started' if started3d else 'already running'}")
+    #except Exception as e:
+    #    print(f"[app] WARNING: intraday price refresh watcher not started — {e}")
+
+    #try:
+    #    from .services.technical_snapshot import technical_snapshot_bp, start_technical_snapshot_watcher
+    #    app.register_blueprint(technical_snapshot_bp)
+    #    started4 = start_technical_snapshot_watcher(interval_seconds=180, batch_symbols=10)
+    #    print(f"[app] Technical snapshot cache watcher {'started' if started4 else 'already running'}")
+    #except Exception as e:
+    #    print(f"[app] WARNING: technical snapshot cache not started — {e}")
+
     try:
         from .scanners.institutional_scanner import inst_bp
         app.register_blueprint(inst_bp)

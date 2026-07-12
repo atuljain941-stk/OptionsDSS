@@ -430,9 +430,17 @@ def _format_message(symbol: str, bucket: str, opp: Dict, source_label: str = "")
         if price is not None:
             lines.append(f"Price: {price}")
     pros = opp.get("pros") or []
+    cons = opp.get("cons") or []
     if pros:
-        pros_limit = 3 if (opp.get("trade_type") and opp.get("trade_type") != "SCAN") else 5
-        lines.append("Why: " + "; ".join(pros[:pros_limit]))
+        lines.append("Why: " + "; ".join(pros))
+    if cons:
+        # Cons were computed by _entry_score all along but never shown in
+        # the message before -- this is exactly what lets a reviewer see
+        # WHY a trade only got the grade it got, not just the grade
+        # itself. A B-grade trade with 4 pros and 2 real cons tells a very
+        # different story than a B-grade trade nobody can see the caution
+        # flags on.
+        lines.append("Caution: " + "; ".join(cons))
     manage = opp.get("manage")
     if manage:
         lines.append(f"Exit plan: {manage}")

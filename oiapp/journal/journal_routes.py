@@ -1431,6 +1431,51 @@ def _compute_live_pnl(trade, spot=None):
         action_reason = f"Outlook: {outlook}. {dte} DTE remaining. {pnr_status}."
         urgency = "low"
 
+    # ── Live POP (new): the actual, real-time-decaying probability, not
+    # just a DTE-bucket score adjustment. Reuses the exact same validated
+    # Black-Scholes N(d2) formula as trade_opportunity_scanner.py's
+    # _pop_credit (v66) -- as DTE decreases while the position stays OTM,
+    # this number should genuinely rise, since less time remains for the
+    # underlying to move against it. This directly answers "how does POP
+    # change as DTE decays": it's computed fresh here, live, from the
+    # CURRENT spot/DTE, not frozen at whatever it was at entry.
+    live_pop = None
+    live_pop_notes = []
+    try:
+        _reg_for_iv = _fetch_regime_signals(symbol)
+        _live_iv_pct = float(_reg_for_iv.get("iv_rank")) if _reg_for_iv.get("iv_rank") is not None else 20.0
+    except Exception:
+        _live_iv_pct = 20.0
+
+    def _bs_pop(strike, is_put_side, horizon_dte):
+        try:
+            S = max(float(spot), 0.01)
+            K = max(float(strike), 0.01)
+            T = max(float(horizon_dte), 0.5) / 365.0
+            sigma = max(0.05, min(_live_iv_pct / 100.0, 2.50))
+            r = 0.04
+            d1v = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+            d2v = d1v - sigma * math.sqrt(T)
+            ncdf = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+            p = ncdf(d2v) if is_put_side else ncdf(-d2v)
+            return round(min(97, max(50, p * 100)))
+        except Exception:
+            return None
+
+    if spot and dte is not None:
+        horizon = max(1, dte - 7)  # same DTE-7 exit-horizon convention as the scanner
+        if tt == "IC" and put_sell_s and call_sell_s:
+            pop_put = _bs_pop(put_sell_s, True, horizon)
+            pop_call = _bs_pop(call_sell_s, False, horizon)
+            if pop_put is not None and pop_call is not None:
+                live_pop = round((pop_put + pop_call) / 2)
+                live_pop_notes.append(f"Put side {pop_put}%, call side {pop_call}% (through ~{horizon} DTE)")
+        elif ss:
+            is_put = tt in ("PS", "PB")
+            live_pop = _bs_pop(ss, is_put, horizon)
+            if live_pop is not None:
+                live_pop_notes.append(f"Recomputed live from current spot/DTE (through ~{horizon} DTE, not full expiry)")
+
     # ── Probability & analytics scoring ────────────────────────────────────
     score = _trade_probability_score(t, spot, dte, atr, pnr, pnr_upper,
                                      pnr_breached, outlook, pct_of_max, unrealised_pnl,
@@ -1480,6 +1525,7 @@ def _compute_live_pnl(trade, spot=None):
         "pct_of_max_profit": pct_of_max, "max_profit": max_profit, "max_loss": max_loss,
         "dte": dte, "outlook": outlook,
         "action": action, "action_reason": action_reason, "urgency": urgency,
+        "live_pop": live_pop, "live_pop_notes": live_pop_notes,
         **score,
     }
 

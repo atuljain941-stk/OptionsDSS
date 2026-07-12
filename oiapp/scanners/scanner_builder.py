@@ -1002,16 +1002,1038 @@ def _fetch_history_cached(symbol: str, tf: str) -> Optional[pd.DataFrame]:
         return None
 
 
+def _get_max_cached_date(symbol: str) -> Optional[str]:
+    """Most recent date already in price_cache for this symbol, or None
+    if nothing is cached yet. Used to make backfills incremental instead
+    of always re-fetching the entire window."""
+    con = _conn()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS price_cache (
+            symbol TEXT NOT NULL, date TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+            PRIMARY KEY (symbol, date))""")
+        row = con.execute("SELECT MAX(date) FROM price_cache WHERE symbol=?", (symbol.upper().strip(),)).fetchone()
+        return row[0] if row and row[0] else None
+    finally:
+        con.close()
+
+
+def _backfill_price_history_to_cache(symbol: str, months: int = 132, force_full: bool = False) -> bool:
+    """Fetches daily OHLCV from yfinance and persists EVERY day to
+    price_cache (not just the latest day, unlike the existing scheduled
+    snapshot job) -- so a symbol that didn't have enough local history for
+    indicators like rsidiff90 gets a durable backfill instead of either:
+      (a) silently computing a distorted value from too little data, or
+      (b) re-fetching live from yfinance on every single scan that touches
+          this symbol, forever, with nothing ever persisted.
+
+    Gap-aware (this is the important part): if the symbol already has
+    cached data, this fetches ONLY the days since the last cached date --
+    not the entire `months` window again. A symbol backfilled yesterday
+    and checked again today fetches ~1 day of data, not 11 years of it.
+    Pass force_full=True to force a complete re-fetch regardless of what's
+    already cached.
+
+    Default full-backfill window is 132 months (11 years) -- confirmed
+    directly that a 36-month backfill only produces ~150 weekly bars after
+    resampling, far short of the ~540-bar convergence threshold
+    rsidiff90("1w") needs (calibrated on bar COUNT regardless of
+    timeframe, so weekly EMA-90 genuinely needs ~10.4 calendar years).
+    132 months gives weekly a real margin above that while daily benefits
+    even further (its own threshold only needs ~2.15 years).
+
+    Returns True if the backfill/update produced and stored usable data,
+    or if the symbol was already up to date (nothing to do is success,
+    not failure).
+    """
+    symbol = symbol.upper().strip()
+    try:
+        import yfinance as yf
+    except Exception:
+        return False
+
+    max_date_str = None if force_full else _get_max_cached_date(symbol)
+    is_incremental = max_date_str is not None
+
+    try:
+        tk = yf.Ticker(symbol)
+        if is_incremental:
+            start_date = (datetime.strptime(max_date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if start_date > today_str:
+                return True  # already up to date -- nothing to fetch, not a failure
+            df = tk.history(start=start_date, interval="1d", auto_adjust=False)
+        else:
+            # auto_adjust defaults to True in yfinance, which silently adjusts
+            # historical Close for dividends/splits -- yfinance's own docs
+            # recommend auto_adjust=False specifically for price charts/technical
+            # analysis, since that's what shows the ACTUAL traded price (what
+            # TradingView's standard chart displays), not a dividend-adjusted
+            # series. Left as the implicit default, this is a real, silent
+            # source of RSI/indicator discrepancy vs TradingView whenever a
+            # dividend or split falls within the lookback window.
+            df = tk.history(period=f"{max(1, int(months))}mo", interval="1d", auto_adjust=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"[scanner_builder] backfill failed for {symbol}: {type(e).__name__}: {e}")
+        return False
+    if df is None or df.empty:
+        # For an incremental update, "empty" commonly just means "no new
+        # trading days since the last cached one" (e.g. checked over a
+        # weekend or the same day twice) -- that's success, not failure.
+        return is_incremental
+
+    df = df.dropna(subset=["Close"])
+    if df.empty:
+        return is_incremental
+
+    con = _conn()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS price_cache (
+            symbol TEXT NOT NULL, date TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+            PRIMARY KEY (symbol, date))""")
+        rows = []
+        for ts, row in df.iterrows():
+            try:
+                date_str = pd.Timestamp(ts).strftime("%Y-%m-%d")
+                close = float(row["Close"])
+                rows.append((
+                    symbol, date_str,
+                    round(float(row.get("Open", close)), 4),
+                    round(float(row.get("High", close)), 4),
+                    round(float(row.get("Low", close)), 4),
+                    round(close, 4),
+                    int(row.get("Volume", 0) or 0),
+                ))
+            except Exception:
+                continue
+        if not rows:
+            return is_incremental
+        con.executemany(
+            "INSERT OR REPLACE INTO price_cache (symbol, date, open, high, low, close, volume) VALUES (?,?,?,?,?,?,?)",
+            rows,
+        )
+        con.commit()
+        kind = f"incremental update ({max_date_str} -> now)" if is_incremental else "full backfill"
+        print(f"[scanner_builder] {kind}: stored {len(rows)} day(s) of history for {symbol} into price_cache")
+        # _local_daily_history_cached (and the _history() call above it) is
+        # lru_cache'd -- without clearing it, the stale "insufficient/no
+        # data" result cached from before this backfill would keep being
+        # served for the rest of the process's life, making the backfill
+        # write successful but invisible to every future read.
+        try:
+            _local_daily_history_cached.cache_clear()
+        except Exception:
+            pass
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[scanner_builder] backfill store failed for {symbol}: {type(e).__name__}: {e}")
+        return False
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------
+# Intraday (1h/2h/4h) backfill -- separate table from price_cache (daily),
+# by design. Row density is the driver: 2 years of hourly data is ~3,300
+# rows/symbol vs. a few hundred for daily, and across a large watchlist
+# that's easily 1M+ rows -- keeping it separate means daily-only consumers
+# (the majority) never pay any cost for it, and intraday can have its own
+# retention policy (auto-pruned to ~2 years, matching yfinance's own
+# hourly-data limit) without touching the daily table's growth at all.
+# 1h is the single base resolution; 2h and 4h are derived by resampling
+# from the same cached 1h data, exactly like the existing daily->weekly
+# pattern -- one backfill covers all three timeframes.
+# ---------------------------------------------------------------------
+INTRADAY_RETENTION_DAYS = 729  # yfinance's own max for 1h-interval data
+
+
+def _ensure_intraday_table(con) -> None:
+    con.execute("""CREATE TABLE IF NOT EXISTS intraday_price_cache (
+        symbol TEXT NOT NULL, ts TEXT NOT NULL,
+        open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+        PRIMARY KEY (symbol, ts))""")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_intraday_symbol ON intraday_price_cache(symbol)")
+
+
+def _get_max_cached_intraday_ts(symbol: str) -> Optional[str]:
+    """Most recent timestamp already in intraday_price_cache for this
+    symbol, or None if nothing is cached yet."""
+    con = _conn()
+    try:
+        _ensure_intraday_table(con)
+        row = con.execute("SELECT MAX(ts) FROM intraday_price_cache WHERE symbol=?", (symbol.upper().strip(),)).fetchone()
+        return row[0] if row and row[0] else None
+    finally:
+        con.close()
+
+
+def _backfill_intraday_history_to_cache(symbol: str, days: int = INTRADAY_RETENTION_DAYS, force_full: bool = False) -> bool:
+    """Fetches hourly OHLCV from yfinance (capped at yfinance's own ~729-day
+    limit for 1h-interval data) and persists every bar to
+    intraday_price_cache. 2h and 4h are NOT fetched separately -- they're
+    derived from this same 1h data via resampling on read, matching the
+    existing daily->weekly pattern.
+
+    Gap-aware, same principle as the daily version: if this symbol already
+    has cached intraday data, fetches only from the last cached bar's date
+    forward, not the entire retention window again. Uses the cached
+    timestamp's DATE (not exact hour) as the fetch start -- a day's worth
+    of overlap with already-cached bars is harmless (INSERT OR REPLACE
+    just re-writes identical rows) and avoids any edge case around
+    yfinance's exact intraday start-time handling.
+
+    Returns True if the backfill/update produced and stored usable data,
+    or if the symbol was already up to date.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        import yfinance as yf
+    except Exception:
+        return False
+
+    max_ts_str = None if force_full else _get_max_cached_intraday_ts(symbol)
+    is_incremental = max_ts_str is not None
+
+    try:
+        tk = yf.Ticker(symbol)
+        if is_incremental:
+            start_date = pd.Timestamp(max_ts_str).strftime("%Y-%m-%d")
+            df = tk.history(start=start_date, interval="1h", auto_adjust=False)
+        else:
+            df = tk.history(period=f"{max(1, int(days))}d", interval="1h", auto_adjust=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"[scanner_builder] intraday backfill failed for {symbol}: {type(e).__name__}: {e}")
+        return False
+    if df is None or df.empty:
+        return is_incremental
+
+    df = df.dropna(subset=["Close"])
+    if df.empty:
+        return is_incremental
+
+    con = _conn()
+    try:
+        _ensure_intraday_table(con)
+        rows = []
+        for ts, row in df.iterrows():
+            try:
+                ts_str = pd.Timestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                close = float(row["Close"])
+                rows.append((
+                    symbol, ts_str,
+                    round(float(row.get("Open", close)), 4),
+                    round(float(row.get("High", close)), 4),
+                    round(float(row.get("Low", close)), 4),
+                    round(close, 4),
+                    int(row.get("Volume", 0) or 0),
+                ))
+            except Exception:
+                continue
+        if not rows:
+            return is_incremental
+        con.executemany(
+            "INSERT OR REPLACE INTO intraday_price_cache (symbol, ts, open, high, low, close, volume) VALUES (?,?,?,?,?,?,?)",
+            rows,
+        )
+        con.commit()
+
+        # Prune anything past the retention window -- no reason to keep
+        # data yfinance itself won't extend further back, and an
+        # ever-growing table with no upper bound is exactly the row-count
+        # problem this separate-table design was meant to avoid.
+        cutoff = (datetime.now() - timedelta(days=days + 5)).strftime("%Y-%m-%d %H:%M:%S")
+        con.execute("DELETE FROM intraday_price_cache WHERE symbol=? AND ts<?", (symbol, cutoff))
+        con.commit()
+
+        kind = f"incremental update (since {max_ts_str})" if is_incremental else "full backfill"
+        print(f"[scanner_builder] {kind}: stored {len(rows)} hourly bar(s) for {symbol} into intraday_price_cache")
+        try:
+            _local_intraday_history_cached.cache_clear()
+        except Exception:
+            pass
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[scanner_builder] intraday backfill store failed for {symbol}: {type(e).__name__}: {e}")
+        return False
+    finally:
+        con.close()
+
+
+@lru_cache(maxsize=512)
+def _local_intraday_history_cached(symbol: str) -> Optional[pd.DataFrame]:
+    """Reads the raw 1h base data for a symbol from intraday_price_cache.
+    lru_cache'd the same way _local_daily_history_cached is -- cleared
+    explicitly after a successful backfill (see above), same pattern as
+    the daily cache to avoid serving a stale "no data" result forever."""
+    symbol = symbol.upper().strip()
+    con = _conn()
+    try:
+        _ensure_intraday_table(con)
+        rows = con.execute(
+            "SELECT ts, open, high, low, close, volume FROM intraday_price_cache WHERE symbol=? ORDER BY ts ASC",
+            (symbol,),
+        ).fetchall()
+    except Exception:
+        return None
+    finally:
+        con.close()
+    if not rows:
+        return None
+    idx = pd.to_datetime([r[0] for r in rows])
+    df = pd.DataFrame({
+        "Open": [r[1] for r in rows], "High": [r[2] for r in rows],
+        "Low": [r[3] for r in rows], "Close": [r[4] for r in rows],
+        "Volume": [r[5] for r in rows],
+    }, index=idx)
+    return df
+
+
+def _history_from_local_intraday(symbol: str, tf: str) -> Optional[pd.DataFrame]:
+    """tf must be one of 1h/2h/4h. 1h reads the cached base data directly;
+    2h/4h resample from that same cached 1h data on read."""
+    base = _local_intraday_history_cached(symbol.upper().strip())
+    if base is None or base.empty:
+        return None
+    if tf == "1h":
+        return base.copy()
+    if tf in ("2h", "4h"):
+        return _resample_ohlcv(base, tf)
+    return None
+
+
+def _ensure_backfill_queue_table(con) -> None:
+    con.execute("""CREATE TABLE IF NOT EXISTS price_backfill_queue (
+        symbol TEXT PRIMARY KEY,
+        queued_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+    )""")
+
+
+import threading as _bf_track_threading
+_recently_enqueued_backfills_lock = _bf_track_threading.Lock()
+_recently_enqueued_backfills: set = set()  # {(symbol, "daily"|"intraday"), ...} -- cleared per scan run
+
+
+def _track_enqueued_backfill(symbol: str, kind: str) -> None:
+    with _recently_enqueued_backfills_lock:
+        _recently_enqueued_backfills.add((symbol.upper().strip(), kind))
+
+
+def _reset_enqueued_backfill_tracking() -> None:
+    with _recently_enqueued_backfills_lock:
+        _recently_enqueued_backfills.clear()
+
+
+def _get_enqueued_backfill_summary() -> Dict[str, List[str]]:
+    with _recently_enqueued_backfills_lock:
+        daily = sorted(s for s, k in _recently_enqueued_backfills if k == "daily")
+        intraday = sorted(s for s, k in _recently_enqueued_backfills if k == "intraday")
+    return {"daily": daily, "intraday": intraday}
+
+
+def _enqueue_price_backfill(symbol: str) -> None:
+    """Non-blocking: just records that this symbol needs a historical
+    backfill (a cheap DB write, no network call) -- safe to call from
+    inside an interactive scan's hot path. The actual fetch happens later,
+    off this request entirely, via run_pending_price_backfills()."""
+    con = _conn()
+    try:
+        _ensure_backfill_queue_table(con)
+        con.execute(
+            "INSERT OR IGNORE INTO price_backfill_queue (symbol, queued_at, status) VALUES (?, datetime('now'), 'pending')",
+            (symbol,),
+        )
+        con.commit()
+    finally:
+        con.close()
+    _track_enqueued_backfill(symbol, "daily")
+
+
+def run_pending_price_backfills(max_symbols: int = 5) -> Dict[str, int]:
+    """Background job: processes a SMALL batch of queued symbols per call
+    (default 5), each a real yfinance network fetch -- meant to be called
+    periodically (e.g. every few minutes) by a scheduler, NOT synchronously
+    from within a scan. This is what actually performs the backfills that
+    _history() only *queues* during interactive use, keeping live queries
+    fast while still catching every thin-history symbol up over time.
+    Register with job_registry to run on a schedule; see app_factory.py's
+    existing job registration pattern for other periodic jobs.
+    """
+    con = _conn()
+    try:
+        _ensure_backfill_queue_table(con)
+        rows = con.execute(
+            "SELECT symbol FROM price_backfill_queue WHERE status='pending' ORDER BY queued_at ASC LIMIT ?",
+            (max_symbols,),
+        ).fetchall()
+    finally:
+        con.close()
+
+    result = {"processed": 0, "succeeded": 0, "failed": 0}
+    for row in rows:
+        symbol = row[0] if not hasattr(row, "keys") else row["symbol"]
+        result["processed"] += 1
+        ok = _backfill_price_history_to_cache(symbol)
+        con2 = _conn()
+        try:
+            _ensure_backfill_queue_table(con2)
+            con2.execute(
+                "UPDATE price_backfill_queue SET status=? WHERE symbol=?",
+                ("done" if ok else "failed", symbol),
+            )
+            con2.commit()
+        finally:
+            con2.close()
+        result["succeeded" if ok else "failed"] += 1
+    return result
+
+
+_price_backfill_watcher_started = False
+_price_backfill_watcher_lock = None
+
+
+def start_price_backfill_watcher(interval_seconds: int = 120, batch_size: int = 5):
+    """Runs run_pending_price_backfills() on a schedule in the background,
+    rate-limited to `batch_size` symbols per run -- this is what actually
+    performs the backfills that _history() only queues during interactive
+    scans. Call this once at app startup (see app_factory.py), same
+    pattern as start_trade_alert_watcher() and the other watchers."""
+    global _price_backfill_watcher_started, _price_backfill_watcher_lock
+    import threading
+    if _price_backfill_watcher_lock is None:
+        _price_backfill_watcher_lock = threading.Lock()
+    with _price_backfill_watcher_lock:
+        if _price_backfill_watcher_started:
+            return False
+        _price_backfill_watcher_started = True
+
+    def _loop():
+        import time as _time
+        from ..services.job_registry import register_job, is_enabled, mark_run
+        register_job(
+            "scanner_price_backfill", "Scanner price history backfill",
+            "Backfills 3 years of daily history for symbols the scanner engine "
+            "found with too little local data to compute slow indicators "
+            "(e.g. rsidiff90) reliably -- a few symbols per run, never blocking "
+            "an interactive scan.",
+            kind="interval", default_schedule={"interval_min": max(1, int(interval_seconds / 60))},
+            group="Alert Watchers", run_now_fn=lambda: run_pending_price_backfills(batch_size),
+        )
+        while True:
+            if is_enabled("scanner_price_backfill"):
+                try:
+                    result = run_pending_price_backfills(batch_size)
+                    mark_run("scanner_price_backfill", True, f"{result}")
+                except Exception as e:  # noqa: BLE001
+                    mark_run("scanner_price_backfill", False, str(e))
+            _time.sleep(max(30, interval_seconds))
+
+    t = threading.Thread(target=_loop, name="scanner-price-backfill-watcher", daemon=True)
+    t.start()
+    return True
+
+
+def _ensure_intraday_backfill_queue_table(con) -> None:
+    con.execute("""CREATE TABLE IF NOT EXISTS intraday_backfill_queue (
+        symbol TEXT PRIMARY KEY,
+        queued_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+    )""")
+
+
+def _enqueue_intraday_backfill(symbol: str) -> None:
+    """Non-blocking: records that this symbol needs an hourly-data
+    backfill. Kept in its own queue table, separate from
+    price_backfill_queue (daily) -- intraday backfills are a materially
+    heavier fetch (~3,300 hourly bars vs ~2,800 daily bars over a similar
+    window) and worth rate-limiting independently rather than competing
+    with daily backfills for the same queue's throughput."""
+    con = _conn()
+    try:
+        _ensure_intraday_backfill_queue_table(con)
+        con.execute(
+            "INSERT OR IGNORE INTO intraday_backfill_queue (symbol, queued_at, status) VALUES (?, datetime('now'), 'pending')",
+            (symbol,),
+        )
+        con.commit()
+    finally:
+        con.close()
+    _track_enqueued_backfill(symbol, "intraday")
+
+
+def run_pending_intraday_backfills(max_symbols: int = 3) -> Dict[str, int]:
+    """Background job: processes a small batch of queued symbols per call
+    (default 3 -- smaller than daily's default 5, since each intraday
+    fetch is a heavier request). Same non-blocking-for-scans design as
+    run_pending_price_backfills."""
+    con = _conn()
+    try:
+        _ensure_intraday_backfill_queue_table(con)
+        rows = con.execute(
+            "SELECT symbol FROM intraday_backfill_queue WHERE status='pending' ORDER BY queued_at ASC LIMIT ?",
+            (max_symbols,),
+        ).fetchall()
+    finally:
+        con.close()
+
+    result = {"processed": 0, "succeeded": 0, "failed": 0}
+    for row in rows:
+        symbol = row[0] if not hasattr(row, "keys") else row["symbol"]
+        result["processed"] += 1
+        ok = _backfill_intraday_history_to_cache(symbol)
+        con2 = _conn()
+        try:
+            _ensure_intraday_backfill_queue_table(con2)
+            con2.execute(
+                "UPDATE intraday_backfill_queue SET status=? WHERE symbol=?",
+                ("done" if ok else "failed", symbol),
+            )
+            con2.commit()
+        finally:
+            con2.close()
+        result["succeeded" if ok else "failed"] += 1
+    return result
+
+
+_intraday_backfill_watcher_started = False
+_intraday_backfill_watcher_lock = None
+
+
+def start_intraday_backfill_watcher(interval_seconds: int = 150, batch_size: int = 3):
+    """Same pattern as start_price_backfill_watcher, for hourly data.
+    Slightly longer interval and smaller batch than the daily watcher,
+    since each intraday fetch is heavier."""
+    global _intraday_backfill_watcher_started, _intraday_backfill_watcher_lock
+    import threading
+    if _intraday_backfill_watcher_lock is None:
+        _intraday_backfill_watcher_lock = threading.Lock()
+    with _intraday_backfill_watcher_lock:
+        if _intraday_backfill_watcher_started:
+            return False
+        _intraday_backfill_watcher_started = True
+
+    def _loop():
+        import time as _time
+        from ..services.job_registry import register_job, is_enabled, mark_run
+        register_job(
+            "scanner_intraday_backfill", "Scanner intraday (1h/2h/4h) history backfill",
+            "Backfills ~2 years of hourly history for symbols the scanner engine "
+            "found with too little local intraday data -- 2h/4h are derived from "
+            "this same 1h data by resampling, not fetched separately. A few "
+            "symbols per run, never blocking an interactive scan.",
+            kind="interval", default_schedule={"interval_min": max(1, int(interval_seconds / 60))},
+            group="Alert Watchers", run_now_fn=lambda: run_pending_intraday_backfills(batch_size),
+        )
+        while True:
+            if is_enabled("scanner_intraday_backfill"):
+                try:
+                    result = run_pending_intraday_backfills(batch_size)
+                    mark_run("scanner_intraday_backfill", True, f"{result}")
+                except Exception as e:  # noqa: BLE001
+                    mark_run("scanner_intraday_backfill", False, str(e))
+            _time.sleep(max(30, interval_seconds))
+
+    t = threading.Thread(target=_loop, name="scanner-intraday-backfill-watcher", daemon=True)
+    t.start()
+    return True
+
+
+# ---------------------------------------------------------------------
+# "Keep fresh" jobs -- distinct from the watchers above. Those only
+# process symbols explicitly queued because they were too THIN when a
+# scan touched them. These instead cycle through every symbol that
+# ALREADY has cached data and refreshes it, so a symbol backfilled once
+# doesn't silently go stale over time with nothing ever re-checking it.
+# Cheap to run broadly now that the backfill functions are gap-aware --
+# an already-current symbol costs one small incremental request, not a
+# full re-fetch, so cycling the whole cached universe through this
+# regularly is affordable.
+# ---------------------------------------------------------------------
+def get_all_cached_daily_symbols() -> List[str]:
+    con = _conn()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS price_cache (
+            symbol TEXT NOT NULL, date TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+            PRIMARY KEY (symbol, date))""")
+        rows = con.execute("SELECT DISTINCT symbol FROM price_cache").fetchall()
+        return [r[0] for r in rows]
+    finally:
+        con.close()
+
+
+def get_all_cached_intraday_symbols() -> List[str]:
+    con = _conn()
+    try:
+        _ensure_intraday_table(con)
+        rows = con.execute("SELECT DISTINCT symbol FROM intraday_price_cache").fetchall()
+        return [r[0] for r in rows]
+    finally:
+        con.close()
+
+
+def _rotate_oldest_first(all_symbols: List[str], last_touched: Dict[str, str], n: int) -> List[str]:
+    ranked = sorted(all_symbols, key=lambda s: last_touched.get(s) or "")
+    return ranked[:n]
+
+
+def run_daily_price_refresh(max_symbols: int = 25) -> Dict[str, int]:
+    """Keeps already-cached DAILY symbols fresh: a rotating batch each
+    call, oldest-refreshed-first, so every cached symbol gets touched
+    roughly once per day given a reasonable interval. Each call is cheap
+    for symbols already current (gap-aware backfill does a tiny
+    incremental check, not a full re-fetch)."""
+    all_symbols = get_all_cached_daily_symbols()
+    if not all_symbols:
+        return {"processed": 0, "succeeded": 0, "failed": 0}
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT symbol, MAX(date) as last FROM price_cache WHERE symbol IN ({}) GROUP BY symbol".format(
+                ",".join("?" * len(all_symbols))),
+            all_symbols,
+        ).fetchall()
+        last_touched = {r[0]: r[1] for r in rows}
+    finally:
+        con.close()
+    batch = _rotate_oldest_first(all_symbols, last_touched, max_symbols)
+
+    result = {"processed": 0, "succeeded": 0, "failed": 0}
+    for symbol in batch:
+        result["processed"] += 1
+        try:
+            ok = _backfill_price_history_to_cache(symbol)
+        except Exception as e:  # noqa: BLE001
+            print(f"[scanner_builder] daily refresh failed for {symbol}: {type(e).__name__}: {e}")
+            ok = False
+        result["succeeded" if ok else "failed"] += 1
+    return result
+
+
+def run_intraday_price_refresh(max_symbols: int = 15) -> Dict[str, int]:
+    """Same as run_daily_price_refresh, for already-cached intraday
+    symbols. Smaller batch than daily since each fetch is heavier."""
+    all_symbols = get_all_cached_intraday_symbols()
+    if not all_symbols:
+        return {"processed": 0, "succeeded": 0, "failed": 0}
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT symbol, MAX(ts) as last FROM intraday_price_cache WHERE symbol IN ({}) GROUP BY symbol".format(
+                ",".join("?" * len(all_symbols))),
+            all_symbols,
+        ).fetchall()
+        last_touched = {r[0]: r[1] for r in rows}
+    finally:
+        con.close()
+    batch = _rotate_oldest_first(all_symbols, last_touched, max_symbols)
+
+    result = {"processed": 0, "succeeded": 0, "failed": 0}
+    for symbol in batch:
+        result["processed"] += 1
+        try:
+            ok = _backfill_intraday_history_to_cache(symbol)
+        except Exception as e:  # noqa: BLE001
+            print(f"[scanner_builder] intraday refresh failed for {symbol}: {type(e).__name__}: {e}")
+            ok = False
+        result["succeeded" if ok else "failed"] += 1
+    return result
+
+
+_daily_refresh_watcher_started = False
+_daily_refresh_watcher_lock = None
+
+
+def start_daily_price_refresh_watcher(interval_seconds: int = 300, batch_size: int = 25):
+    """Runs run_daily_price_refresh() on a schedule -- 25 symbols every 5
+    minutes cycles a ~500-symbol watchlist through a freshness check about
+    once per day. Registered separately from the thin-symbol backfill
+    watcher above since these serve different purposes (that one handles
+    symbols that were never sufficiently backfilled; this one keeps
+    already-backfilled symbols from going stale)."""
+    global _daily_refresh_watcher_started, _daily_refresh_watcher_lock
+    import threading
+    if _daily_refresh_watcher_lock is None:
+        _daily_refresh_watcher_lock = threading.Lock()
+    with _daily_refresh_watcher_lock:
+        if _daily_refresh_watcher_started:
+            return False
+        _daily_refresh_watcher_started = True
+
+    def _loop():
+        import time as _time
+        from ..services.job_registry import register_job, is_enabled, mark_run
+        register_job(
+            "scanner_daily_price_refresh", "Scanner daily price cache refresh",
+            "Keeps already-backfilled daily price_cache symbols current going forward "
+            "(gap-aware -- only fetches new days since each symbol's last cached date, "
+            "not a full re-fetch). Separate from the thin-symbol backfill watcher, which "
+            "only handles symbols that were never sufficiently backfilled in the first place.",
+            kind="interval", default_schedule={"interval_min": max(1, int(interval_seconds / 60))},
+            group="Alert Watchers", run_now_fn=lambda: run_daily_price_refresh(batch_size),
+        )
+        while True:
+            if is_enabled("scanner_daily_price_refresh"):
+                try:
+                    result = run_daily_price_refresh(batch_size)
+                    mark_run("scanner_daily_price_refresh", True, f"{result}")
+                except Exception as e:  # noqa: BLE001
+                    mark_run("scanner_daily_price_refresh", False, str(e))
+            _time.sleep(max(30, interval_seconds))
+
+    t = threading.Thread(target=_loop, name="scanner-daily-price-refresh-watcher", daemon=True)
+    t.start()
+    return True
+
+
+_intraday_refresh_watcher_started = False
+_intraday_refresh_watcher_lock = None
+
+
+def start_intraday_price_refresh_watcher(interval_seconds: int = 420, batch_size: int = 15):
+    """Same purpose as start_daily_price_refresh_watcher, for intraday."""
+    global _intraday_refresh_watcher_started, _intraday_refresh_watcher_lock
+    import threading
+    if _intraday_refresh_watcher_lock is None:
+        _intraday_refresh_watcher_lock = threading.Lock()
+    with _intraday_refresh_watcher_lock:
+        if _intraday_refresh_watcher_started:
+            return False
+        _intraday_refresh_watcher_started = True
+
+    def _loop():
+        import time as _time
+        from ..services.job_registry import register_job, is_enabled, mark_run
+        register_job(
+            "scanner_intraday_price_refresh", "Scanner intraday price cache refresh",
+            "Keeps already-backfilled intraday (1h base) symbols current going forward, "
+            "gap-aware -- fetches only new bars since each symbol's last cached timestamp.",
+            kind="interval", default_schedule={"interval_min": max(1, int(interval_seconds / 60))},
+            group="Alert Watchers", run_now_fn=lambda: run_intraday_price_refresh(batch_size),
+        )
+        while True:
+            if is_enabled("scanner_intraday_price_refresh"):
+                try:
+                    result = run_intraday_price_refresh(batch_size)
+                    mark_run("scanner_intraday_price_refresh", True, f"{result}")
+                except Exception as e:  # noqa: BLE001
+                    mark_run("scanner_intraday_price_refresh", False, str(e))
+            _time.sleep(max(30, interval_seconds))
+
+    t = threading.Thread(target=_loop, name="scanner-intraday-price-refresh-watcher", daemon=True)
+    t.start()
+    return True
+
+
+# ---------------------------------------------------------------------
+# Manual, on-demand bulk backfill -- separate from the automatic watcher
+# above entirely. That watcher only processes a small rate-limited batch
+# (5 symbols/2min) continuously; this is for deliberately backfilling an
+# entire watchlist's price+volume history in one go (e.g. "run this over
+# the weekend"), triggered explicitly, never automatically. Doesn't touch
+# or interfere with the automatic watcher's queue -- this works directly
+# off a symbol list you provide.
+# ---------------------------------------------------------------------
+_bulk_backfill_status: Dict[str, Any] = {
+    "running": False, "processed": 0, "total": 0, "succeeded": 0, "failed": 0,
+    "current_symbol": None, "started_at": None, "finished_at": None,
+}
+_bulk_backfill_lock = None
+
+
+def _is_daily_data_fresh(symbol: str, max_age_days: int = 4) -> bool:
+    """True if this symbol's price_cache data is already current enough
+    to skip entirely in a bulk operation -- not just "cheap to check" but
+    "not worth even the network round-trip or the polite delay between
+    symbols." 4 days covers weekends/holidays without needing a real
+    market-calendar lookup."""
+    max_date = _get_max_cached_date(symbol)
+    if not max_date:
+        return False
+    try:
+        max_dt = datetime.strptime(max_date, "%Y-%m-%d")
+    except Exception:
+        return False
+    return (datetime.now() - max_dt).days <= max_age_days
+
+
+def bulk_backfill_symbols(symbols: List[str], months: int = 132, delay_seconds: float = 1.0) -> None:
+    """Runs synchronously in whatever thread calls it -- callers that want
+    this to not block (e.g. the API route below) should run it in a
+    background thread. Price + volume only, same fields the automatic
+    backfill already stores -- nothing else.
+
+    Symbols that already have fresh data are skipped entirely -- no fetch,
+    no per-symbol delay. This is what makes re-running this button on an
+    already-backfilled watchlist fast (seconds, touching only what
+    actually changed) instead of slow (minutes, from the cumulative
+    polite-delay across hundreds of symbols that had nothing to update)."""
+    global _bulk_backfill_status
+    import threading
+    import time as _time
+    global _bulk_backfill_lock
+    if _bulk_backfill_lock is None:
+        _bulk_backfill_lock = threading.Lock()
+
+    with _bulk_backfill_lock:
+        if _bulk_backfill_status["running"]:
+            return
+        _bulk_backfill_status = {
+            "running": True, "processed": 0, "total": len(symbols),
+            "succeeded": 0, "failed": 0, "skipped_fresh": 0, "current_symbol": None,
+            "started_at": datetime.now().isoformat(timespec="seconds"), "finished_at": None,
+        }
+
+    for sym in symbols:
+        with _bulk_backfill_lock:
+            _bulk_backfill_status["current_symbol"] = sym
+        if _is_daily_data_fresh(sym):
+            with _bulk_backfill_lock:
+                _bulk_backfill_status["processed"] += 1
+                _bulk_backfill_status["succeeded"] += 1
+                _bulk_backfill_status["skipped_fresh"] += 1
+            continue  # no fetch, no delay -- this symbol needed nothing
+        ok = _backfill_price_history_to_cache(sym, months=months)
+        with _bulk_backfill_lock:
+            _bulk_backfill_status["processed"] += 1
+            _bulk_backfill_status["succeeded" if ok else "failed"] += 1
+        _time.sleep(max(0.0, delay_seconds))
+
+    with _bulk_backfill_lock:
+        _bulk_backfill_status["running"] = False
+        _bulk_backfill_status["current_symbol"] = None
+        _bulk_backfill_status["finished_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+@scanner_builder_bp.route("/api/bulk-backfill", methods=["POST"])
+def api_bulk_backfill():
+    """Manually trigger a full watchlist price+volume backfill. Runs in a
+    background thread -- this returns immediately with 'started': true;
+    poll /api/bulk-backfill/status for progress. Body:
+        {"watchlist_id": 3, "months": 36}          -- backfill a watchlist, or
+        {"symbols": ["AAPL","MSFT"], "months": 36} -- backfill an explicit list
+    """
+    import threading
+    payload = request.get_json(force=True) or {}
+    months = int(payload.get("months") or 132)
+    symbols = payload.get("symbols")
+    if not symbols:
+        watchlist_id = payload.get("watchlist_id")
+        symbols = _watchlist_symbols(watchlist_id)
+    symbols = list(dict.fromkeys(str(s).upper().strip() for s in (symbols or []) if s))
+    if not symbols:
+        return jsonify({"error": "No symbols found -- pass watchlist_id or symbols"}), 400
+    if _bulk_backfill_status["running"]:
+        return jsonify({"error": "A bulk backfill is already running", "status": _bulk_backfill_status}), 409
+
+    t = threading.Thread(target=bulk_backfill_symbols, args=(symbols, months), daemon=True)
+    t.start()
+    return jsonify({"ok": True, "started": True, "symbol_count": len(symbols), "months": months})
+
+
+@scanner_builder_bp.route("/api/bulk-backfill/status")
+def api_bulk_backfill_status():
+    return jsonify(_bulk_backfill_status)
+
+
+_bulk_intraday_status: Dict[str, Any] = {
+    "running": False, "processed": 0, "total": 0, "succeeded": 0, "failed": 0,
+    "current_symbol": None, "started_at": None, "finished_at": None,
+}
+_bulk_intraday_lock = None
+
+
+def _is_intraday_data_fresh(symbol: str, max_age_hours: int = 24) -> bool:
+    """Same principle as _is_daily_data_fresh, for intraday -- true if
+    this symbol's most recent cached hourly bar is recent enough to skip
+    entirely in a bulk operation."""
+    max_ts = _get_max_cached_intraday_ts(symbol)
+    if not max_ts:
+        return False
+    try:
+        max_dt = pd.Timestamp(max_ts)
+    except Exception:
+        return False
+    return (pd.Timestamp.now() - max_dt).total_seconds() / 3600.0 <= max_age_hours
+
+
+def bulk_backfill_intraday_symbols(symbols: List[str], days: int = INTRADAY_RETENTION_DAYS,
+                                    delay_seconds: float = 1.5) -> None:
+    """Same pattern as bulk_backfill_symbols (daily), for hourly data.
+    Slightly longer delay between symbols than the daily version, since
+    each intraday fetch is a heavier request. Same skip-if-fresh behavior
+    too -- symbols with recent enough data are skipped entirely, no fetch
+    and no delay, so re-running this on an already-current watchlist is
+    fast rather than slow."""
+    global _bulk_intraday_status
+    import threading
+    import time as _time
+    global _bulk_intraday_lock
+    if _bulk_intraday_lock is None:
+        _bulk_intraday_lock = threading.Lock()
+
+    with _bulk_intraday_lock:
+        if _bulk_intraday_status["running"]:
+            return
+        _bulk_intraday_status = {
+            "running": True, "processed": 0, "total": len(symbols),
+            "succeeded": 0, "failed": 0, "skipped_fresh": 0, "current_symbol": None,
+            "started_at": datetime.now().isoformat(timespec="seconds"), "finished_at": None,
+        }
+
+    for sym in symbols:
+        with _bulk_intraday_lock:
+            _bulk_intraday_status["current_symbol"] = sym
+        if _is_intraday_data_fresh(sym):
+            with _bulk_intraday_lock:
+                _bulk_intraday_status["processed"] += 1
+                _bulk_intraday_status["succeeded"] += 1
+                _bulk_intraday_status["skipped_fresh"] += 1
+            continue
+        ok = _backfill_intraday_history_to_cache(sym, days=days)
+        with _bulk_intraday_lock:
+            _bulk_intraday_status["processed"] += 1
+            _bulk_intraday_status["succeeded" if ok else "failed"] += 1
+        _time.sleep(max(0.0, delay_seconds))
+
+    with _bulk_intraday_lock:
+        _bulk_intraday_status["running"] = False
+        _bulk_intraday_status["current_symbol"] = None
+        _bulk_intraday_status["finished_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+@scanner_builder_bp.route("/api/bulk-backfill-intraday", methods=["POST"])
+def api_bulk_backfill_intraday():
+    """Manually trigger a full watchlist hourly (1h base, 2h/4h derived)
+    backfill. Same usage pattern as /api/bulk-backfill:
+        {"watchlist_id": 3, "days": 729}          -- backfill a watchlist, or
+        {"symbols": ["AAPL","MSFT"], "days": 729} -- backfill an explicit list
+    """
+    import threading
+    payload = request.get_json(force=True) or {}
+    days = int(payload.get("days") or INTRADAY_RETENTION_DAYS)
+    symbols = payload.get("symbols")
+    if not symbols:
+        watchlist_id = payload.get("watchlist_id")
+        symbols = _watchlist_symbols(watchlist_id)
+    symbols = list(dict.fromkeys(str(s).upper().strip() for s in (symbols or []) if s))
+    if not symbols:
+        return jsonify({"error": "No symbols found -- pass watchlist_id or symbols"}), 400
+    if _bulk_intraday_status["running"]:
+        return jsonify({"error": "A bulk intraday backfill is already running", "status": _bulk_intraday_status}), 409
+
+    t = threading.Thread(target=bulk_backfill_intraday_symbols, args=(symbols, days), daemon=True)
+    t.start()
+    return jsonify({"ok": True, "started": True, "symbol_count": len(symbols), "days": days})
+
+
+@scanner_builder_bp.route("/api/bulk-backfill-intraday/status")
+def api_bulk_backfill_intraday_status():
+    return jsonify(_bulk_intraday_status)
+
+
+@scanner_builder_bp.route("/api/debug/rsi/<symbol>")
+def api_debug_rsi(symbol: str):
+    """Dumps exactly what oiapp has stored and computed for a symbol, for
+    direct digit-by-digit comparison against another source (e.g. a
+    TradingView chart) -- the fastest way to tell whether a discrepancy is
+    a genuine data difference (different close prices) versus comparing
+    against a different indicator/formula entirely.
+    Usage: /scanner-builder/api/debug/rsi/BABA?days=10
+    """
+    symbol = symbol.upper().strip()
+    days = int(request.args.get("days") or 10)
+
+    df = _history(symbol, "1d")
+    if df is None or df.empty:
+        return jsonify({"symbol": symbol, "error": "no local history available for this symbol"})
+
+    close = df["Close"].astype(float)
+    rsi14 = _rsi(close, 14)
+    valid_rsi_bars = int(rsi14.notna().sum())
+    ema90 = _ema(rsi14, 90) if valid_rsi_bars >= 540 else None
+    rsidiff90 = (rsi14 - ema90) if ema90 is not None else None
+
+    recent = df.tail(days)
+    rows = []
+    for ts in recent.index:
+        rows.append({
+            "date": pd.Timestamp(ts).strftime("%Y-%m-%d"),
+            "close": round(float(close.loc[ts]), 4),
+            "rsi14": round(float(rsi14.loc[ts]), 4) if pd.notna(rsi14.loc[ts]) else None,
+            "rsidiff90": round(float(rsidiff90.loc[ts]), 4) if rsidiff90 is not None and pd.notna(rsidiff90.loc[ts]) else None,
+        })
+
+    return jsonify({
+        "symbol": symbol,
+        "total_bars_available": len(df),
+        "valid_rsi_bars": valid_rsi_bars,
+        "rsidiff90_convergence_threshold": 540,
+        "rsidiff90_trusted": valid_rsi_bars >= 540,
+        "recent_days": rows,
+        "latest_close": round(float(close.iloc[-1]), 4),
+        "latest_date": pd.Timestamp(df.index[-1]).strftime("%Y-%m-%d"),
+    })
+
+
 def _history(symbol: str, tf: str) -> Optional[pd.DataFrame]:
     symbol = str(symbol or "").upper().strip()
     tf = _normalize_tf(tf)
     mode = _scanner_history_source_mode()
+
+    # Intraday (1h/2h/4h): completely separate path from daily/weekly below
+    # -- daily-cached data can only be resampled to COARSER timeframes
+    # (daily->weekly->monthly), never finer ones, so 1h/2h/4h need their
+    # own base-resolution cache (intraday_price_cache, 1h as the base,
+    # 2h/4h derived by resampling on read -- see _history_from_local_intraday).
+    if tf in ("1h", "2h", "4h") and mode in {"auto", "db", "local", "cache", "price_cache"}:
+        local = _history_from_local_intraday(symbol, tf)
+        # Same 500-bar threshold rationale as daily (see below) -- 540 is
+        # rsidiff90's own convergence requirement; 500 gives a small margin
+        # for "trust this without a backfill" while still comfortably
+        # covering the ~843 four-hour bars a full 729-day 1h backfill
+        # produces.
+        if local is not None and not local.empty and len(local) >= 500:
+            return local.copy()
+        try:
+            _enqueue_intraday_backfill(symbol)
+        except Exception:
+            pass
+        if local is not None and not local.empty and len(local) >= 25:
+            return local.copy()
+        if mode in {"db", "local", "cache", "price_cache"}:
+            return None
 
     # DB-first for daily/weekly/monthly scanner signals.  This keeps Lookback()
     # and UAE primitives aligned with the dashboard/chart cache instead of a
     # separate provider feed that can be stale or missing recent bars.
     if mode in {"auto", "db", "local", "cache", "price_cache"}:
         local = _history_from_local_daily(symbol, tf)
+        # Directly measured (not just estimated): rsidiff90 = rsi14 - ema(rsi14,90)
+        # computed from only 200 bars can be off from its properly-converged
+        # value by 0.5-0.7+ points on typical data -- 200 was too low a bar,
+        # not a safe threshold. Convergence to a negligible (<0.01) difference
+        # empirically starts around 400-500 bars, so 500 is used here as the
+        # threshold for "trust this without a backfill."
+        if local is not None and not local.empty and len(local) >= 500:
+            return local.copy()
+        # IMPORTANT: do NOT backfill synchronously here. This function runs
+        # inside every symbol's scan (up to 8 concurrent per api_run()'s
+        # ThreadPoolExecutor) -- a live yfinance fetch per thin-history
+        # symbol here means a watchlist where most symbols need backfilling
+        # turns one interactive query into potentially 100+ blocking network
+        # calls serialized through a handful of worker threads, which is
+        # exactly what made a scan take 30+ minutes with no response.
+        # Instead: just record that this symbol needs backfilling (cheap,
+        # non-blocking) and let a separate background job (see
+        # run_pending_price_backfills below) process a few at a time,
+        # rate-limited, without ever blocking an interactive scan.
+        if tf == "1d":
+            try:
+                _enqueue_price_backfill(symbol)
+            except Exception:
+                pass
         if local is not None and not local.empty and len(local) >= 25:
             return local.copy()
         if mode in {"db", "local", "cache", "price_cache"}:
@@ -1184,7 +2206,8 @@ def _mansfield_rs_value(ctx: Dict[str, Any], benchmark: str, period: int, tf: st
 
 
 
-def _prepare_snapshot(df: pd.DataFrame, bench_df: Optional[pd.DataFrame], tf: str) -> Dict[str, Any]:
+def _prepare_snapshot(df: pd.DataFrame, bench_df: Optional[pd.DataFrame], tf: str,
+                       symbol: Optional[str] = None) -> Dict[str, Any]:
     close = df["Close"].astype(float)
     high = df["High"].astype(float)
     low = df["Low"].astype(float)
@@ -1194,18 +2217,16 @@ def _prepare_snapshot(df: pd.DataFrame, bench_df: Optional[pd.DataFrame], tf: st
     rsi3 = _rsi(close, 3)
     rsi14 = _rsi(close, 14)
     ema_rsi13 = _ema(rsi14, 13)
-    # EMA(RSI,90) needs a genuinely long, mature RSI history to mean anything —
-    # tested directly: with only 40-90 bars of underlying price history (which
-    # the local cache's own minimum-bars check would otherwise accept), this
-    # can be off from its properly-converged value by 20-40+ points and can
-    # even flip sign. Common EMA convention wants ~2x the span (180 bars) of
-    # valid input before trusting it; below that, report it as unavailable
-    # (NaN) instead of a number that looks plausible but isn't.
+    # EMA(RSI,90) needs a genuinely long, mature RSI history to mean anything.
+    # Originally used a 180-bar threshold ("~2x the span"); directly measured
+    # since then (holding a fixed point in time and varying how much history
+    # feeds the calculation) that 200 bars can still be off from the fully-
+    # converged value by 0.5-0.7+ points, and convergence to a negligible
+    # (<0.01) difference only starts around 400-500 bars. Updated accordingly.
     valid_rsi_bars = int(rsi14.notna().sum())
-    if valid_rsi_bars >= 180:
+    if valid_rsi_bars >= 500:
         ema_rsi90 = _ema(rsi14, 90)
         rsi_diff_90 = rsi14 - ema_rsi90
-        print(f"value = {rsi_diff_90}")
     else:
         ema_rsi90 = pd.Series([float("nan")] * len(rsi14), index=rsi14.index)
         rsi_diff_90 = pd.Series([float("nan")] * len(rsi14), index=rsi14.index)
@@ -1225,6 +2246,49 @@ def _prepare_snapshot(df: pd.DataFrame, bench_df: Optional[pd.DataFrame], tf: st
             rs = rs.reindex(close.index, method="ffill")
     if rs is None:
         rs = pd.Series([50.0] * len(close), index=close.index)
+
+    # Write-through to the technical_snapshot cache when we have a symbol
+    # and this is a timeframe the cache tracks (1d/1w). This function
+    # already computes all of this for its own query engine purposes --
+    # sharing it costs nothing extra and means other consumers
+    # (trade_opportunity_scanner's _get_ta, conviction_scorer, future
+    # wiring) can read an already-computed value instead of redoing the
+    # same work. Merges with any existing record rather than overwriting
+    # (see store_technical_snapshot) -- this function doesn't compute
+    # ADX/DI+/DI-/S-R, so a blind overwrite would wipe those out if
+    # regime_scanner had already filled them in for today.
+    if symbol and tf in ("1d", "1w") and len(close) > 0:
+        try:
+            from ..services.technical_snapshot import queue_technical_snapshot_write, is_snapshot_complete_today
+            # Cheap check first (one indexed SELECT) -- skip the more
+            # expensive merge-write entirely if today's record is already
+            # complete. Without this, every symbol in every scanner query
+            # did a full SELECT+INSERT merge on every single pass,
+            # regardless of whether anything needed to change -- directly
+            # measurable in a 38-candidate scanner pass as 38 redundant
+            # writes per run, most of which had nothing new to contribute.
+            if not is_snapshot_complete_today(symbol.upper().strip(), tf):
+                valid_rsi_bars_wt = int(rsi14.notna().sum())
+                rsidiff90_ok_wt = valid_rsi_bars_wt >= 540
+                queue_technical_snapshot_write(symbol.upper().strip(), tf, close.index[-1].strftime("%Y-%m-%d"), {
+                    "close": round(float(close.iloc[-1]), 4),
+                    "rsi3": round(float(rsi3.iloc[-1]), 4) if pd.notna(rsi3.iloc[-1]) else None,
+                    "rsi14": round(float(rsi14.iloc[-1]), 4) if pd.notna(rsi14.iloc[-1]) else None,
+                    "ema_rsi14_13": round(float(ema_rsi13.iloc[-1]), 4) if pd.notna(ema_rsi13.iloc[-1]) else None,
+                    "ema_rsi14_90": round(float(ema_rsi90.iloc[-1]), 4) if rsidiff90_ok_wt and pd.notna(ema_rsi90.iloc[-1]) else None,
+                    "rsidiff90": round(float(rsi_diff_90.iloc[-1]), 4) if rsidiff90_ok_wt and pd.notna(rsi_diff_90.iloc[-1]) else None,
+                    "rsidiff90_trusted": rsidiff90_ok_wt,
+                    "ema9": round(float(ema9.iloc[-1]), 4), "ema20": round(float(ema20.iloc[-1]), 4),
+                    "ema50": round(float(ema50.iloc[-1]), 4), "ema60": None,
+                    "ema200": round(float(ema200.iloc[-1]), 4) if ema200 is not None and pd.notna(ema200.iloc[-1]) else None,
+                    "bar_strength_vs_ema60": None,
+                    "macd": round(float(macd_line.iloc[-1]), 4), "macd_signal": round(float(macd_signal.iloc[-1]), 4),
+                    "macd_hist": round(float(macd_hist.iloc[-1]), 4),
+                    "adx": None, "di_plus": None, "di_minus": None,
+                    "sr_support": None, "sr_resistance": None,
+                })
+        except Exception:
+            pass  # never let a cache write failure interrupt the scanner query engine
 
     return {
         "tf": tf,
@@ -1251,6 +2315,156 @@ def _prepare_snapshot(df: pd.DataFrame, bench_df: Optional[pd.DataFrame], tf: st
             "relative_strength": rs,
         },
     }
+
+
+# ---------------------------------------------------------------------
+# Full-series snapshot cache -- distinct from technical_snapshot.py's
+# cache, which only stores TODAY's single scalar value per indicator.
+# _prepare_snapshot() above recomputes the ENTIRE historical series (RSI,
+# EMAs, MACD, etc. across the whole lookback window) from raw price data
+# on every single call -- and every scanner query, for every symbol,
+# calls this. Repeated scans against the same watchlist on the same day
+# were redoing this full-series computation from scratch every time, even
+# though nothing about the underlying data had changed since the last
+# scan. This cache stores the ENTIRE computed series (not just the latest
+# value), keyed by the data's own last-bar date, so a second scan the
+# same day loads a cached result instead of recomputing everything.
+# ---------------------------------------------------------------------
+_snapshot_cache_table_ready = False
+
+
+def _ensure_snapshot_cache_table(con) -> None:
+    global _snapshot_cache_table_ready
+    if _snapshot_cache_table_ready:
+        return
+    con.execute("""CREATE TABLE IF NOT EXISTS scanner_snapshot_cache (
+        symbol TEXT NOT NULL, timeframe TEXT NOT NULL, date TEXT NOT NULL,
+        payload TEXT NOT NULL, computed_at TEXT NOT NULL,
+        PRIMARY KEY (symbol, timeframe, date))""")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_snapcache_symbol_tf ON scanner_snapshot_cache(symbol, timeframe)")
+    _snapshot_cache_table_ready = True
+
+
+def _serialize_snapshot(snap: Dict[str, Any]) -> str:
+    """snap is a _prepare_snapshot()-shaped dict: {"tf": str, "index":
+    DatetimeIndex, "series": {name: pd.Series, ...}} -- every series
+    shares the same index. Converts to a compact JSON string."""
+    index_iso = [pd.Timestamp(t).isoformat() for t in snap["index"]]
+    series_out = {}
+    for key, s in snap["series"].items():
+        series_out[key] = [None if (v is None or (isinstance(v, float) and v != v)) else float(v) for v in s.tolist()]
+    return json.dumps({"tf": snap["tf"], "index": index_iso, "series": series_out})
+
+
+def _deserialize_snapshot(payload: str) -> Dict[str, Any]:
+    """Inverse of _serialize_snapshot -- reconstructs the exact same
+    shape _prepare_snapshot() returns, with real pandas Series rebuilt
+    against the original DatetimeIndex."""
+    data = json.loads(payload)
+    idx = pd.DatetimeIndex([pd.Timestamp(t) for t in data["index"]])
+    series = {}
+    for key, vals in data["series"].items():
+        series[key] = pd.Series(vals, index=idx, dtype="float64")
+    return {"tf": data["tf"], "index": idx, "series": series}
+
+
+import queue as _snap_queue_mod
+_snapshot_write_queue: "_snap_queue_mod.Queue" = _snap_queue_mod.Queue()
+_snapshot_write_worker_started = False
+_snapshot_write_worker_lock = None
+
+
+def _ensure_snapshot_write_worker() -> None:
+    """Single background thread that performs the actual snapshot cache
+    write (serialize + INSERT + prune) -- moved off the scanning thread
+    entirely. Measured directly: serializing + writing an 11-year daily
+    series costs ~70ms combined. Paying that synchronously on every cache
+    MISS would make the cache a net slowdown for any usage pattern with a
+    low repeat rate across symbols/timeframes (confirmed: this was adding
+    ~750% overhead per miss before this fix) -- exactly the concern with
+    varied queries across many different symbols and timeframes. The
+    scanning thread now only pays for a cheap cache-check SELECT and an
+    in-memory enqueue; the actual write happens later, off this request."""
+    global _snapshot_write_worker_started, _snapshot_write_worker_lock
+    import threading
+    if _snapshot_write_worker_lock is None:
+        _snapshot_write_worker_lock = threading.Lock()
+    with _snapshot_write_worker_lock:
+        if _snapshot_write_worker_started:
+            return
+        _snapshot_write_worker_started = True
+
+    def _worker():
+        while True:
+            item = _snapshot_write_queue.get()
+            try:
+                symbol_u, tf, as_of_date, snap = item
+                payload = _serialize_snapshot(snap)
+                con = _conn()
+                try:
+                    _ensure_snapshot_cache_table(con)
+                    con.execute(
+                        "INSERT OR REPLACE INTO scanner_snapshot_cache (symbol, timeframe, date, payload, computed_at) VALUES (?,?,?,?,?)",
+                        (symbol_u, tf, as_of_date, payload, datetime.now().isoformat(timespec="seconds")),
+                    )
+                    con.execute(
+                        "DELETE FROM scanner_snapshot_cache WHERE symbol=? AND timeframe=? AND date<?",
+                        (symbol_u, tf, as_of_date),
+                    )
+                    con.commit()
+                finally:
+                    con.close()
+            except Exception as e:  # noqa: BLE001
+                print(f"[scanner_builder] snapshot cache background write failed: {type(e).__name__}: {e}")
+            finally:
+                _snapshot_write_queue.task_done()
+
+    t = threading.Thread(target=_worker, name="scanner-snapshot-cache-writer", daemon=True)
+    t.start()
+
+
+def _prepare_snapshot_cached(df: pd.DataFrame, bench_df: Optional[pd.DataFrame], tf: str,
+                              symbol: Optional[str] = None) -> Dict[str, Any]:
+    """Cache-aware wrapper around _prepare_snapshot(). If a cached
+    snapshot already exists for this symbol+timeframe as of the data's
+    own latest bar date, deserialize and return it directly -- skipping
+    the full recomputation entirely. Otherwise compute fresh and enqueue
+    the result for a background thread to write to cache (see
+    _ensure_snapshot_write_worker for why this is async, not synchronous)
+    -- keyed by the data's own last-bar date, so a new trading day
+    naturally invalidates the previous day's cache without an explicit
+    expiry check."""
+    if not symbol or df is None or df.empty:
+        return _prepare_snapshot(df, bench_df, tf, symbol=symbol)
+
+    symbol_u = symbol.upper().strip()
+    as_of_date = pd.Timestamp(df.index[-1]).strftime("%Y-%m-%d")
+
+    con = _conn()
+    try:
+        _ensure_snapshot_cache_table(con)
+        row = con.execute(
+            "SELECT payload FROM scanner_snapshot_cache WHERE symbol=? AND timeframe=? AND date=?",
+            (symbol_u, tf, as_of_date),
+        ).fetchone()
+    finally:
+        con.close()
+
+    if row is not None:
+        try:
+            return _deserialize_snapshot(row[0])
+        except Exception:
+            pass  # corrupted/incompatible cache entry -- fall through to a fresh compute
+
+    snap = _prepare_snapshot(df, bench_df, tf, symbol=symbol)
+
+    try:
+        _ensure_snapshot_write_worker()
+        _snapshot_write_queue.put((symbol_u, tf, as_of_date, snap))
+    except Exception:
+        pass  # queueing failure should never break the actual scan result
+
+    return snap
 
 
 def _series_latest(series: pd.Series, shift: int = 0) -> Tuple[Optional[float], Optional[float]]:
@@ -4872,7 +6086,7 @@ def _symbol_ctx(symbol: str, benchmark: str, required_tfs: List[str]) -> Dict[st
         bench_df = _history(benchmark, tf)
         if bench_df is None or len(bench_df) < 25:
             bench_df = None
-        timeframes[tf] = _prepare_snapshot(df, bench_df, tf)
+        timeframes[tf] = _prepare_snapshot_cached(df, bench_df, tf, symbol=symbol)
 
     base = timeframes["1d"]["series"]
     sector_name = _symbol_sector(symbol)
@@ -6185,17 +7399,16 @@ def _eval(node: Node, ctx: Dict[str, Any], shift: int = 0, tf_default: str = "1d
             if close is None or len(close) <= shift:
                 return None
             rsi = _rsi(close, 14)
-            # Same safeguard as _prepare_snapshot's ema_rsi14_90/rsi_diff_90
-            # (see the comment there) -- an EMA needs roughly 2x its own
-            # span of valid input before it's meaningfully converged rather
-            # than still carrying bias from its seed value. Without this,
-            # a symbol with less than ~2*period valid RSI bars available
-            # (very possible here since this recomputes fresh from `close`
-            # rather than reusing the already-guarded precomputed series)
-            # silently returns a plausible-looking but wrong number instead
-            # of correctly reporting "not enough history yet."
+            # Directly measured (holding a point in time fixed and varying
+            # how much history feeds the calculation): with only 2x the
+            # period's worth of bars, this can be off from its properly-
+            # converged value by 0.5-0.7+ points on typical data -- 2x was
+            # too low a bar, not a safe threshold. Convergence to a
+            # negligible (<0.01) difference empirically starts around
+            # 5.5-6x the period (e.g. ~500-540 bars for the default
+            # period=90), so 6x is used here as the "trust this" threshold.
             valid_rsi_bars = int(rsi.notna().sum())
-            if valid_rsi_bars < period * 2:
+            if valid_rsi_bars < period * 6:
                 return None
             diff = rsi - _ema(rsi, period)
             idx = len(diff) - 1 - shift
@@ -6915,6 +8128,8 @@ def api_run():
     symbols = list(dict.fromkeys(symbols))
     req_tfs = sorted(set(_required_timeframes(root)) | set(_result_column_required_tfs(parsed_columns)), key=lambda tf: TIMEFRAMES.index(tf) if tf in TIMEFRAMES else 99)
 
+    _reset_enqueued_backfill_tracking()
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     snapshots: List[Dict[str, Any]] = []
@@ -6986,6 +8201,7 @@ def api_run():
 
     summary = _build_scan_summary(passed)
     query_debug = _build_query_debug_summary(root, snapshots)
+    backfill_queued = _get_enqueued_backfill_summary()
 
     if definition_id:
         try:
@@ -7035,6 +8251,7 @@ def api_run():
         "result_columns": result_columns,
         "result_template_id": result_template_id,
         "summary": summary,
+        "backfill_queued": backfill_queued,
         "query_debug": query_debug,
         "errors": errors[:50],
         "error_count": len(errors),

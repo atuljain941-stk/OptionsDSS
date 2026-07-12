@@ -11,6 +11,7 @@ import sqlite3, math, json, time
 from ..services.fundamentals import get_beta
 from pathlib import Path
 from datetime import date, datetime
+from typing import Optional, Dict
 
 def _get_wl_symbols(wl_id):
     """Return list of symbols from watchlist, or None to use default symbols table."""
@@ -80,6 +81,9 @@ def _ensure_table():
     for sql in (
         "ALTER TABLE regime_scan ADD COLUMN earn_date TEXT",
         "ALTER TABLE regime_scan ADD COLUMN earn_score INTEGER DEFAULT 0",
+        "ALTER TABLE regime_scan ADD COLUMN rsi_trend TEXT",
+        "ALTER TABLE regime_scan ADD COLUMN weekly_trend TEXT",
+        "ALTER TABLE regime_scan ADD COLUMN confluence TEXT",
     ):
         try:
             con.execute(sql)
@@ -136,6 +140,91 @@ def _compute_iv_rank(symbol, closes):
     iv_rank = (current_hv - hv_low) / (hv_high - hv_low) * 100
     return round(max(0, min(100, iv_rank)), 1)
 
+def _compute_weekly_regime(symbol: str) -> Optional[Dict]:
+    """Lightweight weekly-timeframe trend classification -- deliberately
+    NOT a full duplicate of _compute_regime_ta's 300+ line daily analysis;
+    just enough EMA-trend structure to answer the one question that
+    matters for cross-timeframe confluence: is the weekly picture
+    trending, or genuinely range-bound? That's what should decide between
+    a directional credit spread and an Iron Condor, not daily structure
+    alone (see _suggest_strategies)."""
+    try:
+        import yfinance as yf
+        h = yf.Ticker(symbol).history(period="5y", interval="1wk")
+        if h is None or h.empty or len(h) < 52:
+            return None
+        C = h["Close"].tolist()
+        n = len(C) - 1
+
+        def ema(a, p):
+            k = 2 / (p + 1)
+            o = list(a)
+            for i in range(1, len(o)):
+                o[i] = a[i] * k + o[i - 1] * (1 - k)
+            return o
+
+        e20 = ema(C, 20)
+        e50 = ema(C, 50)
+        e20_slope = (e20[n] - e20[max(0, n - 4)]) / 4
+        e50_slope = (e50[n] - e50[max(0, n - 8)]) / 8
+        spread_pct = abs(e20[n] - e50[n]) / max(1e-9, e50[n])
+
+        # ── Recent weekly shock (new): a single dramatic weekly candle --
+        # e.g. a sharp selloff after a long uptrend -- won't move a
+        # 20/50-week EMA structure enough to flip the trend classification
+        # above for a while, by design (EMAs lag). But that single candle
+        # can be exactly the kind of exhaustion/reversal signal a faster,
+        # candle-reactive indicator (like a custom UAE-style script) picks
+        # up immediately. Surfacing it explicitly here means a still-
+        # "UPTREND"-classified symbol with a violent recent down week
+        # shows up as a real caution flag, not silently invisible just
+        # because the slower EMA structure hasn't caught up yet.
+        pct_changes = [(C[i] - C[i-1]) / C[i-1] * 100 for i in range(1, len(C))]
+        last_week_chg = pct_changes[-1] if pct_changes else 0.0
+        recent_vol = (sum(abs(x) for x in pct_changes[-20:]) / min(20, len(pct_changes))) if pct_changes else 1.0
+        shock_threshold = max(3.0, recent_vol * 2.2)
+        weekly_shock = None
+        if abs(last_week_chg) > shock_threshold:
+            weekly_shock = {
+                "direction": "DOWN" if last_week_chg < 0 else "UP",
+                "chg_pct": round(last_week_chg, 2),
+                "threshold_pct": round(shock_threshold, 2),
+            }
+
+        if e20[n] > e50[n] and e20_slope > 0 and e50_slope > 0:
+            trend = "UPTREND"
+        elif e20[n] < e50[n] and e20_slope < 0 and e50_slope < 0:
+            trend = "DOWNTREND"
+        elif spread_pct < 0.03 and abs(e50_slope) < e50[n] * 0.002:
+            # EMAs close together AND the STRUCTURAL (slower) EMA50 is
+            # roughly flat -- genuinely range-bound. Deliberately checking
+            # e50's slope here, not e20's: EMA20 is short enough to
+            # legitimately oscillate up and down even within a genuinely
+            # sideways range (confirmed directly: a synthetic pure
+            # oscillation with zero net drift was misclassified as
+            # "MILD_DOWN" when this checked e20's slope instead, simply
+            # because the most recent few weeks happened to be on a local
+            # downswing within the range).
+            trend = "SIDEWAYS"
+        elif e20[n] > e50[n]:
+            trend = "MILD_UP"
+        elif e20[n] < e50[n]:
+            trend = "MILD_DOWN"
+        else:
+            trend = "SIDEWAYS"
+
+        return {
+            "trend": trend,
+            "weekly_shock": weekly_shock,
+            "close": round(C[n], 2),
+            "ema20": round(e20[n], 2),
+            "ema50": round(e50[n], 2),
+            "bars": len(C),
+        }
+    except Exception:
+        return None
+
+
 def _compute_regime_ta(symbol):
     """Full TA computation returning regime, confidence, signals."""
     try:
@@ -164,7 +253,11 @@ def _compute_regime_ta(symbol):
                 return ed if ed is not None and not ed.empty else None
             except: return None
 
-        _raw = _yf_history(symbol, period="6mo", interval="1d")
+        # 6mo (~125 bars) was nowhere near enough for EMA(RSI,90) to
+        # converge -- directly measured elsewhere (scanner_builder.py) that
+        # this needs ~500-540 bars before the value stops being distorted
+        # by under-convergence. 3y comfortably clears that.
+        _raw = _yf_history(symbol, period="3y", interval="1d")
         df = _raw
         if df is None or df.empty or len(df) < 60:
             return None
@@ -261,6 +354,42 @@ def _compute_regime_ta(symbol):
                 pdi_d   = round(pdi_a[n-1]-pdi_a[max(0,n-8)],1)
                 ndi_d   = round(ndi_a[n-1]-ndi_a[max(0,n-8)],1)
         except: pass
+
+        # Write-through to the technical_snapshot cache: this function runs
+        # once daily (7AM) with the most complete lookback (3y) of any of
+        # the independent RSI/EMA/MACD/ADX implementations in this
+        # codebase. Populating the cache here (with a genuinely complete
+        # record, not a partial one -- a partial write would otherwise
+        # incorrectly satisfy get_or_compute_technical_snapshot's "already
+        # computed today" check and permanently block the fuller
+        # computation for the rest of the day) means other consumers
+        # running LATER the same day (trade_opportunity_scanner's _get_ta,
+        # scanner queries) can read an already-accurate value instead of
+        # redoing the same work with their own, often shorter/less-
+        # converged lookback windows. Best-effort: never let a cache write
+        # failure interrupt the regime scan itself.
+        try:
+            from ..services.technical_snapshot import queue_technical_snapshot_write, is_snapshot_complete_today
+            if not is_snapshot_complete_today(symbol, "1d"):
+                valid_rsi_bars_cache = int(sum(1 for v in rsi_vals if v is not None))
+                rsidiff90_ok = valid_rsi_bars_cache >= 540
+                queue_technical_snapshot_write(symbol, "1d", df.index[-1].strftime("%Y-%m-%d"), {
+                    "close": round(C[n], 4),
+                    "rsi3": None,  # not computed here -- technical_snapshot's own run fills this if it runs later
+                    "rsi14": rsi,
+                    "ema_rsi14_13": None,
+                    "ema_rsi14_90": round(ema90_rsi[n], 4) if rsidiff90_ok else None,
+                    "rsidiff90": rsi_diff if rsidiff90_ok else None,
+                    "rsidiff90_trusted": rsidiff90_ok,
+                    "ema9": round(e9[n], 4), "ema20": round(e20[n], 4), "ema50": round(e50[n], 4),
+                    "ema60": None, "ema200": None,
+                    "bar_strength_vs_ema60": None,
+                    "macd": round(ml[n], 4), "macd_signal": round(ms[n], 4), "macd_hist": round(macd_hist, 4),
+                    "adx": adx_val, "di_plus": pdi, "di_minus": ndi,
+                    "sr_support": None, "sr_resistance": None,
+                })
+        except Exception:
+            pass
 
         # ── BB%B ────────────────────────────────────────────────────────
         sma20  = [sum(C[max(0,i-19):i+1])/min(20,i+1) for i in range(len(C))]
@@ -738,6 +867,55 @@ def _compute_regime_ta(symbol):
 
         confidence = min(95, max(15, round(conf_base)))
 
+        # ── RSI momentum DIRECTION (rising/falling), not just level ──────
+        # A "bearish regime" reading that's really just a lagging label on
+        # a symbol whose RSI has been climbing for several bars is a much
+        # weaker case for a fresh bearish trade than one where RSI is
+        # actively falling too -- level alone doesn't capture this.
+        rsi_lookback = min(5, n)
+        rsi_now = rsi_vals[n]
+        rsi_then = rsi_vals[max(0, n - rsi_lookback)]
+        rsi_delta = round(rsi_now - rsi_then, 2)
+        if rsi_delta > 2:
+            rsi_trend = "RISING"
+        elif rsi_delta < -2:
+            rsi_trend = "FALLING"
+        else:
+            rsi_trend = "FLAT"
+
+        # ── Weekly regime cross-check ──────────────────────────────────
+        # The daily computation above, however thorough, is still only
+        # ONE timeframe. A "Grade A bearish" call built entirely on daily
+        # structure while the weekly trend is actually sideways or
+        # improving is a materially weaker setup than one where both
+        # timeframes agree -- this is what actually determines whether a
+        # directional credit spread or a range-bound iron condor is the
+        # better-fitting structure, not daily regime alone.
+        weekly = _compute_weekly_regime(symbol)
+        confluence = "UNKNOWN"
+        if weekly:
+            wk_trend = weekly.get("trend", "")
+            daily_dir = "up" if "UP" in ema_trend or "BULL" in bias.upper() else \
+                        "down" if "DOWN" in ema_trend or "BEAR" in bias.upper() else "flat"
+            wk_dir = "up" if "UP" in wk_trend else "down" if "DOWN" in wk_trend else "flat"
+            if wk_dir == "flat":
+                confluence = "WEEKLY_SIDEWAYS"
+            elif daily_dir == wk_dir:
+                confluence = "AGREE"
+            elif daily_dir == "flat":
+                confluence = "DAILY_FLAT"
+            else:
+                confluence = "DISAGREE"
+
+            # A recent weekly shock opposing the daily bias overrides
+            # whatever the slower EMA-trend structure still says -- e.g. a
+            # symbol still EMA-classified UPTREND (EMAs haven't caught up
+            # yet) that just had a violent down week is a real warning the
+            # daily-only bullish case should reflect, not silently miss.
+            shock = weekly.get("weekly_shock")
+            if shock and shock["direction"].lower() != daily_dir and daily_dir != "flat":
+                confluence = "WEEKLY_SHOCK_AGAINST"
+
         return {
             "symbol":      symbol,
             "spot":        spot,
@@ -747,6 +925,9 @@ def _compute_regime_ta(symbol):
             "score":       score,
             "rsi":         rsi,
             "rsi_diff":    rsi_diff,
+            "rsi_trend":   rsi_trend,
+            "weekly_regime": weekly,
+            "confluence":  confluence,
             "ema_trend":   ema_trend,
             "ema9":        e9v, "ema20": e20v, "ema50": e50v,
             "macd":        macd_sig,
@@ -775,6 +956,7 @@ def _compute_regime_ta(symbol):
                                     ema_trend, macd_sig,
                                     earn_days if earn_days < 999 else 999,
                                     iv_rank=iv_rank,
+                                    confluence=confluence, rsi_trend=rsi_trend,
                                 ),
             "iv_rank":          iv_rank if iv_rank is not None else 50,
         }
@@ -783,10 +965,22 @@ def _compute_regime_ta(symbol):
         return None
 
 
-def _suggest_strategies(regime, bias, rsi_diff, adx, ema_trend, macd, earn_days, iv_rank=50):
+def _suggest_strategies(regime, bias, rsi_diff, adx, ema_trend, macd, earn_days, iv_rank=50,
+                         confluence="UNKNOWN", rsi_trend="FLAT"):
     """
     Return top 3 strategy suggestions with probability score (0-100).
     Based on regime, RSI-EMA diff, ADX, EMA trend, MACD, earnings proximity.
+
+    confluence/rsi_trend (new): when the weekly timeframe is genuinely
+    sideways (confluence == "WEEKLY_SIDEWAYS") regardless of what the daily
+    regime says, a directional credit spread is betting on a move the
+    higher timeframe doesn't support -- an Iron Condor fits a genuinely
+    range-bound underlying better, and can often collect comparable or
+    better premium with similar POP, since it's not fighting the weekly
+    structure. Also: when daily and weekly actively DISAGREE (confluence
+    == "DISAGREE"), or RSI is trending opposite the proposed bias, that's
+    real information the probability score should reflect, not just
+    single-timeframe regime/ADX/MACD as before.
     """
     suggestions = []
     earn_risk = earn_days is not None and earn_days < 21
@@ -795,31 +989,55 @@ def _suggest_strategies(regime, bias, rsi_diff, adx, ema_trend, macd, earn_days,
         p = base
         for m in modifiers: p += m
         return max(10, min(95, round(p)))
-    
+
+    # Multi-timeframe confluence bonus/penalty -- applied to directional
+    # (credit/debit) suggestions below, not to the IC suggestion (an IC
+    # doesn't need directional agreement, that's the whole point of it).
+    confluence_bonus = 10 if confluence == "AGREE" else \
+                        -15 if confluence == "DISAGREE" else \
+                        -8 if confluence == "WEEKLY_SIDEWAYS" else 0
+
     # IVR adjustments: high IVR boosts credit strategies, low IVR boosts debit
     ivr_credit_bonus = 8 if iv_rank and iv_rank > 60 else (4 if iv_rank and iv_rank > 40 else 0)
     ivr_debit_bonus = 8 if iv_rank and iv_rank < 30 else (4 if iv_rank and iv_rank < 45 else 0)
     ivr_credit_penalty = -6 if iv_rank and iv_rank < 25 else 0  # don't sell in low IV
     ivr_debit_penalty = -6 if iv_rank and iv_rank > 70 else 0   # don't buy in high IV
 
+    # ── Weekly is genuinely sideways: lead with Iron Condor regardless of
+    # what the daily-only regime below would otherwise suggest. This is
+    # the direct fix for "Grade A bearish CS on a weekly-sideways name" --
+    # the IC gets offered FIRST, ahead of (not instead of) the directional
+    # ideas, so it's what a reviewer sees as the lead suggestion.
+    if confluence == "WEEKLY_SIDEWAYS":
+        ic_bonus = 10 if adx < 20 else 4 if adx < 28 else 0  # low ADX = genuinely range-bound, not just short-term calm
+        suggestions.append({
+            "strategy":    "Iron Condor",
+            "type":        "credit",
+            "bias":        "Neutral",
+            "note":        "Weekly structure is sideways -- range-bound premium collection fits "
+                            "better here than betting a direction the higher timeframe doesn't support.",
+            "probability": _prob(60, ic_bonus, ivr_credit_bonus, ivr_credit_penalty),
+        })
+
     # ── TRENDING_UP / MILD_BULLISH ─────────────────────────────────────
     if regime in ("TRENDING_UP","MILD_BULLISH","TRENDING_DOWN_OS"):
         adx_bonus  = 10 if adx>=30 else 5 if adx>=22 else 0
         macd_bonus = 8  if macd=="BULLISH" else 0
         earn_pen   = -12 if earn_risk else 0
+        rsi_pen    = -8 if rsi_trend == "FALLING" else 0  # bullish call, but RSI actively fading
         suggestions.append({
             "strategy":    "Bull Put Spread",
             "type":        "credit",
             "bias":        "Bullish",
             "note":        f"Sell OTM put below EMA20. ADX {adx:.0f} confirms trend.",
-            "probability": _prob(62, adx_bonus, macd_bonus, earn_pen, ivr_credit_bonus, ivr_credit_penalty),
+            "probability": _prob(62, adx_bonus, macd_bonus, earn_pen, ivr_credit_bonus, ivr_credit_penalty, confluence_bonus, rsi_pen),
         })
         suggestions.append({
             "strategy":    "Bull Call Debit",
             "type":        "debit",
             "bias":        "Bullish",
             "note":        "Buy call on pullback to EMA9/EMA20. Ride the trend.",
-            "probability": _prob(55, adx_bonus, macd_bonus, earn_pen, ivr_debit_bonus, ivr_debit_penalty),
+            "probability": _prob(55, adx_bonus, macd_bonus, earn_pen, ivr_debit_bonus, ivr_debit_penalty, confluence_bonus, rsi_pen),
         })
         if adx >= 30 and not earn_risk:
             suggestions.append({
@@ -843,19 +1061,20 @@ def _suggest_strategies(regime, bias, rsi_diff, adx, ema_trend, macd, earn_days,
         adx_bonus  = 10 if adx>=30 else 5 if adx>=22 else 0
         macd_bonus = 8  if macd=="BEARISH" else 0
         earn_pen   = -12 if earn_risk else 0
+        rsi_pen    = -8 if rsi_trend == "RISING" else 0  # bearish call, but RSI actively improving -- exactly WYNN's case
         suggestions.append({
             "strategy":    "Bear Call Spread",
             "type":        "credit",
             "bias":        "Bearish",
             "note":        f"Sell OTM call above EMA20. ADX {adx:.0f} confirms trend.",
-            "probability": _prob(62, adx_bonus, macd_bonus, earn_pen, ivr_credit_bonus, ivr_credit_penalty),
+            "probability": _prob(62, adx_bonus, macd_bonus, earn_pen, ivr_credit_bonus, ivr_credit_penalty, confluence_bonus, rsi_pen),
         })
         suggestions.append({
             "strategy":    "Bear Put Debit",
             "type":        "debit",
             "bias":        "Bearish",
             "note":        "Buy put on bounce to EMA9/EMA20. Ride the downtrend.",
-            "probability": _prob(55, adx_bonus, macd_bonus, earn_pen),
+            "probability": _prob(55, adx_bonus, macd_bonus, earn_pen, confluence_bonus, rsi_pen),
         })
         suggestions.append({
             "strategy":    "Put Backspread",
@@ -1011,13 +1230,14 @@ def run_regime_scan(symbols=None, max_workers=12):
                 INSERT OR REPLACE INTO regime_scan
                 (scan_date, symbol, regime, confidence, bias, rsi, rsi_diff,
                  macd, adx, ema_trend, momentum_move, post_earnings, earn_days, beta,
-                 earn_date, earn_score, signals_json, updated)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 earn_date, earn_score, rsi_trend, weekly_trend, confluence, signals_json, updated)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 today, r["symbol"], r["regime"], r["confidence"], r["bias"],
                 r["rsi"], r["rsi_diff"], r["macd"], r["adx"], r["ema_trend"],
                 r.get("mom_move"), r["post_earnings"], r.get("earn_days"), r.get("beta"),
                 r.get("earn_date_str"), r.get("earn_score", 0),
+                r.get("rsi_trend"), (r.get("weekly_regime") or {}).get("trend"), r.get("confluence"),
                 json.dumps(_json_safe({
                     "signals":         r["signals"],
                     "score":           r["score"],
@@ -1041,6 +1261,9 @@ def run_regime_scan(symbols=None, max_workers=12):
                     "strategies":       r.get("strategies",[]),
                     "earn_days":        r.get("earn_days"),
                     "beta":             r.get("beta"),
+                    "rsi_trend":        r.get("rsi_trend"),
+                    "weekly_regime":    r.get("weekly_regime"),
+                    "confluence":       r.get("confluence"),
                 }), allow_nan=False),
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ))

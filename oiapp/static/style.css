@@ -377,6 +377,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 /* Position custom alerts: use available width and keep expression editors readable */
 #tab-alerts .position-alert-wide,
 #position-alert-rules-wrap,
+#ai-trade-alerts-wrap,
 #trade-health-alerts-wrap { width: 100%; max-width: none; }
 #position-alert-rules-wrap table { width: 100%; min-width: 1100px; }
 #position-alert-rules-wrap code { white-space: pre-wrap; word-break: break-word; }
@@ -423,6 +424,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 #trade-health-alerts-wrap,
 #position-alert-open-trades-wrap,
 #position-alert-rules-wrap,
+#ai-trade-alerts-wrap,
 #alert-history-wrap {
   width: 100%;
   max-width: none;
@@ -432,6 +434,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 #trade-health-alerts-wrap table,
 #position-alert-open-trades-wrap table,
 #position-alert-rules-wrap table,
+#ai-trade-alerts-wrap table,
 #alert-history-wrap table {
   width: 100%;
   min-width: 1280px;
@@ -457,14 +460,16 @@ hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 #alert-rules-wrap,
 #trade-health-alerts-wrap,
 #position-alert-open-trades-wrap,
-#position-alert-rules-wrap {
+#position-alert-rules-wrap,
+#ai-trade-alerts-wrap {
   width: 100% !important;
   max-width: none !important;
 }
 #alert-rules-wrap table { width: 100% !important; min-width: 1450px; }
-#trade-health-alerts-wrap table { width: 100% !important; min-width: 1600px; }
+#trade-health-alerts-wrap table { width: 100% !important; min-width: 1700px; }
 #position-alert-open-trades-wrap table { width: 100% !important; min-width: 1450px; }
 #position-alert-rules-wrap table { width: 100% !important; min-width: 1500px; }
+#ai-trade-alerts-wrap table { width: 100% !important; min-width: 1500px; }
 .alert-subpanel > summary,
 .alert-panel-summary { user-select: none; }
 @media (max-width: 1100px) {

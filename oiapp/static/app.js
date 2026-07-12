@@ -12641,6 +12641,7 @@ async function _loadTradeHealthAlerts() {
         <td style="padding:7px 6px;font-size:10px;color:var(--muted)">${a.trade_type||'—'}</td>
         <td style="padding:7px 6px;font-size:10px;color:#e2e8f0;white-space:nowrap;font-weight:700">${a.strikes||'—'}</td>
         <td style="padding:7px 6px;font-size:10px;color:${dteC};white-space:nowrap">${a.dte!=null?a.dte+'d':'—'}</td>
+        <td style="padding:7px 6px;font-size:10px;color:#e2e8f0;white-space:nowrap">${a.spot!=null?'$'+(+a.spot).toFixed(2):'—'}</td>
         <td style="padding:7px 6px">
           <div style="display:flex;align-items:center;gap:6px">
             ${scoreRing}
@@ -12673,6 +12674,7 @@ async function _loadTradeHealthAlerts() {
             <th style="padding:6px;text-align:left">Type</th>
             <th style="padding:6px;text-align:left">Strikes</th>
             <th style="padding:6px;text-align:left">DTE</th>
+            <th style="padding:6px;text-align:left">Spot</th>
             <th style="padding:6px;text-align:left">Health Score</th>
             <th style="padding:6px;text-align:left">Action</th>
             <th style="padding:6px;text-align:left">P&amp;L</th>
@@ -13761,6 +13763,21 @@ function _wlRenderTable() {
             style="font-size:11px;padding:3px 10px;border-radius:4px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);color:#f59e0b;cursor:pointer">
             📅 Earnings
           </button>
+          <button onclick="_wlRunBulkBackfill(${wl.id},'${nm}')" id="wl-backfill-${wl.id}"
+            title="Backfill months of daily price+volume history into price_cache -- for scanner indicators (rsidiff90 etc.) that need long history, run once, not part of the regular daily fetch"
+            style="font-size:11px;padding:3px 10px;border-radius:4px;background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.25);color:#38bdf8;cursor:pointer">
+            📈 Backfill History
+          </button>
+          <button onclick="_wlRunBulkBackfillIntraday(${wl.id},'${nm}')" id="wl-backfill-intraday-${wl.id}"
+            title="Backfill ~2 years of hourly price+volume history into intraday_price_cache -- base data for 1h/2h/4h scanner queries (2h/4h are derived from this by resampling, not fetched separately). Run once, useful for swing-trade scans."
+            style="font-size:11px;padding:3px 10px;border-radius:4px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25);color:#22c55e;cursor:pointer">
+            ⏱ Backfill Intraday (1h/2h/4h)
+          </button>
+          <button onclick="_wlRunComputeIndicators(${wl.id},'${nm}')" id="wl-compute-${wl.id}"
+            title="Precompute RSI/EMA/rsidiff90/MACD/ADX/DI+-/S-R for this watchlist (daily + weekly) into the technical_snapshot cache -- speeds up scanners/scoring that read from it instead of recomputing live"
+            style="font-size:11px;padding:3px 10px;border-radius:4px;background:rgba(168,85,247,.1);border:1px solid rgba(168,85,247,.25);color:#a855f7;cursor:pointer">
+            🧮 Compute Indicators
+          </button>
         </div>
         <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:5px">
           <button onclick="_wlLoadSymbolsPanel(${wl.id}, '${nm}')"
@@ -13825,6 +13842,120 @@ async function _wlRunFetch(id, name) {
     addNotif('error', name+': fetch failed', e.message, 'Watchlists');
   }
 }
+
+async function _wlRunComputeIndicators(id, name) {
+  const st = document.getElementById('wl-status-'+id);
+  const btn = document.getElementById('wl-compute-'+id);
+  if (btn) btn.disabled = true;
+  if (st) st.textContent = '⏳ Starting indicator compute…';
+  try {
+    const d = await api('/technical-snapshot/api/bulk-compute', {
+      method: 'POST',
+      body: JSON.stringify({ watchlist_id: id, timeframes: ['1d', '1w'] }),
+    });
+    if (d.error) throw new Error(d.error);
+    addNotif('ok', `${name}: indicator compute started`, `${d.symbol_count} symbols × daily+weekly → technical_snapshot`, 'Watchlists');
+    let polls = 0;
+    const poll = setInterval(async () => {
+      polls++;
+      try {
+        const s = await api('/technical-snapshot/api/bulk-compute/status');
+        if (st) st.textContent = `🧮 Indicators: ${s.processed}/${s.total} (${s.succeeded} ok, ${s.failed} failed)`;
+        if (!s.running || polls > 720) {
+          clearInterval(poll);
+          if (btn) btn.disabled = false;
+          if (!s.running) {
+            addNotif('ok', `${name}: indicators computed`, `${s.succeeded}/${s.total} symbol×timeframe snapshots stored`, 'Watchlists');
+          }
+        }
+      } catch { clearInterval(poll); if (btn) btn.disabled = false; }
+    }, 5000);
+  } catch (e) {
+    if (st) st.textContent = '❌ ' + e.message;
+    if (btn) btn.disabled = false;
+    addNotif('error', name + ': indicator compute failed', e.message, 'Watchlists');
+  }
+}
+
+
+async function _wlRunBulkBackfillIntraday(id, name) {
+  const days = prompt(`Backfill how many days of hourly price+volume history for "${name}"?\n\nBase data for 1h scanner queries -- 2h and 4h are derived from this same data by resampling, not fetched separately. Default 729 is yfinance's own max for hourly data (~2 years), which comfortably covers the convergence threshold rsidiff90 needs even on 4h.`, '729');
+  if (!days) return;
+  const daysNum = parseInt(days, 10);
+  if (!daysNum || daysNum < 1) { alert('Enter a number of days, e.g. 729'); return; }
+
+  const st = document.getElementById('wl-status-'+id);
+  const btn = document.getElementById('wl-backfill-intraday-'+id);
+  if (btn) btn.disabled = true;
+  if (st) st.textContent = '⏳ Starting intraday backfill…';
+  try {
+    const d = await api('/scanner-builder/api/bulk-backfill-intraday', {
+      method: 'POST',
+      body: JSON.stringify({ watchlist_id: id, days: daysNum }),
+    });
+    if (d.error) throw new Error(d.error);
+    addNotif('ok', `${name}: intraday backfill started`, `${d.symbol_count} symbols, ${d.days} days → intraday_price_cache`, 'Watchlists');
+    let polls = 0;
+    const poll = setInterval(async () => {
+      polls++;
+      try {
+        const s = await api('/scanner-builder/api/bulk-backfill-intraday/status');
+        if (st) st.textContent = `⏱ Intraday: ${s.processed}/${s.total} (${s.succeeded} ok, ${s.failed} failed)${s.current_symbol ? ' — ' + s.current_symbol : ''}`;
+        if (!s.running || polls > 720) {
+          clearInterval(poll);
+          if (btn) btn.disabled = false;
+          if (!s.running) {
+            addNotif('ok', `${name}: intraday backfill done`, `${s.succeeded}/${s.total} symbols backfilled`, 'Watchlists');
+          }
+        }
+      } catch { clearInterval(poll); if (btn) btn.disabled = false; }
+    }, 5000);
+  } catch (e) {
+    if (st) st.textContent = '❌ ' + e.message;
+    if (btn) btn.disabled = false;
+    addNotif('error', name + ': intraday backfill failed', e.message, 'Watchlists');
+  }
+}
+
+async function _wlRunBulkBackfill(id, name) {
+  const months = prompt(`Backfill how many months of daily price+volume history for "${name}"?\n\nThis is separate from the regular daily fetch above -- run this once (e.g. over a weekend) to give scanner indicators that need long history enough data to compute correctly. Default is 132 (11 years): rsidiff90() on a WEEKLY timeframe specifically needs about 10.4 years of history to converge (same math as daily, just measured in weekly bars) -- less than that and rsidiff90("1w") will show no value at all, not just a less-accurate one.`, '132');
+  if (!months) return;
+  const monthsNum = parseInt(months, 10);
+  if (!monthsNum || monthsNum < 1) { alert('Enter a number of months, e.g. 36'); return; }
+
+  const st = document.getElementById('wl-status-'+id);
+  const btn = document.getElementById('wl-backfill-'+id);
+  if (btn) btn.disabled = true;
+  if (st) st.textContent = '⏳ Starting backfill…';
+  try {
+    const d = await api('/scanner-builder/api/bulk-backfill', {
+      method: 'POST',
+      body: JSON.stringify({ watchlist_id: id, months: monthsNum }),
+    });
+    if (d.error) throw new Error(d.error);
+    addNotif('ok', `${name}: backfill started`, `${d.symbol_count} symbols, ${d.months} months → price_cache`, 'Watchlists');
+    let polls = 0;
+    const poll = setInterval(async () => {
+      polls++;
+      try {
+        const s = await api('/scanner-builder/api/bulk-backfill/status');
+        if (st) st.textContent = `📈 Backfill: ${s.processed}/${s.total} (${s.succeeded} ok, ${s.failed} failed)${s.current_symbol ? ' — ' + s.current_symbol : ''}`;
+        if (!s.running || polls > 720) {  // 720 * 5s = up to 1hr of polling before giving up watching
+          clearInterval(poll);
+          if (btn) btn.disabled = false;
+          if (!s.running) {
+            addNotif('ok', `${name}: backfill done`, `${s.succeeded}/${s.total} symbols backfilled`, 'Watchlists');
+          }
+        }
+      } catch { clearInterval(poll); if (btn) btn.disabled = false; }
+    }, 5000);
+  } catch (e) {
+    if (st) st.textContent = '❌ ' + e.message;
+    if (btn) btn.disabled = false;
+    addNotif('error', name + ': backfill failed', e.message, 'Watchlists');
+  }
+}
+
 
 async function _wlFetchSelected() {
   const sel = document.getElementById('wl-fetch-watchlist');

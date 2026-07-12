@@ -815,7 +815,20 @@ function renderResults(d){
       return `<div style="margin-top:4px;color:#fbbf24">${expr}: min ${fmt(min)} · median ${fmt(med)} · max ${fmt(max)} · ${x.count||0} values</div>`;
     }).join(''):'';
     summary.style.display='block';
-    summary.innerHTML=`${rawItems.length} match(es) across ${d&&d.symbols?d.symbols.length:'selected'} symbols. Benchmark: <b>${esc(d&&d.benchmark?d.benchmark:'SPY')}</b>. Scanned: ${esc(d&&d.scanned_at?d.scanned_at:'now')}${debug}`;
+    const bq = d && d.backfill_queued;
+    const bqDaily = (bq && bq.daily) || [];
+    const bqIntraday = (bq && bq.intraday) || [];
+    let bqNotice = '';
+    if (bqDaily.length || bqIntraday.length) {
+      const parts = [];
+      if (bqDaily.length) parts.push(`${bqDaily.length} symbol(s) missing daily/weekly history`);
+      if (bqIntraday.length) parts.push(`${bqIntraday.length} symbol(s) missing intraday (1h/2h/4h) history`);
+      bqNotice = `<div style="margin-top:6px;padding:6px 10px;border-radius:6px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.25);color:#38bdf8;font-size:12px">`
+        + `⏳ ${parts.join(' and ')} for this query -- automatically queued for backfill in the background. `
+        + `Those symbols were skipped this run; re-run the scan in a few minutes once the backfill has caught up.`
+        + `</div>`;
+    }
+    summary.innerHTML=`${rawItems.length} match(es) across ${d&&d.symbols?d.symbols.length:'selected'} symbols. Benchmark: <b>${esc(d&&d.benchmark?d.benchmark:'SPY')}</b>. Scanned: ${esc(d&&d.scanned_at?d.scanned_at:'now')}${debug}${bqNotice}`;
   }
 }
 

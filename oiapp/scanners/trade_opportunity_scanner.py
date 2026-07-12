@@ -324,6 +324,30 @@ def _get_ta(symbol: str, prefetched_df=None):
         en       = ema90_rsi[n]
         rsi_diff = rn - en
 
+        # Prefer the cache for these three specific scalars when available
+        # and trusted: this function's own local RSI/EMA computation above
+        # uses only a 1-year window (~250 bars) with no convergence check
+        # at all -- directly measured elsewhere this session that
+        # EMA(RSI,90) needs ~540 bars before it's not still distorted by
+        # under-convergence. The cache (backed by a 3-year window, same
+        # threshold already validated) is strictly more accurate when
+        # present, and reading it also skips redundant recomputation this
+        # symbol may have already had done today by regime_scanner or the
+        # technical_snapshot watcher. Everything else in this function
+        # (EMA20/50 arrays, MACD, ATR, IVR, trend/state classification)
+        # stays locally computed -- those are either fast-converging
+        # enough not to need this, or entangled with array-based slope
+        # calculations that a single scalar override can't safely replace.
+        try:
+            from ..services.technical_snapshot import get_or_compute_technical_snapshot
+            cached = get_or_compute_technical_snapshot(symbol, "1d")
+            if cached and cached.get("rsidiff90_trusted") and cached.get("rsi14") is not None:
+                rn = cached["rsi14"]
+                en = cached.get("ema_rsi14_90", en)
+                rsi_diff = cached.get("rsidiff90", rsi_diff)
+        except Exception:
+            pass  # fall through to the locally-computed values above
+
         # MACD (12/26/9)
         ema12 = _ema_s(C, 12)
         ema26 = _ema_s(C, 26)
@@ -465,13 +489,16 @@ def _get_regime(symbol: str) -> Dict:
     try:
         con = _conn()
         row = con.execute(
-            "SELECT bias, confidence, regime FROM regime_scan "
+            "SELECT bias, confidence, regime, rsi_trend, weekly_trend, confluence FROM regime_scan "
             "WHERE symbol=? ORDER BY scan_date DESC LIMIT 1",
             (symbol.upper(),),
         ).fetchone()
         con.close()
         if row:
-            return {"bias": (row[0] or "").lower(), "confidence": float(row[1] or 50), "regime": row[2] or ""}
+            return {
+                "bias": (row[0] or "").lower(), "confidence": float(row[1] or 50), "regime": row[2] or "",
+                "rsi_trend": row[3] or "", "weekly_trend": row[4] or "", "confluence": row[5] or "UNKNOWN",
+            }
     except Exception:
         pass
     return {}
@@ -682,15 +709,34 @@ def _strike_interval(spot: float) -> float:
 
 # ── Entry Quality Score ────────────────────────────────────────────────────
 
+def _grade_for_score(score: float) -> tuple:
+    """Matches _entry_score's own grade thresholds exactly -- used to keep
+    grade consistent with score after post-hoc adjustments (width cap,
+    POP/RR balance) that happen after _entry_score already returned."""
+    if score >= 80:   return "A", "OPEN"
+    elif score >= 65: return "B", "OPEN"
+    elif score >= 50: return "C", "OPEN_SMALL"
+    elif score >= 35: return "D", "OPEN_SMALL"
+    else:             return "F", "AVOID"
+
+
 def _entry_score(
     symbol: str, trade_type: str, spot: float,
     regime_bias: str, rs: Optional[float], iv_rank: Optional[float],
     pcr: Optional[float], put_wall: Optional[float], call_wall: Optional[float],
     gamma_flip: Optional[float],
+    confluence: str = "UNKNOWN", rsi_trend: str = "",
 ) -> Dict:
     """
     Compact entry quality scorer.
     Returns dict with score (0-100), grade, recommendation, pros, cons.
+
+    confluence/rsi_trend (new): daily regime alone can rate a directional
+    trade highly even when the weekly timeframe doesn't support it, or
+    when RSI is actively moving the opposite direction of the proposed
+    bias -- both real, checkable signals that were previously invisible to
+    this scorer. See regime_scanner.py's _compute_weekly_regime /
+    rsi_trend computation for where these come from.
     """
     score = 50
     pros: List[str] = []
@@ -705,9 +751,30 @@ def _entry_score(
     if is_bull:
         if "bull" in b:  score += 15; pros.append(f"Regime bullish ✓")
         elif "bear" in b: score -= 12; cons.append(f"Regime bearish — headwind")
+        if rsi_trend == "FALLING":
+            score -= 8; cons.append("RSI trending down — momentum fading against this bullish call")
     elif is_bear:
         if "bear" in b:  score += 15; pros.append(f"Regime bearish ✓")
         elif "bull" in b: score -= 12; cons.append(f"Regime bullish — headwind")
+        if rsi_trend == "RISING":
+            score -= 8; cons.append("RSI trending up — momentum improving against this bearish call")
+
+    # Multi-timeframe confluence (new): a directional call built on daily
+    # structure alone is weaker when the weekly timeframe disagrees or is
+    # genuinely range-bound -- this is what actually determines whether a
+    # directional spread or an Iron Condor fits better, not daily regime
+    # in isolation.
+    if not is_ic:
+        if confluence == "AGREE":
+            score += 6; pros.append("Daily + weekly trend agree")
+        elif confluence == "WEEKLY_SHOCK_AGAINST":
+            score -= 20; cons.append("Recent weekly candle moved sharply against this trade's direction — possible reversal in progress")
+        elif confluence == "DISAGREE":
+            score -= 15; cons.append("Daily and weekly trend disagree — this call is fighting the higher timeframe")
+        elif confluence == "WEEKLY_SIDEWAYS":
+            score -= 10; cons.append("Weekly is sideways — consider an Iron Condor instead of a directional call")
+    elif is_ic and confluence == "WEEKLY_SIDEWAYS":
+        score += 8; pros.append("Weekly genuinely range-bound ✓ — fits an Iron Condor well")
     elif is_ic:
         if "bull" in b or "bear" in b:
             score += 5; pros.append(f"Directional regime — IC acceptable")
@@ -790,7 +857,7 @@ def _entry_score(
     else:             grade, rec = "F", "AVOID"
 
     return {"score": score, "grade": grade, "recommendation": rec,
-            "pros": pros[:4], "cons": cons[:4]}
+            "pros": pros, "cons": cons}
 
 
 # ── Trade builder ──────────────────────────────────────────────────────────
@@ -855,6 +922,32 @@ def _build_trade(
     # IC legs are always 1-2 strikes wide each side for tight risk
     ic_leg_width = round(min(2, spread_width_strikes) * interval, 2)
 
+    # ── HARD ABSOLUTE DOLLAR CAP: 10 points wide, regardless of strike
+    # interval or "N strikes" framing above. The "N strikes" system alone
+    # doesn't control for how expensive the underlying is -- confirmed
+    # directly: WDC at ~$582 gets interval=$10 (see _strike_interval), so
+    # even a "moderate" 3-strike spread becomes $30 wide, requiring up to
+    # $3000/contract of capital at risk on a single credit spread. Clamp
+    # to the largest valid multiple of `interval` that doesn't exceed the
+    # cap, and flag it as a real compromise (not silent) when the width
+    # actually had to be narrowed from what the trend/IV signals called for
+    # -- a forcibly-narrowed spread can have meaningfully worse credit/POP
+    # characteristics than the "ideal" width would have.
+    MAX_SPREAD_WIDTH_DOLLARS = 10.0
+    width_was_capped = False
+    if spread_width > MAX_SPREAD_WIDTH_DOLLARS:
+        capped_strikes = max(1, int(MAX_SPREAD_WIDTH_DOLLARS // interval))
+        capped_width = round(capped_strikes * interval, 2)
+        if capped_width > MAX_SPREAD_WIDTH_DOLLARS:
+            # Even a single strike interval exceeds the cap (only possible
+            # for very high strike intervals) -- no valid spread fits, skip
+            # directional credit/debit spread construction below entirely.
+            return []
+        width_was_capped = spread_width - capped_width
+        spread_width = capped_width
+        spread_width_strikes = capped_strikes
+    ic_leg_width = min(ic_leg_width, MAX_SPREAD_WIDTH_DOLLARS)
+
     trades = []
 
     def _pnr(long_k):
@@ -874,8 +967,52 @@ def _build_trade(
             return round((k - spot) / spot * 100, 1) if k > spot else 0
         return round((spot - k) / spot * 100, 1) if k < spot else 0
 
-    def _pop_credit(otm_p):
-        return min(90, max(50, round(65 + otm_p * 3.4)))
+    def _pop_credit(strike, is_put_side, dte_horizon=None):
+        """Probability the underlying is on the OTM (winning) side of
+        `strike` at a given time horizon -- using Black-Scholes N(d2),
+        the standard risk-neutral probability of expiring ITM/OTM, with
+        real IV and time-to-expiry as actual inputs. The previous version
+        of this function was `65 + otm_pct*3.4`, clamped to [50,90] --
+        completely blind to both volatility and time, meaning every POP
+        shown up to this point used the same crude estimate regardless of
+        whether IV was 15 or 80, or DTE was 10 or 45.
+
+        dte_horizon defaults to max(1, dte-7): the probability of still
+        being OTM one week before expiry, not at expiry itself. This
+        matters because the exit plan text below already says "close at
+        <7 DTE" -- late-cycle gamma risk means the position is meant to
+        be closed before full expiry regardless, so the probability that
+        actually reflects real risk exposure is "OTM through the planned
+        exit," which is a higher (easier to clear) bar than "OTM at
+        expiry" since there's less time for the underlying to move
+        against the position. Pass dte_horizon=dte explicitly for the
+        standard "POP at expiry" number instead.
+        """
+        try:
+            S = max(float(spot), 0.01)
+            K = max(float(strike), 0.01)
+            horizon = dte_horizon if dte_horizon is not None else max(1, dte - 7)
+            T = max(float(horizon), 0.5) / 365.0
+            sigma = max(0.05, min(float(iv_pct or 20) / 100.0, 2.50))
+            r = 0.04
+            d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+            d2 = d1 - sigma * math.sqrt(T)
+            norm_cdf = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+            if is_put_side:
+                # Short put: loses (ITM) if S ends up below K -> P(ITM)=N(-d2)
+                # Wins (OTM, = POP) = 1 - N(-d2) = N(d2)
+                p = norm_cdf(d2)
+            else:
+                # Short call: loses (ITM) if S ends up above K -> P(ITM)=N(d2)
+                # Wins (OTM, = POP) = 1 - N(d2) = N(-d2)
+                p = norm_cdf(-d2)
+            return round(min(97, max(50, p * 100)))
+        except Exception:
+            # Fall back to the old heuristic only if something's genuinely
+            # wrong with the inputs (e.g. non-finite values) -- never let
+            # a POP calculation crash the whole trade build.
+            otm_p = _otm_pct(strike, not is_put_side)
+            return min(90, max(50, round(65 + otm_p * 3.4)))
 
     def _manage_text(tt, credit, width, expiry_str):
         half = round(credit * 0.5, 2)
@@ -921,7 +1058,7 @@ def _build_trade(
             if ml <= 0 or cr / (cr + ml) < MIN_RR:
                 continue
             otm = _otm_pct(sell_s, False)
-            pop = _pop_credit(otm)
+            pop = _pop_credit(sell_s, True)
             pnr_val = _pnr(buy_s)
             # Enhanced rationale with all four signals
             tech_detail = (
@@ -982,7 +1119,7 @@ def _build_trade(
             if ml <= 0 or cr / (cr + ml) < MIN_RR:
                 continue
             otm = _otm_pct(sell_s, True)
-            pop = _pop_credit(otm)
+            pop = _pop_credit(sell_s, False)
             pnr_val = _pnr_call(sell_s)
             tech_detail = (
                 f"RSI {rsi14:.0f} {'(overbought)' if rsi14 > 62 else ''}. "
@@ -1058,7 +1195,7 @@ def _build_trade(
             ml_ic = max(ml_p, ml_c)
             rr_ic = round(total_cr / ml_ic, 2) if ml_ic > 0 else 0
             if rr_ic >= MIN_RR:
-                pop_ic = round((_pop_credit(_otm_pct(sp2, False)) + _pop_credit(_otm_pct(sc2, True))) / 2)
+                pop_ic = round((_pop_credit(sp2, True) + _pop_credit(sc2, False)) / 2)
                 range_w = round(sc2 - sp2, 2)
                 tech_detail = (
                     f"RSI {rsi14:.0f} (neutral). "
@@ -1093,6 +1230,13 @@ def _build_trade(
                                f"Close full position at <7 DTE."),
                     "rationale": rationale.strip(),
                 })
+
+    if width_was_capped:
+        for t in trades:
+            t["width_capped_note"] = (
+                f"Spread width capped to ${spread_width:.0f} wide (10-point max) -- "
+                f"trend/IV signals called for ${spread_width + width_was_capped:.0f}, narrowed to control capital at risk"
+            )
 
     return trades
 
@@ -1156,6 +1300,8 @@ def _scan_one(symbol: str, dte_min: int, dte_max: int, min_earn_days: int, min_s
         max_pain = walls.get("max_pain")
 
         regime_bias = regime.get("bias", "")
+        confluence = regime.get("confluence", "UNKNOWN")
+        rsi_trend_val = regime.get("rsi_trend", "")
 
         # 5. Determine best trade type from conditions
         trend_u = (trend or "").upper()
@@ -1186,7 +1332,8 @@ def _scan_one(symbol: str, dte_min: int, dte_max: int, min_earn_days: int, min_s
         best_type = candidate_types[0]
         best_eq = None
         for tt in candidate_types:
-            eq = _entry_score(symbol, tt, spot, regime_bias, rs, iv_rank, pcr, put_wall, call_wall, gamma_flip)
+            eq = _entry_score(symbol, tt, spot, regime_bias, rs, iv_rank, pcr, put_wall, call_wall, gamma_flip,
+                               confluence=confluence, rsi_trend=rsi_trend_val)
             if best_eq is None or eq["score"] > best_eq["score"]:
                 best_eq = eq
                 best_type = tt
@@ -1222,8 +1369,133 @@ def _scan_one(symbol: str, dte_min: int, dte_max: int, min_earn_days: int, min_s
         final_eq = _entry_score(
             symbol, trade["trade_type"], spot,
             regime_bias, rs, iv_rank, pcr, put_wall, call_wall, gamma_flip,
+            confluence=confluence, rsi_trend=rsi_trend_val,
         )
         trade.update(final_eq)
+        if trade.get("width_capped_note"):
+            trade.setdefault("cons", []).append(trade["width_capped_note"])
+            trade["score"] = max(10, trade.get("score", 50) - 8)
+
+        # ── POP/RR balance ────────────────────────────────────────────
+        # Grounded in the actual math rather than arbitrary "high POP low
+        # RR is bad" thresholds: for a credit-spread-style payout, the
+        # breakeven POP given a reward:risk ratio is 100/(1+RR) -- e.g. RR
+        # 1.08 needs ~48% POP to break even. Comparing the trade's ACTUAL
+        # POP against this breakeven is what "balance" should mean here --
+        # a trade can have a "good" POP number in isolation and still be
+        # a poor bet if RR doesn't support it, or vice versa.
+        pop_val = trade.get("pop")
+        rr_val = trade.get("rr")
+        if pop_val is not None and rr_val and rr_val > 0:
+            breakeven_pop = 100.0 / (1 + rr_val)
+            edge = pop_val - breakeven_pop
+            if edge > 15:
+                trade["score"] = min(100, trade.get("score", 50) + 8)
+                trade.setdefault("pros", []).append(
+                    f"POP {pop_val}% comfortably clears the {breakeven_pop:.0f}% breakeven for RR {rr_val} — real edge")
+            elif edge > 5:
+                trade["score"] = min(100, trade.get("score", 50) + 4)
+                trade.setdefault("pros", []).append(
+                    f"POP {pop_val}% above the {breakeven_pop:.0f}% breakeven for RR {rr_val}")
+            elif edge < -5:
+                trade["score"] = max(10, trade.get("score", 50) - 12)
+                trade.setdefault("cons", []).append(
+                    f"POP {pop_val}% is BELOW the {breakeven_pop:.0f}% breakeven for RR {rr_val} — unfavorable math before fees/slippage")
+            elif edge < 0:
+                trade["score"] = max(10, trade.get("score", 50) - 6)
+                trade.setdefault("cons", []).append(
+                    f"POP {pop_val}% barely clears the {breakeven_pop:.0f}% breakeven for RR {rr_val} — thin margin")
+
+        # ── High-POP credit trades don't need momentum ─────────────────
+        # A well-OTM credit trade with a genuinely high POP wins by the
+        # underlying NOT moving much, not by moving in its favor --
+        # fundamentally different from a trade relying on an actual
+        # directional move. Regime/momentum agreement is still a real
+        # bonus (it can mean an earlier profit-take via the 50% rule),
+        # but its absence shouldn't be penalized as heavily for a trade
+        # that's already statistically safe by a wide margin on its own.
+        # Scales from 0 at POP=75% up to a max +10 around POP=92%+.
+        if pop_val is not None and trade.get("trade_type") in ("PS", "CS", "IC") and pop_val >= 75:
+            momentum_offset = min(10, round((pop_val - 75) * 0.6))
+            if momentum_offset > 0:
+                trade["score"] = min(100, trade.get("score", 50) + momentum_offset)
+                trade.setdefault("pros", []).append(
+                    f"POP {pop_val}% is high enough that this trade doesn't need momentum or direction to "
+                    f"work — just needs the underlying to stay roughly where it is"
+                )
+
+        # Keep grade consistent with score after the post-hoc adjustments
+        # above -- final_eq's grade was assigned before these ran.
+        trade["grade"], trade["recommendation"] = _grade_for_score(trade.get("score", 50))
+
+        # ── Risk factors: what could actually derail this trade ────────
+        # Distinct from "cons" above (which explains why the SCORE is what
+        # it is) -- this is specifically "what would have to happen for
+        # this trade to lose," using data already computed elsewhere in
+        # this function rather than restating the score's own reasoning.
+        risk_factors: List[str] = []
+        short_strike = trade.get("sell_strike")
+        trade_dte = dte
+
+        # 1. Earnings/event risk -- a gap can blow through both the
+        # technical setup and the delta-implied probability at once,
+        # which nothing else in this scorer accounts for.
+        if earn_days is not None and 0 <= earn_days <= trade_dte:
+            risk_factors.append(
+                f"Earnings in {earn_days}d, before this trade's {trade_dte} DTE expiry — "
+                f"a gap could invalidate both the technical setup and the probability estimate at once"
+            )
+
+        # 2. Distance from the short strike to the nearest known S/R wall
+        # -- a strike sitting close to a real level is a different risk
+        # profile than the same delta with no nearby structure.
+        put_wall = walls.get("put_wall") if isinstance(walls, dict) else None
+        call_wall = walls.get("call_wall") if isinstance(walls, dict) else None
+        if short_strike and trade.get("trade_type") in ("PS", "IC") and put_wall:
+            dist_pct = abs(short_strike - put_wall) / spot * 100
+            if dist_pct < 2.0:
+                risk_factors.append(
+                    f"Short strike is only {dist_pct:.1f}% from the put wall (${put_wall}) — "
+                    f"a break of that level removes a key layer of support"
+                )
+        if short_strike and trade.get("trade_type") in ("CS", "IC") and call_wall:
+            dist_pct = abs(call_wall - short_strike) / spot * 100
+            if dist_pct < 2.0:
+                risk_factors.append(
+                    f"Short strike is only {dist_pct:.1f}% from the call wall (${call_wall}) — "
+                    f"a break of that level removes a key layer of resistance"
+                )
+
+        # 3. PNR (point of no return) proximity -- how far spot actually
+        # is from the level where this trade is effectively unrecoverable.
+        pnr = trade.get("pnr")
+        if pnr:
+            pnr_dist_pct = abs(spot - pnr) / spot * 100
+            if pnr_dist_pct < 5.0:
+                risk_factors.append(
+                    f"Spot is only {pnr_dist_pct:.1f}% from this trade's PNR (${pnr}) — "
+                    f"limited room before the position is effectively unrecoverable"
+                )
+
+        # 4. The gamma-risk window itself -- explicit, not just implied by
+        # the exit-plan text, since POP is now computed assuming you exit
+        # by DTE-7 (see _pop_credit) -- staying past that materially
+        # changes the actual risk this trade carries.
+        if trade_dte and trade_dte > 7:
+            risk_factors.append(
+                f"POP above assumes closing by ~{max(1, trade_dte-7)} DTE (1 week before expiry) — "
+                f"staying open into the final week adds real gamma risk this number doesn't cover"
+            )
+
+        # 5. Low IV rank -- less compensation for the risk being taken,
+        # independent of how good the strike selection itself looks.
+        if iv_rank is not None and iv_rank < 30:
+            risk_factors.append(
+                f"IV Rank {iv_rank:.0f} is low — less premium compensation for the risk vs. a higher-IV entry"
+            )
+
+        if risk_factors:
+            trade["risk_factors"] = risk_factors
 
         # IV Rank advisory: this engine only builds premium-selling (credit)
         # structures. When IV Rank is low, selling premium is poor
@@ -1476,7 +1748,9 @@ def api_symbol_detail():
         eq = _entry_score(symbol, t["trade_type"], spot,
                           regime.get("bias",""), rs, iv_rank,
                           pcr, walls.get("put_wall"), walls.get("call_wall"),
-                          walls.get("gamma_flip"))
+                          walls.get("gamma_flip"),
+                          confluence=regime.get("confluence", "UNKNOWN"),
+                          rsi_trend=regime.get("rsi_trend", ""))
         scored.append({**t, **eq})
 
     scored.sort(key=lambda x: x.get("score", 0), reverse=True)

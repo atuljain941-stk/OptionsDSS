@@ -1643,3 +1643,1170 @@ This should eliminate the ACN/ADM-style false readings -- symbols with
 thin history will now correctly drop out of results (or show as
 unavailable) instead of showing a number that looked plausible but wasn't
 real.
+
+## v41 — real backfill-and-persist for scanner price history, per your request
+
+**On "symbol still returned despite insufficient data"**: traced the full
+execution path (`CompareNode` evaluation, `api_run()`'s match/filter
+loop) -- both correctly treat a `None` result as "exclude this symbol,"
+confirmed by direct code reading. What was actually happening: most
+symbols weren't hitting `None` at all -- they had *just enough* local
+history to clear my v40 guard's 180-bar threshold but were still
+borderline, producing a real-looking number that was still off. This
+fix (below) should resolve that category directly, since it gives
+symbols proper, well-converged history instead of borderline amounts.
+
+**The real fix -- backfill and persist, exactly as you described**:
+`_history()` now checks for at least 200 valid daily bars (comfortable
+headroom above rsidiff90's 180-bar convergence need). If a symbol has
+less, it fetches **3 years of daily OHLCV from yfinance** and persists
+*every day* of it to `price_cache` (the existing scheduled job there only
+ever stored the single latest day -- this is a genuine historical
+backfill, not a snapshot). Guarded against retry-storms within one scan
+run (`_backfill_attempted_this_run`).
+
+**Found and fixed a second, compounding bug while building this**: the
+function that reads `price_cache` is `@lru_cache`'d for performance. My
+first version of the backfill wrote fresh data successfully but the read
+path kept serving the *stale cached "no data" result from before the
+backfill* -- meaning the write succeeded but was invisible to every
+subsequent read for the rest of the process's life. Fixed by clearing
+that cache immediately after a successful backfill.
+
+**Tested the complete pipeline end-to-end, including the exact failure
+this second bug would have caused if I'd shipped it**: confirmed a symbol
+with zero local history triggers exactly one yfinance backfill call,
+persists 750 days, and is immediately readable afterward (not stale);
+confirmed a second call for the same symbol reuses the persisted data
+with zero additional fetches; and confirmed `rsidiff90()` -- which
+returned `None` before -- now computes a real value once backfilled.
+
+**What this means going forward**: the first scan that touches a
+thin-history symbol pays a one-time yfinance fetch cost, and every scan
+after that (this run and all future ones, matching your explicit ask)
+reads from the persisted local cache instead. No architecture change
+needed elsewhere -- this slots directly into the same `_history()` path
+every scanner primitive already goes through.
+
+## v42 — URGENT FIX: v41's backfill was blocking interactive scans (my mistake)
+
+Apologies for this one -- v41's backfill ran **synchronously, inside the
+scan itself**. On a watchlist where most symbols needed backfilling (the
+common case right after deploying v41), that meant potentially 100+
+blocking yfinance network calls serialized through an 8-thread pool,
+directly explaining the sustained high queue depth and the 30+ minute
+unresponsive scan.
+
+**Fixed by separating "needs backfilling" from "do the backfill"**:
+- `_history()` now just **enqueues** a symbol (a single cheap DB insert,
+  no network call) when it has too little local data, and returns
+  immediately -- an interactive scan never blocks on a live fetch again.
+- The actual fetching happens in `run_pending_price_backfills()`, a
+  separate function processing a small batch (default 5 symbols) at a
+  time, meant to run on a schedule -- not from inside a scan.
+- Registered as a proper background watcher
+  (`start_price_backfill_watcher`, wired into `app_factory.py` alongside
+  your other watchers) running every 2 minutes, 5 symbols per run, visible
+  in Scheduler Hub as "Scanner price history backfill" like everything
+  else.
+
+**Tested the specific failure this was meant to prevent**: simulated a
+scan touching 30 thin-history symbols -- completed in 0.18s with **zero**
+live fetches triggered during the scan itself (all correctly queued
+instead). Ran one background batch separately -- processed exactly 5
+symbols, confirmed rate-limiting works. Confirmed `rsidiff90()` correctly
+returns a real value once a symbol has been backfilled by the background
+worker, completing the same end-to-end path as v41 but without ever
+blocking a live query.
+
+**What to expect now**: the first scan after deploying this will show
+`None`/excluded results for thin-history symbols again (same as
+pre-v41 behavior) -- that's expected and correct. Over the following
+few minutes, the background watcher will work through the queue (5
+symbols every 2 minutes), and subsequent scans will show real values for
+symbols as they get backfilled, without any scan ever blocking again.
+
+## v43 — manual, on-demand bulk backfill tool (your "run it over the weekend" request)
+
+**On the automatic watcher's pace**: 5 symbols/2min = 150/hour -- fine for
+ongoing maintenance, not what you want for "get it all done now." Built
+what you actually asked for: a completely separate, manually-triggered
+bulk tool that doesn't touch or interfere with the automatic watcher's
+queue at all.
+
+**New**: `POST /scanner-builder/api/bulk-backfill` with either
+`{"watchlist_id": 3, "months": 36}` or `{"symbols": [...], "months": 36}`
+-- starts a full backfill of every symbol given, running in a background
+thread so the HTTP call returns immediately even for a long run. Price +
+volume only (same fields as the automatic backfill, nothing extra).
+`GET /scanner-builder/api/bulk-backfill/status` reports live progress
+(`processed`/`total`, `current_symbol`, `succeeded`/`failed` counts) so
+you can watch it work through a whole watchlist. A small delay between
+each symbol (default 1s) keeps it polite to yfinance across 100+ symbols
+rather than firing everything at once. Rejects a second concurrent trigger
+(409) while one's already running, so you can't accidentally double up.
+
+The existing automatic scheduled watchlist fetcher is completely
+untouched -- this is purely additive, exactly as you asked ("the regular
+watchlist fetcher just works the way it is").
+
+**Tested the full real-world flow**: triggered via the API with a 6-month
+window (not the 36-month default, to confirm the parameter actually
+threads through) and 5 symbols, polled status while it ran in the
+background and watched `processed` count climb from 1 to 3 with
+`current_symbol` updating correctly, confirmed the exact requested period
+("6mo") was what actually got sent to yfinance rather than a default
+being silently used, and confirmed a second trigger while the first was
+still running correctly gets rejected with a 409 instead of starting a
+conflicting second run.
+
+**How to use it for your weekend run**: something like
+`curl -X POST http://localhost:5050/scanner-builder/api/bulk-backfill -H "Content-Type: application/json" -d '{"watchlist_id": <your watchlist id>, "months": 36}'`
+then periodically check
+`curl http://localhost:5050/scanner-builder/api/bulk-backfill/status`
+until `"running": false`.
+
+## v44 — added the bulk backfill as a real button on the Watchlist tab, per watchlist
+
+Added "📈 Backfill History" alongside the existing Fetch/Sectors/Earnings
+buttons on each watchlist row in the Watchlist Manager tab. Click it,
+enter how many months (defaults to 36), and it calls the v43 API for that
+specific watchlist's ID -- runs in the background exactly like the
+existing "Fetch Price/OI" button already does, with the same live-status-
+polling pattern (`processed/total`, current symbol, success/fail counts)
+shown right under the watchlist's row until it finishes.
+
+**Caught and fixed a real mistake while building this**: my first edit
+accidentally deleted the neighboring `_wlFetchSelected()` function's
+declaration line during insertion, which would have broken the existing
+"▶ Refresh Selected" button entirely. Caught this immediately via
+`node --check` (which is exactly why that check happens on every
+JS change) rather than shipping it -- fixed and reverified both the new
+button's function and the pre-existing one are intact and correctly
+separated.
+
+Tested the actual button-triggered flow end-to-end (not just the API
+underneath it, which v43 already covered): simulated a click with a
+prompted month value, confirmed the resulting API call carries the
+correct `watchlist_id` and `months` payload, confirmed the status text
+updates immediately, and confirmed a notification fires -- matching the
+same UX pattern as every other action button already on that page, so it
+should feel native rather than bolted on.
+
+## v45 — the real precision issue: convergence threshold was too low, not a formula bug
+
+**On "version 4"**: verified directly against Pine Script's own documented
+`ta.rma()` formula (`RMA = (prev*(length-1) + source)/length`) -- this is
+mathematically identical to what this codebase already uses
+(`ewm(alpha=1/length, adjust=False)`), and hasn't changed across Pine
+versions. Not a formula-level difference.
+
+**What actually explains discrepancies vs TradingView**: directly measured
+(not estimated) how much `rsidiff90`'s value shifts at a fixed point in
+time depending on how much preceding history feeds the calculation. With
+only 200 bars (my v40/v41 threshold), the value can be off from its
+properly-converged figure by **0.5-0.7+ points** on typical data --
+200 was too low a bar to trust, not a safe threshold. Convergence to a
+negligible (<0.01) difference only starts around **500-540 bars**, not
+180-200 -- my earlier threshold was a reasonable-sounding rule of thumb,
+not something I'd directly measured, and the measurement shows it was
+meaningfully too permissive.
+
+**Fixed all three places this threshold is checked** (`_history()`'s
+backfill-trigger gate, `_prepare_snapshot`'s precomputed series guard, and
+`rsidiff90()`'s own function-level check) to require ~540 bars (period×6
+for the default period=90, scaling correctly for custom periods too)
+instead of 180-200. Verified directly: 500 bars still correctly returns
+`None`, 550 bars returns a real computed value, and a standard 3-year
+backfill (750 days, unchanged from v41/v43) comfortably clears this with
+real margin -- so the existing backfill tooling doesn't need any changes,
+it was already fetching more than enough, the *gate* just wasn't requiring
+enough of it before trusting a value.
+
+This should measurably close the gap between BILL/ACN/ADM-style values and
+what a properly-converged calculation (matching TradingView's, which
+benefits from years of continuous chart history) would show -- not by
+changing the formula, which was already correct, but by refusing to report
+a value until there's genuinely enough history behind it.
+
+## v46 — diagnostic tool to pin down BABA's remaining discrepancy precisely
+
+Given the formula has been directly validated against Pine Script's own
+documented RMA formula, and the convergence threshold has been directly
+measured and corrected (v45), the two remaining plausible explanations for
+a discrepancy are: (1) genuinely different underlying close prices between
+data sources, or (2) the TradingView chart is showing your own custom "UAE
+Unified Framework" indicator (that pane displayed four distinct values --
+93.03, 55.54, 39.38, 35.71 -- which doesn't look like a plain single-line
+RSI plot) rather than a directly-comparable vanilla RSI. Rather than guess
+further, built a way to check (1) precisely.
+
+**New**: `GET /scanner-builder/api/debug/rsi/<symbol>?days=10` returns
+exactly what oiapp has stored and computed -- the actual daily close
+prices it's using, alongside RSI14 and rsidiff90 for each of the last N
+days, plus how many valid bars are available and whether the 540-bar
+convergence threshold is met. This lets you compare oiapp's actual stored
+closing prices, day by day, directly against TradingView's chart data for
+BABA -- if the closes match but the RSI/rsidiff90 numbers still differ,
+that confirms it's a different indicator being compared, not a data or
+formula issue; if the closes themselves differ, that's the real, fixable
+root cause (a data source/adjustment discrepancy) and worth pursuing
+separately.
+
+Try: `http://localhost:5050/scanner-builder/api/debug/rsi/BABA?days=10`
+and compare each date's close against what your TradingView chart shows
+for the same dates.
+
+## v47 — found the real, concrete lead: yfinance's dividend/split auto-adjustment
+
+Your debug output was the key piece of evidence: BABA's stored close for
+2026-07-10 (112.33) matched TradingView's displayed close (112.33)
+*exactly*, yet RSI still differed by ~4.5 points. Since RSI depends on the
+full 14-day rolling window, not just today, that ruled out "wrong current
+price" and pointed at something affecting the *preceding* days specifically.
+
+**Found it**: confirmed directly against yfinance's own documentation --
+`Ticker.history()` defaults to `auto_adjust=True`, which silently adjusts
+historical Close prices for dividends and stock splits. yfinance's own
+docs explicitly recommend `auto_adjust=False` specifically for price
+charts and technical analysis, since that's what reflects the *actual
+traded price* -- which is what TradingView's standard chart shows, not a
+dividend-adjusted series. This was never set explicitly in
+`_backfill_price_history_to_cache()`, so it was silently using the
+adjusted default the whole time.
+
+**Fixed**: explicitly set `auto_adjust=False`. Verified directly that this
+parameter now actually reaches the yfinance call rather than relying on
+an implicit default.
+
+**Being honest about certainty here**: I can't confirm from this
+environment whether BABA specifically had a dividend or split event
+within the recent RSI lookback window that this fix would correct for --
+that's the concrete, plausible mechanism, not a guess, but I don't have
+live access to verify it's definitely *the* cause of this specific ~4.5
+point gap. Worth re-running the `/api/debug/rsi/BABA` endpoint after this
+deploys (which will re-backfill with the corrected setting) and comparing
+again. If the gap closes substantially, this was it. If a smaller gap
+remains, that's likely just ordinary cross-provider noise between two
+different data vendors, which is normal and not something to keep chasing
+further.
+
+**Worth knowing**: other yfinance calls elsewhere in the app (e.g.
+`sector_service.py`'s ETF fetches) may have this same implicit-default
+behavior. I scoped this fix to the function directly feeding rsidiff90
+specifically, since that's what's been under investigation -- flagging in
+case similar discrepancies show up elsewhere and are worth the same fix.
+
+## v48 — conviction scorer now explains itself even when the score is low
+
+**Root cause of "low grade, no rationale"**: `conviction_scorer.score_symbol()`
+has 6 scoring components (OI Buildup, Regime, S/R Proximity, Institutional
+Setup, RSI MTF, OI Buildup momentum). Every single one only appended
+explanatory text when it found something *positive* -- there was no
+`else` branch anywhere. An F-grade symbol, by definition, has close-to-zero
+scores across all 6 components, meaning **none of them had anything to
+say** -- exactly why your META/MS/SCHW/SE alerts showed a low grade with
+no rationale for it. The "Why:" text you saw was entirely the scanner
+query's own match-condition breakdown, unrelated to the scoring engine.
+
+**Fixed all 6 components, at two levels each**: added the "data exists but
+didn't qualify" explanation (e.g. "⚠ Regime not bullish/trending
+(consolidating, no clear bias)") *and*, since a first round of testing
+caught it, the "no data exists for this symbol at all" case too (e.g. "⚠
+No S/R breakout detected" vs "⚠ No S/R breakout scan data available" --
+different situations, both need their own message). Verified directly with
+a worst-case symbol (zero data anywhere): went from 0 explanatory signals
+to all 6 correctly explained, and confirmed a genuinely-positive symbol's
+existing signals still fire exactly as before -- no regression.
+
+Every conviction-scored alert going forward will show a full breakdown --
+what worked, what didn't, and why the number came out where it did --
+instead of a bare score with nothing behind it.
+
+## On "no trade idea" -- this already exists, just needs turning on
+
+Traced the actual alert pipeline: it has two paths. When an alert
+**source** has `direction_tags` configured (e.g. Bullish/Bearish), matches
+route through your existing trade construction engine
+(`trade_opportunity_scanner._scan_one`) and the message includes a real
+trade idea -- type, expiry, legs, POP, credit, max loss, RR, exit plan.
+When a source has no `direction_tags` set (the default), it falls back to
+conviction-score-only, with no trade idea attempted at all -- exactly what
+"Range_BO" and "EMA5_MRT" are doing.
+
+This isn't a missing feature, it's a per-source setting that isn't turned
+on for these two sources specifically. Setting a direction bias on them in
+Signal Notifier's source settings should get you real trade ideas on
+future alerts using machinery that already exists and is already tested
+(it's the same engine trade sources already use). If what you actually
+want is trade ideas even for sources with *no* directional bias at all
+(e.g. infer direction from the match itself, or attempt both directions
+and pick the better one), that's a genuinely new piece of logic, not a
+configuration change -- let me know if that's the direction you want and
+I'll scope it properly rather than bolt it on quickly.
+
+## v49 — multi-timeframe confluence + RSI momentum direction in trade scoring (your WYNN catch)
+
+Your WYNN example was a real, well-supported catch. Traced the actual
+scoring pipeline and found the exact gap: the "regime" that drives every
+trade's Grade/score is computed **entirely from daily data** -- there was
+no weekly cross-check anywhere, and RSI was only checked by *level*, never
+by *direction* (rising vs falling). A daily-bearish reading with RSI
+actively climbing and a genuinely sideways weekly structure -- exactly
+WYNN's situation -- had no way to show up as a weaker case than a "clean"
+bearish setup with everything aligned.
+
+**Also found and fixed a compounding bug along the way**: the daily
+regime's own RSI-EMA-90 computation only used 6 months of history (~125
+bars) -- nowhere near the ~540 bars directly measured elsewhere in this
+project to actually converge. Extended to 3 years.
+
+**Built the three pieces you asked for**:
+1. **RSI momentum direction** -- new `rsi_trend` (RISING/FALLING/FLAT),
+   comparing current RSI against 5 bars ago, not just its current level.
+2. **Weekly regime cross-check** -- new lightweight `_compute_weekly_regime()`
+   (EMA20/50 trend structure on weekly bars, not a full duplicate of the
+   300-line daily analysis) classifying weekly as UPTREND/DOWNTREND/SIDEWAYS/
+   MILD_UP/MILD_DOWN, stored alongside daily regime with a `confluence`
+   flag (AGREE/DISAGREE/WEEKLY_SIDEWAYS/DAILY_FLAT).
+3. **Scoring + strategy suggestions now use both**: `_entry_score()`
+   penalizes a directional trade when weekly disagrees (-15) or is
+   sideways (-10), when RSI is trending against the proposed bias (-8),
+   and rewards genuine daily+weekly agreement (+6) -- each with its own
+   explicit "why" text, not just a number. `_suggest_strategies()` now
+   leads with an Iron Condor suggestion specifically when weekly is
+   genuinely sideways, alongside (not instead of) the directional ideas,
+   with its own probability score and reasoning.
+
+**Tested rigorously, including catching and fixing a real calibration
+bug of my own**: the SIDEWAYS classifier initially misclassified a
+synthetic pure-oscillation series (zero net drift) as "MILD_DOWN" --
+traced it to using the short-term EMA20's slope, which legitimately
+oscillates even within a genuinely range-bound market. Fixed by checking
+the more structural EMA50 slope instead. Reverified all three
+classifications (sideways, uptrend, downtrend) on synthetic data
+afterward -- all correct.
+
+**End-to-end confirmation using your exact WYNN scenario** (daily bearish
+regime, RSI rising, weekly sideways): the bearish Credit Spread's score
+dropped from 92/**A** (old, daily-only logic) to 74/**B** (new, full
+picture) -- with explicit reasoning now attached ("RSI trending up —
+momentum improving against this bearish call", "Weekly is sideways —
+consider an Iron Condor instead"). The Iron Condor alternative scored
+68/B with its own clear rationale ("Weekly genuinely range-bound ✓") --
+genuinely competitive with the directional call now, not invisible.
+
+This runs through your existing daily regime scan (`run_regime_scan`),
+so it'll take effect on the next scheduled scan run -- no new job needed,
+the same pipeline that already populates `regime_scan` now populates the
+weekly/confluence fields alongside it.
+
+## v50 — your WDC catches: full transparency, strike width cap, weekly shock detection, POP/RR balance
+
+**1. "Why:" was silently dropping most of the computed reasoning.** Found
+a double-truncation bug: `_entry_score` already limited itself to top-4
+pros/cons, then `_format_message` cut that down to top-3 pros and never
+showed cons at all. OI/PCR/wall/gamma-flip reasoning was being computed
+the whole time, just never reaching the message. Fixed both layers --
+messages now show the full pros list under "Why:" and a new "Caution:"
+line for cons, so a B-grade trade's caution flags are actually visible,
+not just its score.
+
+**2. Strike width: found the real mismatch.** `_strike_interval()` returns
+$10 for anything above $500 (WDC at $582), and the "N strikes" framework
+multiplied that by 3-4x with no absolute cap -- confirmed directly, this
+produced exactly your 30-point spread. Added a hard $10 absolute cap:
+clamps down to the widest valid strike interval that still fits, and (per
+your "skip it or degrade it") flags the compromise explicitly in the
+message and applies a real score penalty when a trade had to be narrowed
+from what the trend signals originally called for. Verified directly:
+the same WDC-style trending scenario that produced a 30-point spread
+before now correctly narrows to $10 wide, with the caution note attached.
+
+**3. Weekly shock detection -- catching what a slower trend classifier
+misses.** v49's weekly regime check (EMA20/50 structure) is deliberately
+slow-moving, which means a single violent reversal candle -- like what
+your UAE indicator flagged -- won't move it for a while by design. Added
+a separate, faster check: compares the most recent weekly candle's move
+against trailing weekly volatility, and when it's a real outlier moving
+*against* the daily trade's direction, it overrides confluence
+(`WEEKLY_SHOCK_AGAINST`) with its own, stronger score penalty --
+independent of whether the EMA structure has caught up yet.
+
+**4. POP/RR balance, grounded in actual breakeven math.** Rather than
+arbitrary "high POP low RR is bad" thresholds, computes the real
+breakeven POP for a given RR (100/(1+RR) for a credit-spread-style
+payout) and scores the trade's *edge* above or below that breakeven --
+a trade can look fine on POP or RR in isolation and still be a poor bet
+if the other doesn't support it. Verified WDC's own trade actually has a
+healthy 17.9-point edge, so this correctly doesn't penalize an
+already-sound trade -- it only catches genuine imbalances. Added a shared
+`_grade_for_score()` helper so the letter grade stays consistent with the
+score after these post-hoc adjustments, rather than showing a stale grade
+from before the penalties were applied.
+
+All four run through the same pipeline your existing trades already use
+(Trade Opportunity Scanner + regime scan), so no new job or setup needed
+-- takes effect on the next scan.
+
+## v51 — new: precomputed technical indicator cache, daily + weekly
+
+Built exactly what you described, matching the same pattern as the price
+backfill pipeline (automatic background watcher + manual bulk trigger),
+new module `oiapp/services/technical_snapshot.py`.
+
+**What it computes and stores**, per symbol per timeframe (daily and
+weekly): RSI3, RSI14, EMA(RSI14,13), EMA(RSI14,90)/rsidiff90 (with the
+same 540-bar convergence-trust flag already validated elsewhere),
+EMA9/20/50/60/200, bar strength vs EMA60, MACD/signal/histogram, ADX/DI+/
+DI- (Wilder's smoothing, same RMA convention already validated for RSI
+elsewhere in this project), and support/resistance levels. Reuses the
+already-validated `_rsi`/`_ema`/`_macd` from scanner_builder.py rather
+than a fourth independent implementation of the same math.
+
+**Two ways to run it**, same pattern as the price backfill:
+- **Automatic background watcher**: 10 symbols every 3 minutes, registered
+  in Scheduler Hub as "Technical indicator precompute cache", cycling
+  through whichever symbols haven't been computed most recently so
+  everything eventually stays fresh.
+- **Manual bulk trigger**: `POST /technical-snapshot/api/bulk-compute`
+  with a watchlist ID or symbol list, runs in the background, poll
+  `/api/bulk-compute/status` for progress -- same UX as the price backfill
+  button, for when you want a full watchlist computed right now rather
+  than waiting on the automatic pace.
+- **Read**: `GET /technical-snapshot/api/snapshot/<symbol>?timeframe=1d`
+  returns the latest stored snapshot.
+
+Sits on top of the existing price backfill pipeline (`_history()`),
+including its non-blocking enqueue behavior for thin-history symbols --
+correctly returns "no snapshot yet" for a symbol whose price history
+hasn't been backfilled, rather than blocking or erroring.
+
+**Tested the full pipeline end-to-end**: single-symbol compute + read-back
+(confirmed all 25 stored fields, including the rsidiff90-trust flag);
+batch across multiple symbols x both timeframes (confirmed distinct,
+correct daily vs weekly values for the same symbol); and the actual Flask
+endpoints -- trigger, live status polling, and snapshot read -- all
+working correctly together.
+
+**Important scope note, being upfront about this**: this builds and
+tests the *cache itself* thoroughly. It does **not** yet wire
+scanner_builder.py, conviction_scorer.py, regime_scanner.py, or
+trade_opportunity_scanner.py to actually *read* from this cache instead
+of recomputing live -- that's a separate, deliberately incremental next
+step (each consumer has its own call patterns and I'd want to verify each
+one individually against this cache rather than a single sweep touching
+all of them at once, given how much scoring/reasoning logic in this
+session already depends on getting those calculations exactly right).
+The cache is fully built, tested, and running -- happy to wire up
+specific consumers next if you want to prioritize which one first.
+
+## v52 — Compute Indicators button + the read-through cache function, tested
+
+**UI**: Added "🧮 Compute Indicators" to each watchlist row in Watchlist
+Manager, right next to Backfill History, same pattern (background job,
+live status polling). Caught and immediately fixed the exact same
+JS-insertion mistake as before (a neighboring function's declaration line
+getting dropped) via `node --check` before it went anywhere -- fixed and
+reverified.
+
+**Core function**: `get_or_compute_technical_snapshot(symbol, timeframe)`
+in `technical_snapshot.py` -- implements exactly the semantics you asked
+for: if today's record already exists for this symbol+timeframe, return
+it as-is, no recomputation. If not, compute it now (a local calculation
+over already-cached price data, not a network call, so blocking briefly
+here is fine and different from the earlier price-backfill blocking
+issue), store it, return the fresh result.
+
+Verified directly: first call for a symbol with no record computes and
+stores (confirmed zero yfinance network calls -- it correctly used the
+already-backfilled local price_cache, not a fresh fetch); second call the
+same day skips entirely and returns identical values; a different
+timeframe for the same symbol correctly computes its own fresh value.
+
+**On "wire all scoring/scanners/queries to use this"**: investigated this
+properly before touching anything, and found real complexity worth being
+upfront about -- there are four independent RSI/EMA/MACD implementations
+across this codebase (scanner_builder.py, regime_scanner.py,
+trade_opportunity_scanner.py's `_get_ta`, and technical_snapshot.py
+itself), each computing further derived signals (reversal detection,
+market state, ATR, IV-rank proxy) on top of the same local series. Some
+of what each function returns is a simple cache-servable lookup; some
+is a compound calculation that still needs local series data regardless
+of caching. Given how much of this session went into getting trade
+scoring and scanner accuracy right, I chose not to do a fast, broad
+rewrite across all four in one pass -- that risks silently changing a
+number you're now relying on. The cache itself is built and correct;
+wiring each consumer is a real, incremental next step, best done one
+function at a time with the same verification rigor as everything else
+here. Suggested starting point: regime_scanner's daily RSI/rsi_diff
+specifically, since it's the most self-contained of the four and feeds
+trade scoring directly -- let me know if you want to proceed there.
+
+## v53 — wired regime_scanner, trade_opportunity_scanner, and scanner_builder to the cache, with three real bugs caught and fixed along the way
+
+Three consumers now use `technical_snapshot`, as requested: read/write for
+`regime_scanner.py` and `scanner_builder.py`'s query engine (both compute
+this data anyway for their own purposes, so writing it through to the
+cache is nearly free), and read-through for
+`trade_opportunity_scanner.py`'s `_get_ta` (overrides its own less-
+converged 1-year-window RSI/rsidiff90 with the cached, more accurate
+3-year-based value when available).
+
+**Caught three real bugs while wiring this up, each found by testing the
+actual behavior rather than assuming the code was correct:**
+
+1. **Date-convention mismatch.** regime_scanner's write-through originally
+   dated records with `date.today()` (calendar date); the cache's own
+   writer dates them with the price data's actual last trading-day date.
+   These silently differ on weekends/holidays -- verified directly: this
+   caused two separate rows for the same symbol instead of one merged
+   record, with `ORDER BY date DESC` sometimes picking the incomplete one.
+   Fixed by using the price data's own last-bar date consistently
+   everywhere.
+
+2. **Skip-check used calendar-today instead of "already computed
+   today."** Market data has no bar dated "today" on weekends (confirmed
+   directly -- today being a Saturday, the most recent real trading day
+   is Friday), so comparing the stored data's date to calendar-today
+   would make the cache think it needs to recompute on every single check
+   over a weekend, even though nothing had changed. Fixed to check
+   `computed_at` (when the record was last built) instead.
+
+3. **Blind overwrite would have caused data loss between sources.**
+   regime_scanner computes ADX/DI+/DI- but not RSI3; scanner_builder's
+   query engine computes RSI3 but not ADX/DI. A blind `INSERT OR REPLACE`
+   meant whichever ran more recently would silently wipe out the other's
+   contribution -- verified directly by testing both write orders.
+   `store_technical_snapshot` now merges with any existing record: a new
+   non-null value overwrites, a new null value never clobbers an existing
+   non-null one.
+
+**Verified the complete, corrected pipeline end-to-end**: regime_scanner
+writes first (ADX/DI present, RSI3 absent) -> scanner query engine writes
+second (RSI3 present, ADX/DI preserved via merge) -> resulting record has
+*both* contributions, confirmed in both possible run orders. Confirmed
+`trade_opportunity_scanner._get_ta` correctly picks up the merged cached
+RSI14 instead of its own local computation. Confirmed a subsequent
+`get_or_compute_technical_snapshot` call correctly recognizes the record
+as complete and skips recomputation entirely (0 additional compute calls
+across 2 checks).
+
+**Scope note**: `_get_ta` overrides only RSI14/EMA-RSI-90/rsidiff90 from
+the cache -- the values this session spent the most effort validating for
+accuracy. Its ATR, IV-rank proxy, and market-state classification stay
+locally computed, since those are either fast-converging enough not to
+need this or entangled with array-based slope calculations a single
+cached scalar can't safely substitute for. `conviction_scorer.py` wasn't
+touched -- it reads from other precomputed scan tables (`regime_scan`,
+`oi_buildup_scan`, etc.) rather than computing RSI/EMA directly itself, so
+there wasn't a redundant computation there to eliminate.
+
+## New: scripts/regression_check.py -- practical before/after verification tool
+
+**Important framing first**: "are the values the same as before" isn't
+quite the right test for this batch of changes -- several of them were
+deliberate accuracy fixes (RSI-EMA-90 convergence threshold went from 180
+to 540 bars, backfill windows got longer, cross-timeframe confluence now
+affects scoring). Values for many symbols SHOULD differ from what the app
+showed before -- that's the fixes working, not a regression. The right
+question is: does anything crash, and is the new cache internally
+consistent (not silently returning garbage)?
+
+**What the script actually checks**:
+1. No crashes across your real watchlist symbols, running the exact same
+   functions the app uses (`_symbol_ctx`, `_compute_regime_ta`, `_get_ta`)
+2. Cache consistency -- compares the stored technical_snapshot value
+   against a fresh, independent recomputation from the same price data;
+   flags anything that differs by more than 1.0 point as worth a look
+3. Sanity bounds on every value (RSI in [0,100], ADX in [0,100], no NaN/
+   inf) -- catches genuine breakage without needing an old number to
+   compare against
+4. Prints the actual computed values so you can manually spot-check a few
+   against TradingView or what you remember seeing before, same
+   verification approach used earlier this session for BABA/WYNN
+
+Run it against your real app:
+
+    python scripts/regression_check.py AAPL MSFT GOOGL TSLA NVDA
+
+or with no arguments to check the first 20 symbols from your default
+watchlist.
+
+**Tested the script itself, including catching a flaw in my own test
+setup**: my first test run showed a real-looking discrepancy for one
+symbol, which on investigation turned out to be caused by Python's
+built-in `hash()` being randomized per-process (a security feature) --
+meaning my *test mock's* random seed wasn't actually reproducible across
+the two separate script runs I used to set it up. Not a real-world issue
+(actual yfinance data doesn't have this problem), but a good example of
+exactly the kind of thing this script is built to catch -- fixed the test
+seeding and reran clean: 3/3 symbols OK, 0 errors, 0 warnings.
+
+**Practical recommendation for verifying your real deployment**: run this
+against a representative slice of your watchlist right after deploying,
+then again after the automatic watchers have had time to populate the
+cache for more symbols (a few hours). Errors mean something broke and
+needs attention. Warnings are worth a glance but often explainable (a
+symbol not yet backfilled, or normal market-data timing differences).
+Separately, spot-check 2-3 symbols' RSI/regime values against TradingView
+directly, the same way we verified BABA and WYNN earlier -- that's still
+the most reliable way to confirm the actual numbers make sense, since
+this script validates internal consistency, not truth against an
+external source.
+
+## v55 — fixed a real load increase introduced by v53's cache wiring
+
+Traced your queue-depth warnings to a real cause: v53's write-through in
+`_prepare_snapshot()` (scanner_builder.py's query engine) fired
+unconditionally on **every symbol in every scanner query**, doing a full
+SELECT+INSERT merge every time -- even when that symbol's cache record
+for today was already complete and had nothing new to contribute. Your
+log showed a 38-candidate scanner pass; that's 38 redundant writes per
+pass, and Signal Notifier likely runs multiple passes a day across
+several sources, compounding it further.
+
+**Fixed**: added `is_snapshot_complete_today()`, a single cheap indexed
+lookup, and gated both write-through call sites (scanner_builder.py and
+regime_scanner.py) behind it -- if today's record is already complete,
+skip the write entirely rather than doing the more expensive merge-write
+for data that hasn't changed.
+
+**Verified directly with the exact scenario your log implies**: simulated
+a 5-symbol scanner pass run 3 times in a row (repeated passes over the
+same watchlist, like Signal Notifier does across multiple sources) --
+confirmed exactly 5 writes total across all 3 passes, not 15. Only the
+first pass of the day does real work; every subsequent pass over the same
+symbols does zero additional database writes for this cache.
+
+This should directly reduce the background write load contributing to
+the queue-depth warnings, on top of everything already in place from
+v32's jitter fix for the earlier thundering-herd issue.
+
+## v56 — fixed scripts/regression_check.py's ModuleNotFoundError
+
+Simple bug in the script itself, not your app: `python scripts/regression_check.py`
+only puts the script's own directory (`scripts/`) on Python's import path,
+not the project root above it -- so `import oiapp...` couldn't find the
+package. My earlier testing used `sys.path.insert(0, ".")` directly in a
+throwaway test harness, which masked this since it always ran from the
+project root already on the path; the actual delivered script was
+missing the equivalent fix.
+
+Added explicit path resolution at the top of the script (finds the
+project root as the parent of its own directory, adds it to sys.path)
+so it works correctly regardless of how or from where it's invoked.
+
+Verified with a real subprocess call, matching your exact command:
+`python3 scripts/regression_check.py AAPL MSFT` -- now runs correctly with
+no import errors.
+
+Try it again: `python scripts/regression_check.py AAPL MSFT GOOGL TSLA NVDA`
+
+## v57 — likely root cause of the slow strongcandle("1w") scan: SQLite write-lock contention under concurrent scanning
+
+**First, an honest clarification on scope**: the technical_snapshot cache
+does NOT speed up Scanner Builder's own query execution directly --
+that's a real limitation I should have been clearer about. Primitives
+like `strongcandle()` need the full historical series (for pattern
+matching across many bars), not just today's scalar value, so
+`_prepare_snapshot()` still computes everything fresh for every scan,
+exactly as before this session's caching work. The cache helps other
+consumers (regime_scanner, trade_opportunity_scanner) that only need
+today's value -- it was never going to make a 531-symbol Scanner Builder
+scan itself faster.
+
+**What I found investigating the actual slowness**: the scan runs through
+`ThreadPoolExecutor(max_workers=8)`, and v53's write-through runs *inside*
+each of those 8 threads. SQLite allows only one writer at a time even in
+WAL mode -- with up to 8 threads simultaneously trying to write to
+`technical_snapshot`, and a 5-second `busy_timeout` per attempt, lock
+contention across 531 symbols could very plausibly account for minutes of
+accumulated waiting, especially on the first scan of the day when every
+symbol still needs writing.
+
+**Fixed**: added a single background writer thread with a queue. Scanning
+threads now enqueue their write (a fast, in-memory operation) and move on
+immediately, never touching the database themselves. The one background
+thread drains the queue and performs the actual writes sequentially --
+eliminating the multi-writer contention entirely, since there's now only
+ever one writer.
+
+**Tested under the actual concurrent-scan scenario**: simulated an
+8-worker scan across 40 symbols, all needing a fresh write-through (the
+worst case -- first scan of the day). Completed in 1.48 seconds, and
+confirmed all 40 writes correctly landed in the cache after the queue
+drained (using the queue's own join() to wait for completion before
+checking).
+
+This should directly address the slow `strongcandle("1w")` scan if
+write-lock contention was the cause. If a full watchlist scan is still
+slow after this, that would confirm it's genuinely the raw per-symbol
+computation cost across 531 symbols (which the cache was never designed
+to reduce for Scanner Builder specifically) rather than a lock-contention
+issue -- worth reporting back either way so we know which explanation
+holds.
+
+## v58 — fixed rsidiff90("1w") showing no value: 3-year backfill structurally can't support weekly
+
+Confirmed the exact math before touching anything: a 36-month daily
+backfill resamples to only ~150 weekly bars -- 390 short of the 540-bar
+threshold rsidiff90 needs to trust its result. This isn't a threshold
+bug (that logic is correct and was validated carefully earlier); it's
+that weekly EMA(RSI,90) genuinely needs ~10.4 *calendar* years to
+converge, since the underlying math cares about bar count, not how much
+time each bar spans. Daily rsidiff90 only needs ~2.15 years, so it was
+working fine off the same 3-year backfill -- weekly never had a chance.
+
+**Fixed**: raised the default backfill window from 36 to 132 months (11
+years) everywhere it's set -- `_backfill_price_history_to_cache()`,
+`bulk_backfill_symbols()`, the bulk-compute API endpoint's default, and
+the Watchlist Manager UI's prompt default (with an explanation of why, so
+it's not just an unexplained number change).
+
+**Verified directly**: simulated an 11-year backfill, confirmed 572
+weekly bars after resampling (comfortably above 540), and confirmed
+`rsidiff90("1w")` now returns a real computed value instead of `None`.
+
+**Important operational note**: this does NOT retroactively fix symbols
+already backfilled under the old 3-year default -- their existing
+`price_cache` data won't extend itself. The automatic watcher won't pick
+them back up either, since 3 years already satisfies the *daily*
+sufficiency check it uses. To get weekly rsidiff90 working for symbols
+you've already backfilled, you'll need to explicitly re-run "Backfill
+History" for your watchlist(s) -- it'll now fetch the full 11 years by
+default. New symbols backfilled from here on will automatically get the
+full window.
+
+## v59 — new: intraday (1h/2h/4h) backfill for swing-trade scans
+
+Built for exactly what you described: 1h as the single base resolution,
+with 2h and 4h derived by resampling on read -- one backfill covers all
+three timeframes, same pattern as the existing daily->weekly resampling.
+
+**Architecture decision, per your question**: new dedicated table
+`intraday_price_cache`, separate from `price_cache`. Reasoning: row
+density is the real driver -- 2 years of hourly data is ~3,300 rows/symbol
+vs. a few hundred for daily, which across a full watchlist is 1M+ rows.
+Keeping it separate means daily-only consumers (the majority --
+regime_scanner, most scoring) never pay any cost for it, and intraday
+gets its own retention policy (auto-pruned to ~729 days, yfinance's own
+hourly-data limit) without affecting daily's unbounded growth at all.
+
+**What's included**:
+- `_backfill_intraday_history_to_cache()` -- fetches hourly OHLCV,
+  persists every bar, auto-prunes anything past the retention window
+- `_history_from_local_intraday()` -- reads 1h directly, resamples to
+  2h/4h on read from that same cached base data
+- Wired into `_history()`'s routing for 1h/2h/4h, using the same
+  non-blocking enqueue pattern as daily (a scan never blocks waiting on
+  a live intraday fetch)
+- Automatic background watcher (3 symbols/2.5min, lighter pace than
+  daily's 5/2min since each intraday fetch is heavier), registered in
+  Scheduler Hub as "Scanner intraday (1h/2h/4h) history backfill"
+- Manual bulk trigger: `POST /scanner-builder/api/bulk-backfill-intraday`
+  (watchlist ID or symbol list, `days` parameter), same background-thread
+  + status-polling pattern as the daily bulk backfill
+- New "⏱ Backfill Intraday (1h/2h/4h)" button on each watchlist row in
+  Watchlist Manager, next to the existing Backfill History button
+
+**Tested the complete pipeline**: backfill → direct 1h read → resampled
+2h/4h reads (confirmed proportionally correct bar counts) → full
+`_history()` routing for all three timeframes → `rsidiff90("4h")`
+convergence (real value returned, not None) → OHLC resampling integrity
+(a 2h bar's High correctly equals the max of its constituent 1h Highs,
+not just an approximation) → non-blocking enqueue behavior for
+uncached symbols → the actual API endpoint end-to-end with live status
+polling.
+
+Also caught and fixed the exact same JS-insertion mistake I've made twice
+before (a neighboring function's declaration line getting dropped) --
+except this time caught it in the same breath as writing the code, via
+immediate `node --check`, before it ever reached you.
+
+**Worth knowing**: in "auto" mode (the default), if a symbol has no
+cached intraday data at all yet, `_history()` falls through to a live
+fetch as a last resort rather than returning nothing -- this mirrors the
+*existing* daily behavior exactly (not something new here), just flagging
+it as a real characteristic of the current architecture worth being aware
+of, not a regression from this change.
+
+## v60 — answering "does it tell me or auto-pull?": it already auto-pulled silently, now it tells you too
+
+**Direct answer to the question**: it was already auto-pulling behind the
+scenes -- `_history()` has enqueued a non-blocking backfill for any
+under-cached symbol since v42 (daily) and v59 (intraday). What was
+missing was visibility: those symbols just quietly dropped out of your
+results with no indication whether that was because the condition
+genuinely wasn't met, or because there was no data to evaluate at all.
+
+**Added the missing visibility**: every scan now tracks which symbols got
+newly queued for backfill during that specific run (thread-safe, since
+the scan runs across 8 concurrent workers), split by daily/weekly vs.
+intraday. The API response includes a `backfill_queued` field, and the
+Scanner Builder results summary now shows a visible notice when it
+happens -- e.g. "3 symbols missing intraday history for this query --
+automatically queued for backfill in the background. Re-run in a few
+minutes once the backfill has caught up."
+
+**Tested end-to-end**: ran a scan against a mix of a fully-backfilled
+symbol and two symbols with no data at all -- confirmed the response
+correctly flagged only the two thin symbols as queued, and correctly did
+NOT flag the well-backfilled one (no false alarms).
+
+So to directly restate the answer: no, you don't need to manually notice
+a symbol is missing and go trigger a backfill yourself -- that already
+happens automatically the first time any query touches it. What you get
+now is confirmation that it happened, and which symbols to expect
+improved results for on your next run.
+
+## v61 — fixed AI Trade Alerts panel height, added Spot price to position health table
+
+**1. "AI Trade Alerts" panel showing no height/no visible alerts.**
+Confirmed the actual cause: `#ai-trade-alerts-wrap` had zero CSS rules
+anywhere in the stylesheet, while every sibling alert panel
+(`#trade-health-alerts-wrap`, `#position-alert-open-trades-wrap`, etc.)
+has explicit width/overflow/table-min-width rules across four separate
+selector groups. This panel was evidently added after those rules were
+written and never got included in the same selector lists -- an
+oversight, not a data or JS bug (the JS itself correctly builds and
+injects the full table; it just wasn't being sized/laid-out correctly).
+Added `#ai-trade-alerts-wrap` to all four groups, matching its siblings
+exactly (`width:100%`, `overflow:auto`, `table min-width:1500px`).
+
+**2. Spot price missing from the Open position health / alert table.**
+Found the correct table (there are two similarly-named open-positions
+tables; this is the one matching your screenshot's exact columns --
+Symbol/Type/Strikes/DTE/Health Score/Action/P&L/PNR/Reason/Signals/Tools).
+The backend (`/journal/health_alerts_all`) already returns `spot` per
+position -- confirmed directly, since the *other* open-positions table
+already renders it successfully from the same endpoint. Added a "Spot"
+column here too, positioned right after DTE, reusing the same `a.spot`
+field. Bumped the table's min-width slightly (1600px -> 1700px) so the
+new column doesn't crowd the existing ones.
+
+**Tested both directly**: CSS brace-balance check confirmed the stylesheet
+structure is intact after all four insertions. For the Spot column,
+simulated a render with two realistic rows -- one with a real spot price,
+one with `spot: null` -- confirmed the header renders, the real value
+displays correctly formatted ($158.42), and the null case correctly shows
+the "—" placeholder instead of crashing or printing "null"/"undefined".
+
+## v62 — all three of your expectations, none of which were true before: gap-aware backfill, skip-fresh bulk runs, daily auto-refresh
+
+Confirmed none of these were actually happening yet, then built all three.
+
+**1. Gap-aware backfill (both daily and intraday).** Previously, every
+backfill call -- whether from the automatic watcher or the manual button
+-- always re-fetched the *entire* window (11 years daily / ~2 years
+intraday), every single time, even for a symbol backfilled five minutes
+earlier. Now: if a symbol already has cached data, only the days/hours
+since its last cached point get fetched (`start=` instead of `period=`).
+A symbol backfilled yesterday and touched again today fetches ~1 day, not
+11 years.
+
+Found and fixed a real edge case while testing this: the new
+freshness-check helper crashed on a completely empty database (querying
+a table before it existed). Fixed by ensuring the table exists first.
+
+Verified directly: full backfill on first call, a same-day recheck
+correctly uses the incremental path, and a symbol with its cached date
+deliberately rewound 7 days correctly fetched *exactly* the 5 missing
+days (start=the day after last cached, final row count showed no data
+loss or duplication). Same verified for intraday.
+
+**2. Manual bulk runs now skip symbols that don't need anything --
+entirely, not just cheaply.** Even with gap-aware fetching, the bulk
+button's per-symbol "stay polite to yfinance" delay still applied to
+every symbol regardless of whether it needed fetching -- meaning
+re-running the button on an already-current 500-symbol watchlist would
+still take many minutes from cumulative delays alone, doing zero real
+work. Fixed: symbols with data newer than 4 days (daily) / 24 hours
+(intraday) are skipped completely -- no fetch, no delay. Verified with 4
+symbols (3 fresh, 1 genuinely stale, 2s delay per symbol): total wall
+time was ~2.2s, not the ~8s it would've taken before, with the status
+response now including `skipped_fresh` so you can see this happening.
+
+**3. New: daily "keep fresh" jobs, separate from the thin-symbol backfill
+watchers.** The existing watchers only ever process symbols explicitly
+queued because they were too thin when a scan touched them -- once a
+symbol had "enough" data, nothing ever checked it again, so price_cache
+could quietly go stale over time with no mechanism to catch it. Added two
+new scheduled jobs (registered in Scheduler Hub as "Scanner daily price
+cache refresh" and "Scanner intraday price cache refresh") that instead
+cycle through *every* already-cached symbol on a rotating, oldest-
+refreshed-first basis -- 25 daily symbols every 5 minutes, 15 intraday
+symbols every 7 minutes, which cycles a full watchlist through a
+freshness check roughly once per day. Cheap to run broadly now that the
+backfill itself is gap-aware -- an already-current symbol costs one small
+incremental check, not a full re-fetch.
+
+This closes the loop you described: backfill once (full), then the
+system keeps it current automatically going forward (daily refresh
+watcher), and re-running the manual buttons only ever touches what's
+actually missing or stale.
+
+## v63 — CRITICAL FIX: technical_snapshot.py was writing to the wrong database file entirely
+
+Your query caught a real, significant bug, not a "table not created yet"
+situation. Confirmed precisely: `technical_snapshot.py`'s `DB_PATH`
+resolved one directory level too deep -- `oiapp/options_data.db` -- while
+every other file in the app (`db.py`, `scanner_builder.py`) correctly
+resolves to the project root's `options_data.db`. This has been true
+since v51, when this module was first created.
+
+**Impact, stated plainly**: all `technical_snapshot` reads/writes since
+v51 -- including the v53 wiring where regime_scanner and scanner_builder
+both write into this table -- have been internally self-consistent (every
+call goes through `technical_snapshot.py`'s own connection function,
+using the same wrong path every time, so nothing was silently corrupted
+or cross-contaminated), but completely invisible to the main database
+file everything else uses. That's exactly why your query saw "no such
+table" -- it was querying the correct, main database; the table genuinely
+existed, just in a separate, orphaned file next to it.
+
+**Why my own testing didn't catch this**: every test I ran verified
+results by calling back into `technical_snapshot.py`'s own `get_*`
+functions, which are self-consistently wrong in the same way the writes
+were -- so results always "matched" internally. I never independently
+connected to the main database path the way an external SQL tool would to
+cross-check. That's a real gap in how I verified this, not just bad luck.
+
+**Fixed**: corrected the path resolution to match `scanner_builder.py`
+exactly (same folder depth, same relative path pattern). Verified this
+specific way, deliberately not through `technical_snapshot.py`'s own
+functions: wrote a record via the module's normal write path, then
+queried it back through a completely independent `sqlite3.connect()` to
+the main database path -- confirmed the table and data are now visible
+there, not in a separate file.
+
+**What this means practically**: any data that accumulated in the old,
+wrong `oiapp/options_data.db` file on your system is effectively
+orphaned -- but since the backfill/compute functions are now fast and
+cheap to re-run (v62's gap-aware design), just let the background
+watchers or the "Compute Indicators" button repopulate the correct table
+going forward; there's no meaningful data to migrate. You can delete the
+stray `oiapp/options_data.db` file if it exists on disk, though leaving
+it there causes no harm since nothing will reference it anymore.
+
+Try your query again after deploying this: `select * from
+technical_snapshot limit 10` should now work once the watchers or a
+manual compute run have populated at least a few rows.
+
+## v64 — new: full-series snapshot cache, the piece that actually delivers "speed up scanners"
+
+This is the real fix for the original ask -- `technical_snapshot` only
+ever stored today's single scalar value per indicator, which structurally
+couldn't help Scanner Builder queries (they need the full historical
+series for `Lookback()`, pattern matching, and anything with a shift).
+This is different: it caches the *entire computed series* -- every RSI,
+EMA, MACD value across the whole lookback window, not just the latest
+one -- so a second scan against the same symbol on the same day skips
+the full recomputation entirely.
+
+**New table** `scanner_snapshot_cache` (symbol, timeframe, date, payload,
+computed_at) -- one row per symbol+timeframe+day, storing the complete
+serialized series. Naturally self-invalidating: keyed by the price data's
+own last-bar date, so a new trading day automatically produces a fresh
+cache entry without needing an explicit expiry check. Added pruning too --
+only today's entry is ever useful, so older rows for the same
+symbol+timeframe get deleted on write rather than accumulating forever.
+
+**Wired directly into `_symbol_ctx`**, the function every single scanner
+query and trade-scoring call goes through -- via a new
+`_prepare_snapshot_cached()` wrapper that checks the cache first, and
+only falls through to the real (expensive) computation on a genuine
+cache miss.
+
+**Given this feeds actual trading decisions, tested this unusually
+carefully, not just for "does it work":**
+
+1. **Round-trip serialization correctness** -- verified all 19 computed
+   series (RSI, every EMA, MACD, relative strength, etc.) match their
+   original values exactly after a full serialize/deserialize cycle,
+   including correct NaN handling, not just "close enough."
+2. **Cold vs. warm identical results** -- ran a real scan twice, once
+   forcing a fresh computation and once hitting the new cache. The
+   computed RSI14 values for every symbol were **exactly identical**
+   between the two runs -- confirming the cache doesn't just return
+   *a* value, it returns the *correct* one.
+3. **Actual measured speedup**: 1506ms cold vs. 87ms warm across a
+   5-symbol scan -- a **17.3x** speedup, not an estimate.
+4. **New-day invalidation** -- confirmed a new trading day's data
+   produces a genuinely different cached snapshot (different RSI14, as
+   it should be) rather than silently reusing yesterday's stale result,
+   and confirmed the pruning correctly removes the old entry rather than
+   accumulating both.
+
+This is the piece that actually delivers on "this could speed up
+scanners dramatically" -- repeated scans against the same watchlist
+within a day, which is your actual real-world usage pattern, should now
+feel meaningfully faster after the first pass of the day.
+
+## v65 — your concern was correct and measured real: fixed the cache-miss overhead, mostly
+
+Directly measured your exact concern rather than dismiss it: on a
+guaranteed cache miss (a symbol/timeframe combination that's never
+repeated), v64's design added **71.8ms per call -- a 748% slowdown**
+versus not having the cache at all. For varied queries across many
+symbols and timeframes with low repeat rate, that's real, and would have
+made things worse, not better.
+
+**Fixed the dominant cost**: the synchronous serialize + DB write + prune
+on every cache miss was moved to a background thread (same proven pattern
+as `technical_snapshot`'s writer queue) -- the scanning thread now only
+does a cheap cache-check and an in-memory enqueue, not the full write.
+This alone cut the overhead from 748% to 445%.
+
+**Found and fixed a second real cost**: `CREATE TABLE IF NOT EXISTS` was
+re-executing on every single call, not just the first. Added a
+module-level "already ensured" flag (matching the `_SCHEMA_INITIALIZED`
+pattern already used elsewhere in this file) so it only runs once per
+process. Brought the overhead down further to 326%.
+
+**Honest current state, in absolute terms**: baseline compute is ~4.35ms;
+cache-miss path is ~18.5ms -- **~14ms of remaining overhead per miss**,
+down from ~72ms. Most of what's left is the fixed cost of opening a new
+SQLite connection for the cache-check itself (`_conn()`'s connection-open
++ PRAGMA setup, a pattern used throughout this codebase, not something I
+changed here given the risk of a broader change). For a 500-symbol scan
+where every single symbol is a genuine first-touch miss, that's roughly
+7 seconds of added overhead -- real, but a fraction of the original
+~36 seconds this would have cost as first built.
+
+**Where this likely nets out for your actual usage**: the "1d" timeframe
+gets computed for every symbol on every single scan regardless of what
+timeframe your query specifies (`_symbol_ctx` always includes it) -- so
+for that timeframe specifically, cache hits across repeated scans in a
+day are close to guaranteed, making the cache a clear net win there. For
+less-common timeframes you might query once and never repeat, the ~14ms
+per symbol is the real cost you're paying with no guaranteed payoff.
+
+Verified the hit path is still fully correct after these changes --
+re-ran the cache-hit test and confirmed the cached result still matches a
+fresh computation exactly.
+
+Didn't push further optimization (e.g. connection reuse or making the
+cache timeframe-selective) without checking in first, since each of those
+is a bigger, riskier change to core connection handling or cache
+semantics -- let me know if the remaining ~14ms/symbol is still a concern
+for your actual scan sizes and I'll keep going.
+
+## v66 — real POP math (replacing a formula with no IV or DTE input), scored at your actual exit horizon
+
+**Found something significant while answering your question**: every POP
+number shown throughout this entire session -- WDC's 66%, every trade
+alert, every scoring decision -- came from `min(90, max(50, 65 +
+otm_pct*3.4))`. That's not a probability model. It has no implied
+volatility input and no time-to-expiry input at all. A 5%-OTM put showed
+the same POP whether IV was 15% or 80%, and whether it was 10 DTE or 60
+DTE. That's a real, foundational gap, not just an approximation.
+
+**Fixed with real Black-Scholes math**, building on the existing
+(already-used, already-correct) d1/d2 implementation in `backtest.py`:
+proper N(d2) risk-neutral probability of expiring OTM, with actual spot,
+strike, IV, and time-to-expiry as real inputs.
+
+**Answering your specific question -- what timeframe**: the probability
+is now computed at **DTE-7 by default**, not full expiry. This is the
+right choice given your own stated exit discipline (the exit plan text
+already says "close at <7 DTE") -- since you're not actually exposed to
+the final week's gamma risk, the probability that reflects your real risk
+is "will this still be OTM by the time I plan to be out," which is
+mathematically a higher (easier to clear) bar than "OTM at full expiry."
+
+**Validated against known options-math behavior, not just "does it
+run"**: ATM ≈ 50% POP (correct). Deep OTM ≈ 97% (correctly clamped).
+Same strike, POP at DTE-7 (80%) is genuinely higher than POP at full
+expiry (77%) -- confirming your exact insight mathematically, not just
+conceptually. IV now meaningfully moves POP (92% at 15% IV vs. 61% at
+60% IV for the identical strike -- the old formula couldn't distinguish
+these at all). Shorter DTE correctly produces higher POP for the same
+strike. Put/call symmetry holds for equidistant strikes.
+
+**Second change, the "momentum is a bonus, not required" reweighting**:
+added a bounded bonus (up to +10, scaling from POP=75% to ~92%+) for
+credit trades (PS/CS/IC) with genuinely high POP -- reflecting that a
+well-OTM trade wins by the underlying *not* moving much, a fundamentally
+different risk profile than one relying on an actual directional move.
+Deliberately modest and bounded: verified this doesn't override multiple
+independent, severe warning signs stacked together (regime + RSI + weekly
+confluence all against the trade) -- POP is an estimate, not a guarantee,
+and shouldn't blanket-override real technical warnings. It does
+meaningfully help a trade that's fundamentally sound but just missing
+momentum confirmation, which is the actual scenario you described.
+
+Every existing trade alert, POP/RR balance check, and grade going forward
+now reflects real options math instead of a linear approximation with no
+volatility or time awareness.
+
+## v67 — added explicit "what could derail this trade" risk factors, using data already available
+
+Distinct from the existing "cons" list (which explains why the *score* is
+what it is) -- this new `risk_factors` field specifically answers "what
+would actually have to happen for this trade to lose," built from data
+already computed elsewhere in the scan rather than duplicating the score
+reasoning:
+
+1. **Earnings/event risk** -- flags if an earnings date falls within the
+   trade's DTE window. A gap can invalidate the technical setup and the
+   Black-Scholes probability estimate at the same time, which nothing
+   else in this scorer accounts for.
+2. **Proximity to a real S/R wall** -- a short strike sitting within 2%
+   of a known put/call wall is a meaningfully different risk than the
+   same delta with no nearby structure.
+3. **PNR distance** -- how close spot actually is to this trade's point
+   of no return, not just whether one exists.
+4. **The gamma-risk window itself, made explicit** -- since POP (v66) is
+   now computed assuming you close by DTE-7, this makes that assumption
+   visible on the trade itself rather than only implied by the exit-plan
+   text elsewhere.
+5. **Low IV rank** -- flags when there's less premium compensation for
+   the risk being taken, independent of how good the strike selection
+   looks otherwise.
+
+Tested three scenarios directly: a deliberately risky setup (earnings
+soon, strike near a wall, near PNR, low IV) correctly flagged all 5
+factors; a clean setup with nothing nearby correctly showed only the
+standard gamma-window reminder; and a trade already inside the DTE≤7
+window correctly omitted that reminder, since it's no longer forward-
+looking information at that point.
+
+## v68 — validated Journal/Add Trade scoring against the scanner: they were completely separate systems
+
+**Finding, stated plainly**: Journal and Add Trade scoring (`_compute_live_pnl`
+/ `_trade_probability_score` in `journal_routes.py`) do NOT use any of the
+concepts built in v66/v67. Confirmed directly -- `_pop_credit` doesn't
+appear anywhere in the journal's code. What it calls "Trade Health Score"
+is not a probability model at all: no Black-Scholes, no N(d2), no
+volatility-and-time-aware calculation anywhere. It's a hand-tuned 0-100
+point-adjustment system (`+8 if profit>=60%`, `-3 if DTE>21`, `+6 if IV
+rank>60`, etc.) -- a health/quality heuristic, not an actual POP number.
+
+**On your specific DTE-decay question**: the good news is DTE itself was
+already being correctly recomputed live (`date.today()` each time, not
+frozen at entry). The gap was that this correctly-decaying DTE only fed a
+crude bucket adjustment (`DTE>21: -3, DTE>14: +3, DTE>7: +5, DTE>2: +2,
+else: -10`) -- not an actual probability, so there was no real number
+that showed *how much* POP changes as time passes, just a small score
+nudge in the right general direction.
+
+**Fixed by adding a real `live_pop` field**, computed with the exact same
+validated Black-Scholes N(d2) formula as the scanner's `_pop_credit`
+(v66), using the journal's already-correctly-live spot and DTE. Added
+additively -- the existing "Trade Health Score" and its action
+recommendations (HOLD/EXIT/ADD) are untouched, this is a new, clearly-
+separate, real probability number alongside it, not a replacement of a
+system already driving live position decisions.
+
+**Tested precisely against your question**: a bull put spread, short
+strike $95, spot steady at $100, staying OTM as time passes -- live POP
+correctly rises 80% -> 82% -> 86% -> 92% -> 97% as DTE decays from 30 to
+10, confirmed monotonically non-decreasing, then correctly clamps near
+expiry rather than continuing to climb unrealistically. This is now a
+real, live-recomputed number reflecting genuinely reduced time-to-move-
+against-you risk as the position ages -- not just implied by a health
+score bump.
+
+For IC positions, computes both the put-side and call-side POP separately
+and averages them, matching how the scanner's own IC scoring works.
