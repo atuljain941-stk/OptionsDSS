@@ -43,7 +43,8 @@ def _conn():
     c = sqlite3.connect(DB_PATH, timeout=20)
     c.row_factory = sqlite3.Row
     try:
-        c.execute("PRAGMA journal_mode=WAL")
+        # WAL is initialized once in oiapp.config; this connection only
+        # configures its bounded wait and foreign-key behaviour.
         c.execute("PRAGMA busy_timeout=30000")
         c.execute("PRAGMA foreign_keys=ON")
     except Exception:

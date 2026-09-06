@@ -55,7 +55,8 @@ SOURCE_KINDS = ("trade_scanner", "dashboard_tile", "scanner_query", "swing_posit
 def _conn():
     c = sqlite3.connect(DB_PATH, timeout=20)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
+    # WAL is initialized once in oiapp.config; reissuing journal_mode here
+    # would contend with active writers every watcher tick.
     c.execute("PRAGMA busy_timeout=30000")
     return c
 

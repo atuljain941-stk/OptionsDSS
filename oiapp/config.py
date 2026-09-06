@@ -29,6 +29,8 @@ Resolution order:
 from __future__ import annotations
 
 import os
+import sqlite3
+import threading
 from pathlib import Path
 
 # Change this if you ever want to relocate the DB again -- every module
@@ -79,3 +81,107 @@ def _resolve_db_path() -> str:
 
 
 DB_PATH = _resolve_db_path()
+
+
+# SQLite permits many readers with WAL, but only one writer.  The application
+# has dozens of independently scheduled threads, so relying on SQLite's
+# lock-race alone led to periodic "database is locked" errors.  This factory
+# serializes write transactions *inside this process* while still allowing
+# read-only SELECTs to run concurrently.  It is installed before the app's
+# modules open their connections, so legacy sqlite3.connect(...) call sites
+# benefit without each needing a bespoke retry loop.
+_SQLITE_CONNECT = sqlite3.connect
+_SQLITE_WRITER_LOCK = threading.RLock()
+_WRITE_PREFIXES = {"INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER",
+                   "DROP", "VACUUM", "REINDEX", "ATTACH", "DETACH"}
+
+
+def _is_write_statement(sql: str) -> bool:
+    statement = str(sql or "").lstrip()
+    if not statement:
+        return False
+    token = statement.split(None, 1)[0].upper()
+    if token in _WRITE_PREFIXES:
+        return True
+    if token == "PRAGMA":
+        return "JOURNAL_MODE" in statement.upper()
+    # CTE writes begin with WITH rather than INSERT/UPDATE.
+    if token == "WITH":
+        upper = statement.upper()
+        return any(f" {word} " in upper for word in (" INSERT ", " UPDATE ", " DELETE ", " REPLACE "))
+    return False
+
+
+class _SerializedSQLiteConnection(sqlite3.Connection):
+    """Connection subclass that holds one app-wide lock only for writers."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._oiapp_writer_lock_held = False
+
+    def _lock_for_write(self, sql):
+        if _is_write_statement(sql) and not self._oiapp_writer_lock_held:
+            _SQLITE_WRITER_LOCK.acquire()
+            self._oiapp_writer_lock_held = True
+
+    def _unlock_writer(self):
+        if self._oiapp_writer_lock_held:
+            self._oiapp_writer_lock_held = False
+            _SQLITE_WRITER_LOCK.release()
+
+    def execute(self, sql, parameters=()):
+        self._lock_for_write(sql)
+        return super().execute(sql, parameters)
+
+    def executemany(self, sql, parameters):
+        self._lock_for_write(sql)
+        return super().executemany(sql, parameters)
+
+    def executescript(self, sql_script):
+        self._lock_for_write(sql_script)
+        return super().executescript(sql_script)
+
+    def commit(self):
+        try:
+            return super().commit()
+        finally:
+            self._unlock_writer()
+
+    def rollback(self):
+        try:
+            return super().rollback()
+        finally:
+            self._unlock_writer()
+
+    def close(self):
+        try:
+            return super().close()
+        finally:
+            self._unlock_writer()
+
+
+def _serialized_connect(*args, **kwargs):
+    # timeout sets SQLite's native busy handler too, covering a short-lived
+    # external reader/writer such as a database inspection tool.
+    kwargs.setdefault("timeout", 30)
+    kwargs.setdefault("factory", _SerializedSQLiteConnection)
+    return _SQLITE_CONNECT(*args, **kwargs)
+
+
+def _configure_sqlite_once() -> None:
+    """Set persistent WAL mode once—not on every request/worker connection."""
+    try:
+        con = _SQLITE_CONNECT(DB_PATH, timeout=30)
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+            con.execute("PRAGMA busy_timeout=30000")
+            con.commit()
+        finally:
+            con.close()
+    except Exception as exc:
+        print(f"[oiapp.config] WARNING: could not initialize SQLite WAL mode: {exc}")
+
+
+_configure_sqlite_once()
+sqlite3.connect = _serialized_connect
