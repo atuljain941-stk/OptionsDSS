@@ -1240,7 +1240,11 @@ def _fetch_data_for_watchlist_core(wl_id, source="manual", remote_addr="?", user
                 from concurrent.futures import ThreadPoolExecutor
                 from ..services.bounded_wait import bounded_as_completed
 
-                TASTYTRADE_CONCURRENCY = 3
+                # DXLink Summary snapshots are connection-sensitive. Parallel
+                # stream sessions on the same authenticated Tastytrade session
+                # caused complete per-symbol OI drops (0/N summaries received).
+                # Keep this serial; one symbol still batches all its expiries.
+                TASTYTRADE_CONCURRENCY = 1
 
                 def _fetch_oi_one_tastytrade(sym):
                     try:
