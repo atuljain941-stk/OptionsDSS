@@ -31,6 +31,15 @@ def _conn():
 
 
 def _ensure_tables():
+    # Create the three upstream caches on demand too, so opening this page
+    # before any manual fetch gives a clear "missing data" result rather than
+    # a SQLite "no such table" error.
+    from ..services.intraday_price_cache import ensure_tables as _ensure_intraday_cache
+    from .watchlist_manager import _ensure_tables as _ensure_watchlists
+    from .spy_strategies import _ensure_gex_snapshot_table
+    _ensure_intraday_cache()
+    _ensure_watchlists()
+    _ensure_gex_snapshot_table()
     con = _conn()
     try:
         con.executescript("""
