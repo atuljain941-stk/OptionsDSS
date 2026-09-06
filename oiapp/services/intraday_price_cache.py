@@ -16,7 +16,7 @@ def ensure_tables():
     con = _conn()
     try:
         con.executescript("""
-        CREATE TABLE IF NOT EXISTS intraday_price_cache (
+        CREATE TABLE IF NOT EXISTS intraday_minute_price_cache (
             symbol TEXT NOT NULL,
             ts_et TEXT NOT NULL,
             timeframe TEXT NOT NULL DEFAULT '1m',
@@ -26,8 +26,8 @@ def ensure_tables():
             fetched_at TEXT NOT NULL,
             PRIMARY KEY(symbol, timeframe, ts_et)
         );
-        CREATE INDEX IF NOT EXISTS idx_intraday_price_cache_symbol_day
-          ON intraday_price_cache(symbol, ts_et);
+        CREATE INDEX IF NOT EXISTS idx_intraday_minute_price_cache_symbol_day
+          ON intraday_minute_price_cache(symbol, ts_et);
         CREATE TABLE IF NOT EXISTS premarket_levels (
             symbol TEXT NOT NULL,
             trade_date TEXT NOT NULL,
@@ -82,7 +82,7 @@ def fetch_symbol_intraday(symbol: str, trade_date=None) -> dict:
     con = _conn()
     try:
         con.executemany("""
-            INSERT INTO intraday_price_cache
+            INSERT INTO intraday_minute_price_cache
             (symbol,ts_et,timeframe,session,open,high,low,close,volume,source,fetched_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(symbol,timeframe,ts_et) DO UPDATE SET
