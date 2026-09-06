@@ -59,6 +59,47 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("tastytrade").setLevel(logging.WARNING)
 
+# Keep the expensive OI/Greeks collection aligned with the way the app is
+# traded: all daily expirations through 50 DTE, or at most eight dates for a
+# weekly-only chain. Both limits are configurable for a deployment.
+DEFAULT_OPTION_MAX_DTE = int(os.environ.get("OIAPP_TASTYTRADE_MAX_DTE", "50"))
+DEFAULT_WEEKLY_EXPIRY_LIMIT = int(os.environ.get("OIAPP_TASTYTRADE_WEEKLY_EXPIRY_LIMIT", "8"))
+
+
+def _expiry_date(value):
+    """Return a date for tastytrade's date or ISO-like expiry key."""
+    import datetime as _dt
+    return value if isinstance(value, _dt.date) and not isinstance(value, _dt.datetime) else _dt.date.fromisoformat(str(value)[:10])
+
+
+def _select_option_expiries(keys, max_dte=DEFAULT_OPTION_MAX_DTE,
+                            weekly_expiry_limit=DEFAULT_WEEKLY_EXPIRY_LIMIT):
+    """Select a bounded near-term option-expiry set.
+
+    A chain with adjacent expirations two or fewer days apart is treated as a
+    daily-expiry product (SPY, QQQ, etc.), so every available expiry through
+    max_dte is kept. Otherwise it is a weekly-only chain and is limited to the
+    first weekly_expiry_limit dates. The max_dte ceiling remains absolute.
+    """
+    import datetime as _dt
+    today = _dt.date.today()
+    max_dte = max(0, int(max_dte))
+    weekly_expiry_limit = max(1, int(weekly_expiry_limit))
+    dated = sorted((_expiry_date(key), key) for key in keys)
+    eligible = [(expiry, key) for expiry, key in dated
+                if 0 <= (expiry - today).days <= max_dte]
+    if not eligible:
+        return []
+
+    is_daily_product = any(
+        (eligible[index + 1][0] - eligible[index][0]).days <= 2
+        for index in range(len(eligible) - 1)
+    )
+    if not is_daily_product:
+        eligible = eligible[:weekly_expiry_limit]
+    return [key for _, key in eligible]
+
+
 
 def _runtime_credentials() -> tuple:
     """Same pattern as oiapp.services.telegram_alerts._runtime_config():
@@ -772,7 +813,7 @@ class TastytradeFeed:
     # expiry and captures the full greek set (delta/gamma/theta/vega/IV)
     # plus per-strike volume via a short Trade-event listen alongside
     # the Greeks listen, in the same streaming session.
-    def discover_expiries(self, underlying_symbol: str, months_ahead: int = 2) -> dict:
+    def discover_expiries(self, underlying_symbol: str, max_dte: int = DEFAULT_OPTION_MAX_DTE, weekly_expiry_limit: int = DEFAULT_WEEKLY_EXPIRY_LIMIT) -> dict:
         """Metadata-only expiry discovery -- calls tastytrade's REST
         instrument-chain lookup (the same one get_live_chain_snapshot
         already calls internally before it does any streaming) WITHOUT
@@ -799,12 +840,8 @@ class TastytradeFeed:
             keys = list(chain.keys()) if hasattr(chain, "keys") else list(chain)
             if not keys:
                 return {"ok": False, "error": f"No option chain returned for {underlying_symbol}", "expiries": []}
-            cutoff = _dt.date.today() + _dt.timedelta(days=int(months_ahead * 30.44))
-            exps = sorted(
-                k.isoformat() if hasattr(k, "isoformat") else str(k)
-                for k in keys
-                if (k if hasattr(k, "year") else _dt.date.fromisoformat(str(k)[:10])) <= cutoff
-            )
+            selected = _select_option_expiries(keys, max_dte, weekly_expiry_limit)
+            exps = sorted(k.isoformat() if hasattr(k, "isoformat") else str(k) for k in selected)
             return {"ok": True, "expiries": exps, "error": None}
 
         try:
@@ -813,7 +850,9 @@ class TastytradeFeed:
             return {"ok": False, "error": str(e), "expiries": []}
 
     def get_multi_expiry_chain_snapshot(self, underlying_symbol: str, expiries: Optional[List[str]] = None,
-                                         months_ahead: int = 2, strikes_each_side: Optional[int] = None,
+                                         max_dte: int = DEFAULT_OPTION_MAX_DTE,
+                                         weekly_expiry_limit: int = DEFAULT_WEEKLY_EXPIRY_LIMIT,
+                                         strikes_each_side: Optional[int] = None,
                                          collect_timeout: float = 20.0) -> dict:
         """Same Greeks/OI/volume capture as get_live_chain_snapshot(),
         but subscribed across MULTIPLE expiries in ONE DXLink session,
@@ -838,10 +877,9 @@ class TastytradeFeed:
         mechanically requires proportionally more time.
 
         expiries: explicit list of "YYYY-MM-DD" strings to fetch. If
-        omitted, months_ahead is used to select every expiry within that
-        window from the chain automatically (same window
-        discover_expiries() would find, but this method does the
-        selection itself rather than requiring two calls).
+        omitted, the chain automatically selects every daily expiry through
+        max_dte (50 by default), or the first weekly_expiry_limit dates for a
+        weekly-only chain. The max_dte ceiling applies in either case.
 
         Returns {"ok": bool, "underlying": ..., "by_expiry": {expiry:
         [rows...]}, "error": ...} -- rows grouped by expiry so the
@@ -875,10 +913,13 @@ class TastytradeFeed:
 
             if expiries:
                 wanted = set(expiries)
-                target_keys = [k for k in keys if (k.isoformat() if hasattr(k, "isoformat") else str(k))[:10] in wanted]
+                explicit_keys = [k for k in keys if (k.isoformat() if hasattr(k, "isoformat") else str(k))[:10] in wanted]
+                # Explicit requests still respect the global DTE safety cap,
+                # but their caller-selected set is not additionally truncated.
+                today = _dt.date.today()
+                target_keys = [k for k in explicit_keys if 0 <= (_expiry_date(k) - today).days <= int(max_dte)]
             else:
-                cutoff = _dt.date.today() + _dt.timedelta(days=int(months_ahead * 30.44))
-                target_keys = [k for k in keys if (k if hasattr(k, "year") else _dt.date.fromisoformat(str(k)[:10])) <= cutoff]
+                target_keys = _select_option_expiries(keys, max_dte, weekly_expiry_limit)
             if not target_keys:
                 return {"ok": False, "error": f"No expiries matched for {underlying_symbol}", "by_expiry": {}}
 
