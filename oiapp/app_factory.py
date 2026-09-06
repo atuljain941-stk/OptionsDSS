@@ -382,6 +382,12 @@ def create_app():
     except Exception as e:
         print(f"[app] WARN: replay_lab failed: {e}")
     try:
+        from .scanners.intraday_gex_backtest import intraday_backtest_bp
+        app.register_blueprint(intraday_backtest_bp)
+        print("[app] Intraday GEX backtest registered at /intraday-backtest")
+    except Exception as e:
+        print(f"[app] WARN: intraday_gex_backtest failed: {e}")
+    try:
         from .services.cftc_cot import cot_bp, _ensure_table as _cot_ensure
         app.register_blueprint(cot_bp)
         _cot_ensure()
