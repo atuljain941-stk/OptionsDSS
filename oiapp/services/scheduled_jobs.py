@@ -164,8 +164,15 @@ def _run_gex_snapshot(app, symbol: str, label: str) -> None:
         with app.test_request_context(f'/spy/daily_plan?symbol={symbol}'):
             resp = api_daily_plan()
             payload = resp.get_json() if hasattr(resp, 'get_json') else None
-            if payload and not payload.get('error'):
-                _save_daily_plan_snapshot(payload, label=label)
+            if not payload or payload.get('error'):
+                raise RuntimeError(f"{symbol} GEX plan failed: {(payload or {}).get('error', 'no payload')}")
+            _save_daily_plan_snapshot(payload, label=label)
+
+
+def _run_gex_premarket_snapshots(app) -> None:
+    """Persist the 8:45 AM ET GEX plan for every intraday 0DTE symbol."""
+    for symbol in ("SPY", "QQQ", "IWM"):
+        _run_gex_snapshot(app, symbol, "08:45 premarket")
 
 
 def _run_oib_snapshot(app) -> None:
@@ -224,8 +231,9 @@ def _scheduler_loop(app) -> None:
          lambda: _run_morning_data_pipeline(app), {"times": ["07:30"], "weekdays": None}, None),
         ('oib_snapshot', 'OI Buildup snapshot', 'Runs the OI buildup screener and saves a snapshot.',
          lambda: _run_oib_snapshot(app), {"times": ["08:00"], "weekdays": None}, None),
-        ('gex_snapshot_pre', 'GEX plan (premarket)', 'Saves an SPY daily GEX/plan snapshot before the open.',
-         lambda: _run_gex_snapshot(app, 'SPY', '08:45 premarket'), {"times": ["08:45"], "weekdays": None}, None),
+        ('gex_snapshot_pre', 'GEX plan (premarket)',
+         'Saves retained 8:45 AM GEX-plan snapshots for SPY, QQQ, and IWM.',
+         lambda: _run_gex_premarket_snapshots(app), {"times": ["08:45"], "weekdays": [0, 1, 2, 3, 4]}, (0, 1, 2, 3, 4)),
         ('weekly_plan_snapshot', 'Weekly plan snapshot', 'Saves the SPY weekly options plan (Mondays only).',
          lambda: _run_weekly_plan_snapshot(app), {"times": ["10:00"], "weekdays": [0]}, (0,)),
         ('weekly_plan_grading', 'Weekly plan grading (backtest)',
