@@ -33,7 +33,8 @@ _registry_lock = threading.Lock()
 def _conn():
     c = sqlite3.connect(DB_PATH, timeout=20)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
+    # WAL is initialized once in oiapp.config; do not change journal mode
+    # from every job-registry connection.
     # Was 5000 (5s) -- raised to match the more generous 30s convention
     # already used elsewhere in this app (e.g. tastytrade_options_backfill.py's
     # _conn()). The production log shows this DB under real, sustained
