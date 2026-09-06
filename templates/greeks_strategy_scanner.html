@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Greeks Strategy Scanner</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1600px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:1000px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:16px}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:8px 16px;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:12px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-earn{background:#f59e0b;color:#1a1200}
+    .tabs{display:flex;gap:6px;margin-bottom:14px}
+    .tab-btn{padding:8px 16px;border-radius:8px;font-weight:800;font-size:12px;cursor:pointer;background:rgba(255,255,255,.05);border:1px solid var(--border,var(--border2));color:var(--muted,var(--muted2))}
+    .tab-btn.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+    select,input[type=number],input[type=text]{padding:8px 10px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:8px;font-size:12px}
+    .strat-check{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted,var(--muted2))}
+    table.dt{width:100%;border-collapse:collapse;font-size:12px}
+    table.dt th,table.dt td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left}
+    table.dt th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase}
+    .muted{color:var(--muted,var(--muted2))}
+    .rr-good{color:#4ade80;font-weight:900}
+    .rr-ok{color:#fbbf24;font-weight:900}
+    .rr-bad{color:#f87171;font-weight:900}
+    .pop-bar{display:inline-block;height:6px;background:#6366f1;border-radius:3px;vertical-align:middle}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .status-err{color:#f87171;font-size:12px}
+    .plan-note{font-size:11px;color:#f59e0b;max-width:280px}
+    .disclaimer{font-size:11px;color:var(--muted,var(--muted2));margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.06)}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>🎯 Greeks Strategy Scanner</h1>
+    <p>Multi-leg strategies (short strangle, short straddle, iron fly) sized and priced from real Black-Scholes Greeks and stored option premiums, filtered by RR (max profit / max loss, from the actual expiry payoff curve) and POP (probability of profit — lognormal breakeven probability, the same convention Black-Scholes itself and most retail POP tools use, not a delta shortcut). Defined-risk structures pass a real RR floor far more often than undefined-risk ones — that's the math working correctly, not a filter to loosen.</p>
+  </div>
+
+  <div class="tabs">
+    <div class="tab-btn active" id="tab-standard" onclick="switchTab('standard')">Standard Scan</div>
+    <div class="tab-btn" id="tab-earnings" onclick="switchTab('earnings')">Pre-Earnings Scan</div>
+    <div class="tab-btn" id="tab-calendar" onclick="switchTab('calendar')">📅 Earnings Calendar (Week)</div>
+  </div>
+
+  <div class="card" id="standard-controls">
+    <div class="toolbar" style="margin-bottom:10px">
+      <span class="muted" style="font-size:12px">Watchlist</span>
+      <select id="watchlist-select" style="width:200px"><option value="">All symbols with options data</option></select>
+      <span class="muted" style="font-size:12px">Expiry</span>
+      <select id="expiry-select" style="width:170px"></select>
+      <span class="muted" style="font-size:12px">Strategies</span>
+      <label class="strat-check"><input type="checkbox" value="strangle" checked/> Strangle</label>
+      <label class="strat-check"><input type="checkbox" value="straddle" checked/> Straddle</label>
+      <label class="strat-check"><input type="checkbox" value="iron_fly" checked/> Iron Fly</label>
+      <label class="strat-check"><input type="checkbox" value="jade_lizard" checked/> Jade Lizard</label>
+      <label class="strat-check"><input type="checkbox" value="broken_wing_fly" checked/> Broken-Wing Fly</label>
+    </div>
+    <div class="toolbar">
+      <span class="muted" style="font-size:12px">Min RR</span>
+      <input type="number" id="min-rr-input" min="0" step="0.1" value="0.7" style="width:60px"/>
+      <span class="muted" style="font-size:12px">Min POP %</span>
+      <input type="number" id="min-pop-input" min="0" max="100" step="5" value="0" style="width:60px" title="As a percentage (0-100), e.g. 50 for 50% -- converted internally, POP itself is stored as a 0-1 fraction."/>
+      <span class="muted" style="font-size:12px">Min OI</span>
+      <input type="number" id="min-oi-input" min="0" step="10" value="50" style="width:60px" title="Minimum open interest per leg -- a strategy is only as liquid as its worst leg."/>
+      <span class="muted" style="font-size:12px">Max spread %</span>
+      <input type="number" id="max-spread-input" min="1" step="1" value="15" style="width:55px" title="Maximum bid-ask spread as % of midpoint, per leg. Wide spreads are the real thin-market/manipulation signal, not just low OI."/>
+      <span class="muted" style="font-size:12px">Earnings</span>
+      <select id="earnings-gate-select" style="width:150px" title="Any: no filtering, just shows the earnings date. Exclude: skip symbols with earnings before this expiry (avoid unintentionally selling premium across an event). Require: only symbols WITH earnings before this expiry.">
+        <option value="any">Any (show date)</option>
+        <option value="exclude">Exclude earnings-spanning</option>
+        <option value="require">Only earnings-spanning</option>
+      </select>
+      <button class="btn btn-primary" onclick="runScan()">▶ Scan</button>
+      <span id="scan-status" class="muted" style="font-size:12px"></span>
+    </div>
+  </div>
+
+  <div class="card" id="earnings-controls" style="display:none">
+    <div class="toolbar">
+      <span class="muted" style="font-size:12px">Watchlist</span>
+      <select id="earn-watchlist-select" style="width:200px"><option value="">All symbols with options data</option></select>
+      <span class="muted" style="font-size:12px">Strategies</span>
+      <label class="strat-check"><input type="checkbox" class="earn-strat" value="straddle" checked/> Straddle</label>
+      <label class="strat-check"><input type="checkbox" class="earn-strat" value="strangle" checked/> Strangle</label>
+      <label class="strat-check"><input type="checkbox" class="earn-strat" value="iron_fly" checked/> Iron Fly</label>
+      <label class="strat-check"><input type="checkbox" class="earn-strat" value="jade_lizard" checked/> Jade Lizard</label>
+      <label class="strat-check"><input type="checkbox" class="earn-strat" value="broken_wing_fly" checked/> Broken-Wing Fly</label>
+      <span class="muted" style="font-size:12px">Max days to earnings</span>
+      <input type="number" id="max-earn-days-input" min="0" max="5" value="1" style="width:50px"/>
+      <span class="muted" style="font-size:12px">Min RR</span>
+      <input type="number" id="earn-min-rr-input" min="0" step="0.1" value="0.3" style="width:60px"/>
+      <button class="btn btn-earn" onclick="runEarningsScan()">⚡ Scan Pre-Earnings</button>
+      <span id="earn-scan-status" class="muted" style="font-size:12px"></span>
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-top:8px">Sizes each structure to the market's own priced-in expected move (ATM straddle price). Does NOT predict IV-crush magnitude — no historical earnings-specific dataset exists to calibrate that from. The plan: sell before close, evaluate/close at tomorrow's open.</div>
+  </div>
+
+  <div class="card" id="calendar-controls" style="display:none">
+    <div class="toolbar">
+      <span class="muted" style="font-size:12px">Watchlist</span>
+      <select id="cal-watchlist-select" style="width:200px"><option value="">All symbols with options data</option></select>
+      <button class="btn btn-earn" onclick="runCalendarScan()">📅 Load This Week's Earnings</button>
+      <span id="cal-scan-status" class="muted" style="font-size:12px"></span>
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-top:8px">Symbols reporting earnings in the next 7 days. Average historical move is computed from real price_cache data around ~quarterly-cadence-estimated past dates (91-day steps back from the last known earnings date) — this app only stores the single most recent earnings date per symbol, so these are approximate dates, not a confirmed multi-quarter earnings history. IV/HV and expected move use real per-strike market-implied IV where available.</div>
+  </div>
+
+  <div id="results-body"><div class="card muted">Pick a tab and run a scan.</div></div>
+</div>
+
+<script>
+let activeTab = "standard";
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById("tab-standard").classList.toggle("active", tab === "standard");
+  document.getElementById("tab-earnings").classList.toggle("active", tab === "earnings");
+  document.getElementById("tab-calendar").classList.toggle("active", tab === "calendar");
+  document.getElementById("standard-controls").style.display = tab === "standard" ? "block" : "none";
+  document.getElementById("earnings-controls").style.display = tab === "earnings" ? "block" : "none";
+  document.getElementById("calendar-controls").style.display = tab === "calendar" ? "block" : "none";
+  document.getElementById("results-body").innerHTML = '<div class="card muted">Pick a tab and run a scan.</div>';
+}
+
+function fmtRR(rr) {
+  if (rr == null) return '<span class="muted">—</span>';
+  const cls = rr >= 1.5 ? "rr-good" : rr >= 0.7 ? "rr-ok" : "rr-bad";
+  return `<span class="${cls}">${rr.toFixed(2)}</span>`;
+}
+function fmtPOP(pop) {
+  if (pop == null) return '<span class="muted">—</span>';
+  const pct = Math.round(pop * 100);
+  return `${pct}% <span class="pop-bar" style="width:${Math.max(2,pct*0.5)}px"></span>`;
+}
+
+function legsSummary(r) {
+  if (r.strategy === "Short Strangle") return `Sell ${r.put_strike}P / Sell ${r.call_strike}C`;
+  if (r.strategy === "Short Straddle") return `Sell ${r.atm_strike}P / Sell ${r.atm_strike}C`;
+  if (r.strategy === "Iron Fly") return `Sell ${r.atm_strike}P/C, Buy ${r.long_put_strike}P / ${r.long_call_strike}C`;
+  if (r.strategy === "Jade Lizard") return `Sell ${r.short_put_strike}P, Sell ${r.short_call_strike}C, Buy ${r.long_call_strike}C, Buy ${r.long_put_strike}P${r.no_upside_risk ? " (no upside risk)" : ""}`;
+  if (r.strategy && r.strategy.startsWith("Broken-Wing Fly")) return `Sell ${r.atm_strike}P/C, Buy ${r.long_put_strike}P (wide) / ${r.long_call_strike}C (narrow)`;
+  return "";
+}
+
+let currentResults = [];
+
+function renderRows(rows, isEarnings) {
+  return rows.map((r, i) => `
+    <tr>
+      <td><a href="#" onclick="openInTradeAnalysis(${i}); return false;" style="color:#818cf8;font-weight:800;text-decoration:none" title="Open in Trade Analysis with all legs pre-filled">🔗 <b>${r.symbol}</b></a></td>
+      <td>${r.strategy}</td>
+      <td>${r.dte}d${r.expiry_type ? ` (${r.expiry_type})` : ""}</td>
+      <td>$${r.spot}</td>
+      <td>${legsSummary(r)}</td>
+      <td>$${r.credit}</td>
+      <td>$${r.max_profit} / $${Math.abs(r.max_loss)}</td>
+      <td>${fmtRR(r.rr)}</td>
+      <td>${fmtPOP(r.pop)}</td>
+      <td>${r.breakeven_lower ?? "—"} / ${r.breakeven_upper ?? "—"}</td>
+      ${isEarnings
+        ? `<td class="plan-note">${r.earn_date || ""} (${r.earn_days}d) — ${r.plan || ""}</td>`
+        : `<td>${r.earn_date ? `${r.earn_date} (${r.earn_days}d)${r.spans_earnings ? ' <span style="color:#f59e0b" title="Earnings falls before this expiry -- this trade spans the event">⚠ spans</span>' : ""}` : '<span class="muted">—</span>'}</td>`}
+    </tr>`).join("");
+}
+
+function openInTradeAnalysis(i) {
+  const r = currentResults[i];
+  if (!r) return;
+  const parentWin = window.parent;
+  if (!parentWin || parentWin === window || typeof parentWin._taLoadLegs !== "function") {
+    alert("Trade Analysis is part of the main app -- open this scanner from within the app's Tools tab (not standalone) for the link to work.");
+    return;
+  }
+  // Map this scanner's leg shape into Trade Analysis's shape -- already
+  // matches field-for-field (side/option_type/strike/qty/entry_price);
+  // leg_iv is filled from this result's avg_iv since Trade Analysis
+  // otherwise leaves it blank until a live IV fetch.
+  const mappedLegs = r.legs.map(l => ({
+    side: l.side, option_type: l.option_type, strike: l.strike,
+    entry_price: l.entry_price, qty: l.qty,
+    leg_iv: r.avg_iv != null ? (r.avg_iv * 100).toFixed(1) : ""
+  }));
+  try {
+    const tabBtn = parentWin.document.querySelector('[data-tab="tradeanalysis"]');
+    if (tabBtn) tabBtn.click();  // switch tab FIRST -- some chart libs render wrong dimensions into a still-hidden container
+    parentWin._taLoadLegs(mappedLegs, {
+      symbol: r.symbol, spot: r.spot,
+      iv_pct: r.avg_iv != null ? (r.avg_iv * 100).toFixed(1) : undefined,
+      dte: r.dte, autoAnalyze: true,
+    });
+  } catch (e) {
+    alert("Couldn't open Trade Analysis: " + e.message);
+  }
+}
+
+function renderTable(rows, isEarnings) {
+  currentResults = rows;
+  if (!rows.length) {
+    return `<div class="card muted">No candidates found matching these filters.</div>`;
+  }
+  return `<div class="card"><table class="dt">
+    <thead><tr>
+      <th>Symbol</th><th>Strategy</th><th>DTE</th><th>Spot</th><th>Legs</th>
+      <th>Credit</th><th>Max Profit / Max Loss</th><th>RR</th><th>POP</th><th>Breakevens</th>
+      <th>${isEarnings ? "Earnings / Plan" : "Earnings"}</th>
+    </tr></thead>
+    <tbody>${renderRows(rows, isEarnings)}</tbody>
+  </table>
+  <div class="disclaimer">POP is a model estimate under lognormal/constant-vol assumptions (real markets have fatter tails and vol isn't constant through DTE) — treat it as "what the model says," not a guaranteed frequency. RR/max-loss come from the real expiry payoff curve, not an approximation. Every leg in every result shown has already passed the liquidity gate (min OI + max bid-ask spread %) — a structure is only as liquid as its worst leg, so any single thin/wide leg excludes the whole trade, not just that leg.</div>
+  </div>`;
+}
+
+async function loadExpiries() {
+  try {
+    const resp = await fetch("/greeks-strategy-scanner/api/expiries");
+    const d = await resp.json();
+    const sel = document.getElementById("expiry-select");
+    const today = new Date();
+    const TARGET_DTE = 35;  // reasonable premium-selling sweet spot (enough theta decay + enough credit); adjust to taste
+    let bestExp = null, bestDiff = Infinity;
+    (d.expiries || []).forEach(e => {
+      const dte = Math.round((new Date(e + "T00:00:00") - today) / 86400000);
+      const opt = document.createElement("option");
+      opt.value = e;
+      opt.textContent = `${e} (${dte}d)`;
+      opt.dataset.dte = dte;
+      sel.appendChild(opt);
+      const diff = Math.abs(dte - TARGET_DTE);
+      if (dte >= 0 && diff < bestDiff) { bestDiff = diff; bestExp = e; }
+    });
+    if (bestExp) {
+      sel.value = bestExp;
+      const opt = Array.from(sel.options).find(o => o.value === bestExp);
+      if (opt) opt.textContent += " ★ suggested";
+    }
+  } catch (e) { /* leave picker empty */ }
+}
+
+async function loadWatchlists() {
+  try {
+    const resp = await fetch("/watchlists/");
+    const d = await resp.json();
+    [document.getElementById("watchlist-select"), document.getElementById("earn-watchlist-select"), document.getElementById("cal-watchlist-select")].forEach(sel => {
+      if (!sel) return;
+      (d.watchlists || []).forEach(wl => {
+        const opt = document.createElement("option");
+        opt.value = wl.id;
+        opt.textContent = `${wl.name} (${wl.symbol_count})`;
+        sel.appendChild(opt.cloneNode(true));
+      });
+    });
+  } catch (e) { /* non-fatal -- dropdowns just stay at "All symbols" */ }
+}
+
+async function runScan() {
+  const expiry = document.getElementById("expiry-select").value;
+  const status = document.getElementById("scan-status");
+  if (!expiry) { status.textContent = "Pick an expiry first"; return; }
+  const strategies = Array.from(document.querySelectorAll("#standard-controls .strat-check input:checked")).map(i => i.value);
+  const minRr = document.getElementById("min-rr-input").value || 0.7;
+  const minPopPct = document.getElementById("min-pop-input").value || 0;
+  const minPop = minPopPct / 100;  // input is a percentage (0-100); API expects a 0-1 fraction, same scale POP itself is returned in
+  const minOi = document.getElementById("min-oi-input").value || 50;
+  const maxSpread = document.getElementById("max-spread-input").value || 15;
+  const watchlistId = document.getElementById("watchlist-select").value;
+  const earningsGate = document.getElementById("earnings-gate-select").value;
+  status.innerHTML = '<span class="spinner"></span> Scanning...';
+  document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> Scanning watchlist...</div>';
+  try {
+    let url = `/greeks-strategy-scanner/api/scan?expiry=${encodeURIComponent(expiry)}&strategies=${strategies.join(",")}&min_rr=${minRr}&min_pop=${minPop}&min_oi=${minOi}&max_spread_pct=${maxSpread}&earnings_gate=${earningsGate}`;
+    if (watchlistId) url += `&watchlist_id=${encodeURIComponent(watchlistId)}`;
+    const resp = await fetch(url);
+    const d = await resp.json();
+    if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
+    status.textContent = `✓ ${d.count} candidate(s) found`;
+    document.getElementById("results-body").innerHTML = renderTable(d.results, false);
+  } catch (e) {
+    status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
+  }
+}
+
+async function runEarningsScan() {
+  const status = document.getElementById("earn-scan-status");
+  const strategies = Array.from(document.querySelectorAll(".earn-strat:checked")).map(i => i.value);
+  const minRr = document.getElementById("earn-min-rr-input").value || 0.3;
+  const maxDays = document.getElementById("max-earn-days-input").value || 1;
+  const watchlistId = document.getElementById("earn-watchlist-select").value;
+  status.innerHTML = '<span class="spinner"></span> Scanning for upcoming earnings...';
+  document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> Checking earnings calendar + pricing structures...</div>';
+  try {
+    let url = `/greeks-strategy-scanner/api/earnings_scan?strategies=${strategies.join(",")}&min_rr=${minRr}&max_earn_days=${maxDays}`;
+    if (watchlistId) url += `&watchlist_id=${encodeURIComponent(watchlistId)}`;
+    const resp = await fetch(url);
+    const d = await resp.json();
+    if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
+    status.textContent = `✓ ${d.count} candidate(s) found`;
+    document.getElementById("results-body").innerHTML = renderTable(d.results, true);
+  } catch (e) {
+    status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
+  }
+}
+
+function fmtIvHvRatio(r) {
+  if (r == null) return '<span class="muted">—</span>';
+  const cls = r >= 1.3 ? "rr-good" : r >= 1.0 ? "rr-ok" : "rr-bad";
+  return `<span class="${cls}">${r}x</span>`;
+}
+
+function renderCalendarTable(rows) {
+  if (!rows.length) {
+    return `<div class="card muted">No earnings in the next 7 days for this watchlist.</div>`;
+  }
+  const body = rows.map(r => `
+    <tr>
+      <td><b>${r.symbol}</b></td>
+      <td>$${r.spot}</td>
+      <td>${r.earn_date || "—"} (${r.earn_days}d)${r.next_earn_confirmed ? "" : ' <span class="flag-note" style="color:#94a3b8">(unconfirmed)</span>'}</td>
+      <td>${r.atm_iv_pct != null ? r.atm_iv_pct + "%" : "—"}</td>
+      <td>${r.hv30_pct != null ? r.hv30_pct + "%" : "—"}</td>
+      <td>${fmtIvHvRatio(r.iv_hv_ratio)}</td>
+      <td>${r.expected_move_pct != null ? r.expected_move_pct + "%" : "—"}</td>
+      <td>${r.avg_historical_move_pct != null ? r.avg_historical_move_pct + "% (n=" + r.hist_n_samples + ")" : "—"} <span class="muted" style="font-size:10px">${r.hist_note || ""}</span></td>
+    </tr>`).join("");
+  return `<div class="card"><table class="dt">
+    <thead><tr>
+      <th>Symbol</th><th>Spot</th><th>Earnings</th><th>ATM IV</th><th>HV30</th><th>IV/HV</th>
+      <th>Expected Move (this expiry)</th><th>Avg Historical Earnings-Day Move</th>
+    </tr></thead>
+    <tbody>${body}</tbody>
+  </table>
+  <div class="disclaimer">IV/HV ≥1.3x (green) suggests options are pricing in meaningfully more movement than has been realized recently -- a common signal for premium-selling interest, not a guarantee. "Avg Historical Earnings-Day Move" is computed from real price_cache data around approximate quarterly-cadence dates (this app only stores the single most recent confirmed earnings date per symbol) -- treat the date alignment as approximate, the move calculation itself as real.</div>
+  </div>`;
+}
+
+async function runCalendarScan() {
+  const status = document.getElementById("cal-scan-status");
+  const watchlistId = document.getElementById("cal-watchlist-select").value;
+  status.innerHTML = '<span class="spinner"></span> Checking earnings calendar for the week...';
+  document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> Pulling IV, HV, and historical move data...</div>';
+  try {
+    let url = `/greeks-strategy-scanner/api/earnings_calendar`;
+    if (watchlistId) url += `?watchlist_id=${encodeURIComponent(watchlistId)}`;
+    const resp = await fetch(url);
+    const d = await resp.json();
+    if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
+    status.textContent = `✓ ${d.count} symbol(s) reporting this week`;
+    document.getElementById("results-body").innerHTML = renderCalendarTable(d.results);
+  } catch (e) {
+    status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
+  }
+}
+
+loadExpiries();
+loadWatchlists();
+</script>
+</body>
+</html>

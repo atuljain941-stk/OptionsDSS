@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Volume Profile Scanner</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--card-radius:12px;--accent:#6366f1}
+    body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif}
+    .shell{max-width:1500px;margin:0 auto;padding:18px}
+    .hero{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+    .hero h1{margin:0 0 4px;font-size:24px;font-weight:900}
+    .hero p{margin:0;color:var(--muted);font-size:13px;max-width:760px;line-height:1.5}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px;margin-bottom:14px}
+    .card h3{margin:0 0 10px;font-size:14px;font-weight:800}
+    label{font-size:11px;color:var(--muted);display:block;margin-bottom:4px}
+    select,input[type=number],input[type=text]{padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px}
+    .btn{padding:9px 18px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px;transition:opacity .15s}
+    .btn:hover{opacity:.85}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-ghost{background:rgba(255,255,255,.06);color:var(--text);border:1px solid var(--border)}
+    .btn-teal{background:#0d9488;color:#fff}
+    .btn-sm{padding:5px 10px;font-size:11px;border-radius:6px}
+    .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
+    .badge-green{background:#22c55e22;color:#22c55e;border:1px solid #22c55e44}
+    .badge-red{background:#ef444422;color:#ef4444;border:1px solid #ef444444}
+    .badge-amber{background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b44}
+    .badge-blue{background:#3b82f622;color:#3b82f6;border:1px solid #3b82f644}
+    .badge-neutral{background:#64748b22;color:#94a3b8;border:1px solid #64748b44}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+    .opp-card{background:var(--card);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px;margin-bottom:10px}
+    .opp-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+    .opp-symbol{font-size:18px;font-weight:900;color:var(--accent);min-width:64px}
+    .opp-score{font-size:20px;font-weight:900}
+    .levels{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:#94a3b8;margin-top:6px}
+    .levels b{color:var(--text)}
+    .reasons{font-size:11px;color:#94a3b8;line-height:1.7;margin-top:8px;padding:8px 10px;background:rgba(255,255,255,.02);border-radius:6px;border-left:2px solid var(--border)}
+    .reasons li{margin-left:16px}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    #summary-bar{display:none;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+    .sum-chip{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 14px;min-width:80px;text-align:center}
+    .sum-chip .val{font-size:18px;font-weight:900;line-height:1}
+    .sum-chip .lbl{font-size:10px;color:var(--muted);margin-top:2px}
+    .confirm-btn{font-size:10px;padding:3px 9px;border-radius:5px;border:1px solid var(--border);background:rgba(255,255,255,.04);color:var(--text);cursor:pointer}
+    .confirm-btn:hover{opacity:.85}
+    .confirm-result{font-size:10px;margin-top:6px}
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="hero">
+    <div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">v1 · Volume Profile Balance/Imbalance Scanner</div>
+      <h1>📊 Volume Profile Scanner</h1>
+      <p><b>Value Area mode</b>: is price inside yesterday's value area (balanced) or has it broken out and held
+        (imbalanced)? <b>S/R Breakout mode</b>: did price break a classic support/resistance level right after
+        genuinely consolidating near it, confirmed by the consolidation's own POC and a real CVD trend -- runs
+        on whatever timeframe you pick. Both modes apply the same "never take the first drive" retest discipline.</p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
+      <a class="btn btn-ghost" href="/">Dashboard</a>
+      <a class="btn btn-ghost" href="/scheduler-hub">Scheduler</a>
+    </div>
+  </div>
+
+  <!-- Scan parameters -->
+  <div class="card">
+    <h3>Scan Parameters</h3>
+    <div class="row" style="margin-bottom:12px">
+      <div>
+        <label>Trigger Mode</label>
+        <select id="trigger-mode" style="width:190px">
+          <option value="value_area" selected>Value Area (VAH/VAL, daily)</option>
+          <option value="sr">Support/Resistance Breakout</option>
+          <option value="query">Custom Query</option>
+        </select>
+      </div>
+      <div id="sr-timeframe-wrap" style="display:none">
+        <label>Timeframe</label>
+        <select id="sr-timeframe" style="width:90px">
+          <option value="15m">15m</option>
+          <option value="1h" selected>1h</option>
+          <option value="4h">4h</option>
+          <option value="1d">1d</option>
+        </select>
+      </div>
+      <div id="query-wrap" style="display:none;flex-basis:100%">
+        <label>Scanner Builder query -- use <code>expr[N]</code> to define the lookback window (e.g. a 4-week check implies profiling those 4 weeks)</label>
+        <div style="position:relative">
+          <textarea id="custom-query-text" rows="3" style="width:100%;font-family:monospace;font-size:12px;padding:6px" placeholder="(High[1w] - High[1w][4]) / High[1w] < 0.1"></textarea>
+          <div id="query-autocomplete" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--card,#111827);border:1px solid var(--border,#334155);border-radius:8px;box-shadow:0 12px 30px rgba(0,0,0,.4);max-height:220px;overflow:auto"></div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">If your query has no <code>[N]</code> reference, the Consolidation lookback settings above are used as the window instead. Start typing a primitive name for suggestions (↑↓ to navigate, Enter/Tab to insert, Esc to dismiss). Use <code>// comment</code> to disable a line without deleting it.</div>
+      </div>
+      <div>
+        <label>Watchlist</label>
+        <select id="wl-select" style="min-width:200px"><option value="">All symbols</option></select>
+      </div>
+      <div>
+        <label>Min Score (0-10)</label>
+        <input type="number" id="min-score" value="0" min="0" max="10" step="0.5" style="width:80px"/>
+      </div>
+      <div>
+        <label>Use cached results</label>
+        <select id="use-cache" style="width:110px">
+          <option value="1" selected>Yes (fast)</option>
+          <option value="0">No, recompute</option>
+        </select>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <div style="display:flex;gap:12px;align-items:center;height:34px">
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);cursor:pointer">
+            <input type="checkbox" id="check-oi-walls"/> OI Walls
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);cursor:pointer">
+            <input type="checkbox" id="check-uae-framework"/> UAE Framework
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);cursor:pointer">
+            <input type="checkbox" id="check-period-consolidation"/> Consolidation
+          </label>
+        </div>
+      </div>
+      <div id="consolidation-params-wrap" style="display:none">
+        <label>Consolidation: last N periods</label>
+        <div style="display:flex;gap:6px">
+          <select id="consolidation-unit" style="width:70px">
+            <option value="1d">Day</option>
+            <option value="1w" selected>Week</option>
+            <option value="1m">Month</option>
+          </select>
+          <input type="number" id="consolidation-n" value="4" min="2" max="24" style="width:55px" title="Number of completed periods to check"/>
+          <input type="number" id="consolidation-max-pct" value="5" min="0.5" max="50" step="0.5" style="width:60px" title="Max % change per period to count as flat"/>
+          <span style="align-self:center;font-size:11px;color:var(--muted)">%</span>
+        </div>
+      </div>
+      <div style="margin-left:auto">
+        <button class="btn btn-primary" id="btn-run-scan">Run Scan</button>
+      </div>
+    </div>
+    <span id="scan-status" style="font-size:12px;color:var(--muted)"></span>
+  </div>
+
+  <!-- Summary -->
+  <div id="summary-bar" style="align-items:center">
+    <div class="sum-chip"><div class="val" id="sum-count">0</div><div class="lbl">Matches</div></div>
+    <div class="sum-chip"><div class="val" id="sum-avg">0</div><div class="lbl">Avg Score</div></div>
+    <div class="sum-chip"><div class="val" id="sum-top">-</div><div class="lbl">Top Ticker</div></div>
+    <div class="sum-chip"><div class="val" id="sum-source">-</div><div class="lbl">Source</div></div>
+    <button id="btn-copy-symbols" class="btn btn-ghost" style="margin-left:auto;display:none" onclick="copyResultSymbols()">📋 Copy Symbols</button>
+  </div>
+
+  <!-- Results -->
+  <div id="results-wrap"></div>
+
+</div>
+
+
+<script>
+const API = "/scanner/volume-profile";
+let currentResults = [];
+
+// ── Custom query: persistence + autocomplete ──────────────────────────
+// Persisted client-side (localStorage) rather than a backend setting --
+// this is a single-user page and the query is exactly the kind of thing
+// worth surviving a refresh without needing a round-trip to fetch it
+// back. Restored on load; saved on every edit (debounced) so it's never
+// lost even if the person navigates away without running the scan.
+const LAST_QUERY_KEY = "oiapp_vp_last_custom_query";
+let _primitiveCatalog = null;   // [{name, signature, description}, ...] -- fetched once, from the real Scanner Builder catalog, not a separate copy
+let _acItems = [];
+let _acIndex = -1;
+let _saveQueryTimer = null;
+
+function restoreLastQuery() {
+  const el = document.getElementById("custom-query-text");
+  if (!el) return;
+  try {
+    const saved = localStorage.getItem(LAST_QUERY_KEY);
+    if (saved) el.value = saved;
+  } catch (e) { /* localStorage unavailable -- fine, just skip restore */ }
+}
+
+function saveLastQuery() {
+  const el = document.getElementById("custom-query-text");
+  if (!el) return;
+  try { localStorage.setItem(LAST_QUERY_KEY, el.value); } catch (e) { /* ignore */ }
+}
+
+async function ensurePrimitiveCatalog() {
+  if (_primitiveCatalog) return _primitiveCatalog;
+  try {
+    const r = await fetch("/scanner-builder/api/catalog");
+    const d = await r.json();
+    // Same function_meta the flagship Scanner Builder's own autocomplete
+    // uses -- one source of truth for primitive names/signatures/
+    // descriptions, not a second list that could drift out of sync.
+    _primitiveCatalog = (d.function_meta || []).map(f => ({
+      name: f.name, signature: f.signature || f.name + "()", description: f.description || "",
+    }));
+  } catch (e) {
+    _primitiveCatalog = [];
+  }
+  return _primitiveCatalog;
+}
+
+// Extracts the identifier immediately before the cursor (e.g. typing
+// "RSIDi" mid-query returns "RSIDi") so suggestions can filter against
+// just the word being typed, not the whole query text.
+function currentWordAtCursor(el) {
+  const pos = el.selectionStart;
+  const before = el.value.slice(0, pos);
+  const m = before.match(/[A-Za-z_][A-Za-z0-9_]*$/);
+  return { word: m ? m[0] : "", start: m ? pos - m[0].length : pos, end: pos };
+}
+
+async function updateQueryAutocomplete() {
+  const el = document.getElementById("custom-query-text");
+  const panel = document.getElementById("query-autocomplete");
+  if (!el || !panel) return;
+  const { word } = currentWordAtCursor(el);
+  if (word.length < 2) { panel.style.display = "none"; _acItems = []; return; }
+  const catalog = await ensurePrimitiveCatalog();
+  const wLower = word.toLowerCase();
+  _acItems = catalog
+    .filter(p => p.name.toLowerCase().includes(wLower))
+    .sort((a, b) => {
+      // Prefix matches first, then alphabetical -- typing "high" should
+      // surface Highest()/High before something that merely contains
+      // "high" mid-name.
+      const aStarts = a.name.toLowerCase().startsWith(wLower) ? 0 : 1;
+      const bStarts = b.name.toLowerCase().startsWith(wLower) ? 0 : 1;
+      return aStarts - bStarts || a.name.localeCompare(b.name);
+    })
+    .slice(0, 15);
+  if (!_acItems.length) { panel.style.display = "none"; return; }
+  _acIndex = 0;
+  renderQueryAutocomplete();
+}
+
+function renderQueryAutocomplete() {
+  const panel = document.getElementById("query-autocomplete");
+  if (!panel) return;
+  panel.innerHTML = _acItems.map((p, i) => `
+    <div class="ac-item" data-idx="${i}" style="padding:7px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid rgba(255,255,255,.06);${i === _acIndex ? 'background:rgba(99,102,241,.18)' : ''}">
+      <div style="font-family:monospace;color:var(--text)"><b>${p.name}</b><span style="color:var(--muted)">${p.signature.slice(p.name.length)}</span></div>
+      ${p.description ? `<div style="color:var(--muted);font-size:11px;margin-top:1px">${p.description.slice(0, 100)}${p.description.length > 100 ? '…' : ''}</div>` : ''}
+    </div>`).join("");
+  panel.style.display = "block";
+  panel.querySelectorAll(".ac-item").forEach(node => {
+    node.addEventListener("mousedown", (e) => {
+      e.preventDefault();  // keep textarea focus/selection intact through the click
+      commitQueryAutocomplete(Number(node.dataset.idx));
+    });
+  });
+}
+
+function commitQueryAutocomplete(idx) {
+  const el = document.getElementById("custom-query-text");
+  const panel = document.getElementById("query-autocomplete");
+  const item = _acItems[idx];
+  if (!el || !item) return;
+  const { start, end } = currentWordAtCursor(el);
+  const insertion = item.name + "(";
+  el.value = el.value.slice(0, start) + insertion + el.value.slice(end);
+  const newPos = start + insertion.length;
+  el.selectionStart = el.selectionEnd = newPos;
+  el.focus();
+  panel.style.display = "none";
+  _acItems = [];
+  scheduleSaveLastQuery();
+}
+
+function scheduleSaveLastQuery() {
+  if (_saveQueryTimer) clearTimeout(_saveQueryTimer);
+  _saveQueryTimer = setTimeout(saveLastQuery, 400);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  restoreLastQuery();
+  const el = document.getElementById("custom-query-text");
+  if (!el) return;
+  el.addEventListener("input", () => { updateQueryAutocomplete(); scheduleSaveLastQuery(); });
+  el.addEventListener("keydown", (e) => {
+    const panel = document.getElementById("query-autocomplete");
+    const isOpen = panel && panel.style.display === "block" && _acItems.length;
+    if (!isOpen) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); _acIndex = Math.min(_acItems.length - 1, _acIndex + 1); renderQueryAutocomplete(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); _acIndex = Math.max(0, _acIndex - 1); renderQueryAutocomplete(); }
+    else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); commitQueryAutocomplete(_acIndex); }
+    else if (e.key === "Escape") { panel.style.display = "none"; _acItems = []; }
+  });
+  el.addEventListener("blur", () => {
+    // Small delay so a suggestion click (mousedown, above) still lands
+    // before the panel disappears -- blur fires before click otherwise.
+    setTimeout(() => { const p = document.getElementById("query-autocomplete"); if (p) p.style.display = "none"; }, 150);
+  });
+});
+
+function badgeForThesis(thesis) {
+  if (thesis.endsWith("-Watch")) return "badge-amber";
+  if (thesis.includes("Long")) return "badge-green";
+  if (thesis.includes("Short")) return "badge-red";
+  return "badge-neutral";
+}
+
+function retestLabel(state) {
+  if (state === "first_touch") return "⏳ First touch -- not confirmed yet";
+  if (state === "retested") return "✅ Retested & held";
+  if (state === "extended_no_retest") return "⚠ Extended, no retest";
+  return "";
+}
+
+function fmtLevel(v) {
+  return (v === null || v === undefined) ? "n/a" : Number(v).toFixed(2);
+}
+
+async function loadWatchlists() {
+  const r = await fetch(`${API}/api/watchlists`);
+  const data = await r.json();
+  const sel = document.getElementById("wl-select");
+  (data.watchlists || []).forEach(w => {
+    const opt = document.createElement("option");
+    opt.value = w.id; opt.textContent = `${w.name} (${w.cnt})`;
+    sel.appendChild(opt);
+  });
+}
+
+async function copyResultSymbols() {
+  const btn = document.getElementById("btn-copy-symbols");
+  const symbols = currentResults.map(r => r.symbol).filter(Boolean);
+  if (!symbols.length) return;
+  const text = symbols.join(", ");
+  const original = btn.textContent;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // Fallback for contexts where the modern Clipboard API isn't
+      // available (e.g. non-HTTPS/non-localhost) -- the older
+      // execCommand approach still works broadly as a backstop.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    btn.textContent = `✅ Copied ${symbols.length}`;
+  } catch (e) {
+    btn.textContent = "⚠ Copy failed";
+  }
+  setTimeout(() => { btn.textContent = original; }, 2000);
+}
+
+function renderResults(results, source) {
+  currentResults = results;
+  const wrap = document.getElementById("results-wrap");
+  wrap.innerHTML = "";
+  if (!results.length) {
+    wrap.innerHTML = '<div class="card" style="text-align:center;color:var(--muted)">No matches at current filters.</div>';
+    document.getElementById("summary-bar").style.display = "none";
+    document.getElementById("btn-copy-symbols").style.display = "none";
+    return;
+  }
+  document.getElementById("summary-bar").style.display = "flex";
+  document.getElementById("btn-copy-symbols").style.display = "inline-block";
+  document.getElementById("sum-count").textContent = results.length;
+  const avg = (results.reduce((a, r) => a + (r.score || 0), 0) / results.length).toFixed(1);
+  document.getElementById("sum-avg").textContent = avg;
+  document.getElementById("sum-top").textContent = results[0].symbol;
+  document.getElementById("sum-source").textContent = source === "cache" ? "Cached" : "Live";
+
+  results.forEach(r => {
+    const div = document.createElement("div");
+    div.className = "opp-card";
+    const rr = (r.target !== null && r.invalidation !== null && r.price)
+      ? (Math.abs(r.target - r.price) / Math.max(Math.abs(r.price - r.invalidation), 1e-9)).toFixed(1)
+      : null;
+    div.innerHTML = `
+      <div class="opp-header">
+        <div class="opp-symbol">${r.symbol}</div>
+        <div class="opp-score">${r.score}<span style="font-size:11px;color:var(--muted)">/10</span></div>
+        <span class="badge ${badgeForThesis(r.thesis)}">${r.thesis}</span>
+        ${r.retest_state ? `<span style="font-size:11px;color:var(--muted)">${retestLabel(r.retest_state)}</span>` : ''}
+        ${r.volume_confirmed ? '<span class="badge badge-blue">Vol Confirmed</span>' : ''}
+        <span style="margin-left:auto;font-size:12px;color:var(--muted)">$${fmtLevel(r.price)}</span>
+      </div>
+      <div class="levels">
+        ${r.level !== undefined ? `
+        <span>Level <b>${fmtLevel(r.level)}</b>${r.level_strength ? ` <span style="color:var(--muted)">(strength ${r.level_strength})</span>` : ''}</span>
+        <span>Consol. POC <b>${fmtLevel(r.consolidation_poc)}</b>${r.poc_position !== null && r.poc_position !== undefined ? ` <span style="color:var(--muted)">(${Math.round(r.poc_position*100)}% up the base)</span>` : ''}</span>
+        <span>Consol. VAH <b>${fmtLevel(r.consolidation_vah)}</b></span>
+        <span>Consol. VAL <b>${fmtLevel(r.consolidation_val)}</b></span>
+        <span>Target <b>${fmtLevel(r.target)}</b></span>
+        <span>Measured Move <b>${fmtLevel(r.measured_move)}</b></span>
+        <span>Invalidation <b>${fmtLevel(r.invalidation)}</b></span>
+        ${rr ? `<span>R:R <b>${rr}</b></span>` : ''}
+        <span>CVD <b style="color:${r.cvd_supports ? '#22c55e' : '#f97316'}">${r.cvd_direction}</b></span>
+        <span>Timeframe <b>${r.timeframe}</b></span>
+        ` : r.period_unit !== undefined ? `
+        <span>Window <b>${r.lookback_n} × ${r.period_unit}</b> <span style="color:var(--muted)">(${r.duration_source === 'query' ? "from your query's [N]" : 'from Consolidation settings'})</span></span>
+        <span>POC <b>${fmtLevel(r.poc)}</b></span>
+        <span>VAH <b>${fmtLevel(r.vah)}</b></span>
+        <span>VAL <b>${fmtLevel(r.val)}</b></span>
+        <span>Window range <b>${fmtLevel(r.window_low)} – ${fmtLevel(r.window_high)}</b></span>
+        <span>Target <b>${fmtLevel(r.target)}</b></span>
+        <span>Invalidation <b>${fmtLevel(r.invalidation)}</b></span>
+        ${rr ? `<span>R:R <b>${rr}</b></span>` : ''}
+        ` : `
+        <span>POC <b>${fmtLevel(r.poc)}</b></span>
+        <span>VAH <b>${fmtLevel(r.vah)}</b></span>
+        <span>VAL <b>${fmtLevel(r.val)}</b></span>
+        <span>Week POC <b>${fmtLevel(r.week_poc)}</b></span>
+        <span>Month POC <b>${fmtLevel(r.month_poc)}</b></span>
+        <span>Target <b>${fmtLevel(r.target)}</b>${r.target_source ? ` <span style="color:var(--muted)">(${r.target_source})</span>` : ''}</span>
+        <span>Invalidation <b>${fmtLevel(r.invalidation)}</b></span>
+        ${rr ? `<span>R:R <b>${rr}</b></span>` : ''}
+        <span>POC trend <b>${r.poc_trend || 'n/a'}</b></span>
+        `}
+      </div>
+      ${r.action ? `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:8px;border-radius:6px;
+                   background:${r.action.type === 'enter' ? 'rgba(34,197,94,.12)' : r.action.type === 'wait_retest' ? 'rgba(245,158,11,.12)' : 'rgba(148,163,184,.10)'};
+                   border-left:3px solid ${r.action.type === 'enter' ? '#22c55e' : r.action.type === 'wait_retest' ? '#f59e0b' : '#64748b'}">
+        <span style="font-size:13px;font-weight:600;color:${r.action.type === 'enter' ? '#4ade80' : r.action.type === 'wait_retest' ? '#fbbf24' : 'var(--muted)'}">
+          ${r.action.type === 'enter' ? '▶ ENTER' : r.action.type === 'wait_retest' ? '⏳ WAIT' : '— NO EDGE'}
+        </span>
+        <span style="font-size:12px;flex:1">${r.action.message}</span>
+        ${r.action.alert_price != null ? `<button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;white-space:nowrap" onclick='setPriceAlert(${JSON.stringify(r.symbol)}, ${r.action.alert_price}, ${JSON.stringify(r.action.alert_operator)}, this)'>🔔 Set Alert @ ${r.action.alert_price}</button>` : ''}
+      </div>` : ''}
+      <div class="reasons"><ul style="margin:0;padding:0">${(r.reasons||[]).map(x => `<li>${x}</li>`).join("")}</ul></div>
+      ${r.uae_framework && r.uae_framework.available ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">UAE Framework: RSIdiff90 <b style="color:var(--text)">${r.uae_framework.rsidiff90}</b></div>` : ''}
+      ${r.oi_wall && r.oi_wall.available ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">OI Walls: PCR <b style="color:var(--text)">${r.oi_wall.pcr ?? 'n/a'}</b>, gamma wall <b style="color:var(--text)">${r.oi_wall.gamma_wall ?? 'n/a'}</b></div>` : ''}
+      ${r.period_consolidation ? `<div style="font-size:11px;margin-top:2px;color:${r.period_consolidation.passed ? '#22c55e' : '#f59e0b'}">Consolidation check: ${r.period_consolidation.passed ? '✅ passed' : '⚠ not met'} (moved ${r.period_consolidation.total_move_pct != null ? (r.period_consolidation.total_move_pct*100).toFixed(1) + '%' : 'n/a'} total over ${r.period_consolidation.periods_checked} periods)</div>` : ''}
+      ${r.side ? `<div style="margin-top:8px">
+        <button class="confirm-btn" onclick="confirmIntraday('${r.symbol}','${r.side}',this)">📡 Check live order flow (DXLink)</button>
+        <div class="confirm-result" id="confirm-${r.symbol}"></div>
+      </div>` : ''}
+    `;
+    wrap.appendChild(div);
+  });
+}
+
+async function setPriceAlert(symbol, price, operator, btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Setting…";
+  try {
+    const r = await fetch("/watchlists/alerts/rules", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        alert_kind: "price",
+        symbol,
+        price_operator: operator,
+        price_value: price,
+        trigger_mode: "once",
+        notes: "Set from Volume Profile Scanner -- retest level",
+      }),
+    });
+    const d = await r.json();
+    if (d.error) {
+      btn.textContent = "⚠ " + d.error;
+    } else {
+      btn.textContent = "✅ Alert set";
+    }
+  } catch (e) {
+    btn.textContent = "⚠ Failed";
+  }
+  setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 3000);
+}
+
+async function confirmIntraday(symbol, side, btn) {
+  btn.disabled = true;
+  btn.textContent = "Checking...";
+  const target = document.getElementById(`confirm-${symbol}`);
+  try {
+    const r = await fetch(`${API}/api/confirm/${symbol}`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({side}),
+    });
+    const data = await r.json();
+    if (!data.available) {
+      target.innerHTML = `<span style="color:var(--muted)">Not available: ${data.error || 'unknown'}</span>`;
+    } else {
+      const d = data.detail || {};
+      const color = data.supports_thesis ? "#22c55e" : "#f59e0b";
+      const verdict = data.supports_thesis ? "Supports thesis" : "Not confirming yet";
+      target.innerHTML = `<span style="color:${color};font-weight:700">${verdict}</span>
+        <span style="color:var(--muted)"> — rel.vol ${d.rel_vol ?? 'n/a'}x, delta ${d.cvd_direction || 'n/a'}
+        (${d.cumulative_delta ?? 'n/a'}), ${d.bars_used ?? 0} bars</span>`;
+    }
+  } catch (e) {
+    target.innerHTML = `<span style="color:#ef4444">Check failed: ${e}</span>`;
+  }
+  btn.disabled = false;
+  btn.textContent = "📡 Check live order flow (DXLink)";
+}
+
+async function runScan() {
+  const watchlist_id = document.getElementById("wl-select").value || null;
+  const min_score = parseFloat(document.getElementById("min-score").value || 0);
+  const use_cache = document.getElementById("use-cache").value === "1";
+  const mode = document.getElementById("trigger-mode").value;
+  const check_oi_walls = document.getElementById("check-oi-walls").checked;
+  const check_uae_framework = document.getElementById("check-uae-framework").checked;
+  const check_period_consolidation = document.getElementById("check-period-consolidation").checked;
+  const consolidation_period_unit = document.getElementById("consolidation-unit").value;
+  const consolidation_lookback_n = parseInt(document.getElementById("consolidation-n").value || 4);
+  const consolidation_max_change_pct = parseFloat(document.getElementById("consolidation-max-pct").value || 5) / 100;
+  const statusEl = document.getElementById("scan-status");
+  statusEl.innerHTML = '<span class="spinner"></span> Scanning...';
+  try {
+    let url, body;
+    const params = {
+      min_score, check_oi_walls, check_uae_framework,
+      check_period_consolidation, consolidation_period_unit, consolidation_lookback_n, consolidation_max_change_pct,
+    };
+    if (mode === "sr") {
+      const timeframe = document.getElementById("sr-timeframe").value;
+      url = `${API}/api/scan-sr`;
+      body = { watchlist_id, use_cache, timeframe, params };
+    } else if (mode === "query") {
+      const query_text = document.getElementById("custom-query-text").value.trim();
+      if (!query_text) {
+        statusEl.textContent = "Enter a query first.";
+        return;
+      }
+      saveLastQuery();
+      url = `${API}/api/scan-query`;
+      body = { watchlist_id, query_text, params };
+    } else {
+      url = `${API}/api/scan`;
+      body = { watchlist_id, use_cache, params };
+    }
+    const r = await fetch(url, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (data.error) {
+      statusEl.textContent = "⚠ " + data.error;
+      return;
+    }
+    renderResults(data.results || [], data.source || "live");
+    statusEl.textContent = `Done — ${data.count} match(es)${data.source ? ', source: ' + data.source : ''}.`;
+  } catch (e) {
+    statusEl.textContent = "Scan failed: " + e;
+  }
+}
+
+document.getElementById("btn-run-scan").addEventListener("click", runScan);
+document.getElementById("check-period-consolidation").addEventListener("change", (e) => {
+  document.getElementById("consolidation-params-wrap").style.display = e.target.checked ? "block" : "none";
+});
+document.getElementById("trigger-mode").addEventListener("change", (e) => {
+  document.getElementById("sr-timeframe-wrap").style.display = e.target.value === "sr" ? "block" : "none";
+  document.getElementById("query-wrap").style.display = e.target.value === "query" ? "block" : "none";
+});
+
+(async function init() {
+  await loadWatchlists();
+})();
+</script>
+</body>
+</html>

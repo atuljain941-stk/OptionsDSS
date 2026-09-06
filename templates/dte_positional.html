@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>0-10 DTE Positional Trend</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root {
+      --dte-bg:#0f1424; --dte-panel:#1b2235; --dte-border:rgba(148,163,184,.16);
+      --dte-text:#e5eefc; --dte-muted:#7b8ab5; --dte-accent:#7c9df8;
+      --dte-good:#22c55e; --dte-warn:#f59e0b; --dte-bad:#ef4444;
+    }
+    html,body{height:100%;}
+    body{margin:0;background:linear-gradient(180deg,#0c1120 0%,#0f1424 100%);color:var(--dte-text);
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;}
+    *{box-sizing:border-box;}
+    .dte-shell{min-height:100vh;padding:16px;max-width:1400px;margin:0 auto;}
+    .dte-top{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;
+      background:rgba(28,36,56,.88);border:1px solid var(--dte-border);border-radius:14px;padding:12px 14px;margin-bottom:12px;}
+    .dte-brand{font-weight:900;font-size:19px;}
+    .dte-sub{color:var(--dte-muted);font-size:12.5px;margin-top:2px;}
+    .dte-nav a{color:var(--dte-accent);text-decoration:none;font-size:13px;margin-right:14px;}
+    .dte-btn{cursor:pointer;border-radius:10px;border:1px solid var(--dte-border);
+      background:linear-gradient(180deg,rgba(124,157,248,.32),rgba(124,157,248,.16));
+      color:var(--dte-text);padding:9px 14px;font-weight:700;font-size:13px;}
+    .dte-btn:hover{filter:brightness(1.1);}
+    .dte-btn:disabled{opacity:.5;cursor:default;}
+    .dte-tabs{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;}
+    .dte-tab{padding:8px 14px;border-radius:10px;border:1px solid var(--dte-border);
+      background:rgba(20,26,42,.7);cursor:pointer;font-weight:700;font-size:13px;color:var(--dte-muted);}
+    .dte-tab.active{background:linear-gradient(180deg,rgba(124,157,248,.4),rgba(124,157,248,.2));color:var(--dte-text);}
+    .dte-panel{background:rgba(20,26,42,.75);border:1px solid var(--dte-border);border-radius:14px;
+      padding:14px;margin-bottom:14px;overflow-x:auto;}
+    .dte-context{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:14px;}
+    .ctx-card{background:rgba(20,26,42,.75);border:1px solid var(--dte-border);border-radius:12px;padding:12px 14px;}
+    .ctx-label{color:var(--dte-muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;}
+    .ctx-val{font-size:20px;font-weight:800;}
+    .ctx-sub{color:var(--dte-muted);font-size:12px;margin-top:4px;}
+    table{width:100%;border-collapse:collapse;font-size:13px;}
+    th{text-align:right;padding:7px 10px;color:var(--dte-muted);font-weight:700;font-size:11.5px;
+      text-transform:uppercase;letter-spacing:.03em;border-bottom:1px solid var(--dte-border);}
+    th:first-child,th:nth-child(2),th:nth-child(3){text-align:left;}
+    td{padding:7px 10px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08);}
+    td:first-child,td:nth-child(2),td:nth-child(3){text-align:left;}
+    .chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;}
+    .chip.dte{background:rgba(124,157,248,.16);color:var(--dte-accent);}
+    .chip.buildup{background:rgba(34,197,94,.18);color:var(--dte-good);}
+    .chip.unwind{background:rgba(239,68,68,.18);color:var(--dte-bad);}
+    .chip.spike{background:rgba(245,158,11,.18);color:var(--dte-warn);}
+    .chip.flat, .chip.low_oi{background:rgba(148,163,184,.14);color:var(--dte-muted);}
+    .empty{color:var(--dte-muted);padding:20px;text-align:center;}
+    .updated{color:var(--dte-muted);font-size:12px;}
+  </style>
+</head>
+<body>
+<div class="dte-shell">
+  <div class="dte-top">
+    <div>
+      <div class="dte-brand">0-10 DTE Positional / Weekly OI Trend</div>
+      <div class="dte-sub">Rolling 5-day OI slope by strike, anchored to expiries currently inside the 0-10 DTE window. Recomputed nightly (7:30 AM pipeline) since real OI only settles once a day.</div>
+      <div class="dte-nav" style="margin-top:8px;"><a href="/dte/merged">&rarr; New merged Trading View page</a></div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <span id="updatedAt" class="updated"></span>
+      <button class="dte-btn" id="refreshBtn" onclick="refreshNow()">Refresh Now</button>
+    </div>
+  </div>
+
+  <div class="dte-context" id="contextCards"></div>
+
+  <div class="dte-tabs" id="tabs"></div>
+  <div class="dte-panel">
+    <div id="tableWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+</div>
+
+<script>
+const SYMBOLS = {{ symbols|tojson }};
+let activeSymbol = SYMBOLS[0];
+
+function renderTabs(){
+  const wrap = document.getElementById('tabs');
+  wrap.innerHTML = SYMBOLS.map(s =>
+    `<div class="dte-tab ${s===activeSymbol?'active':''}" onclick="setSymbol('${s}')">${s}</div>`
+  ).join('');
+}
+function setSymbol(s){ activeSymbol = s; renderTabs(); loadData(); }
+
+function fmtNum(n){ if(n===null||n===undefined) return '&mdash;'; return Number(n).toLocaleString(); }
+function labelChip(label){
+  const map = {sustained_buildup:'buildup', sustained_unwind:'unwind', one_day_spike:'spike', flat:'flat', low_oi:'low_oi'};
+  const cls = map[label] || 'flat';
+  const text = (label || '').replace(/_/g,' ');
+  return `<span class="chip ${cls}">${text}</span>`;
+}
+
+function renderContext(vixSkew, futures){
+  const wrap = document.getElementById('contextCards');
+  let cards = [];
+  if(vixSkew){
+    cards.push(`<div class="ctx-card"><div class="ctx-label">VIX / VIX9D</div>
+      <div class="ctx-val">${vixSkew.vix ?? '&mdash;'} / ${vixSkew.vix9d ?? '&mdash;'}</div>
+      <div class="ctx-sub">Term structure: ${vixSkew.term_structure ?? '&mdash;'} ${vixSkew.term_structure && vixSkew.term_structure > 1 ? '(near-term stress)' : ''}</div></div>`);
+    if(vixSkew.spx_skew){
+      const sk = vixSkew.spx_skew;
+      cards.push(`<div class="ctx-card"><div class="ctx-label">SPX Near-Dated Skew (${sk.expiration})</div>
+        <div class="ctx-val">${sk.skew_pts} pts</div>
+        <div class="ctx-sub">Put IV ${(sk.put_iv*100).toFixed(1)}% @ ${sk.put_strike} vs Call IV ${(sk.call_iv*100).toFixed(1)}% @ ${sk.call_strike} (~5% OTM proxy)</div></div>`);
+    }
+  }
+  if(futures && futures.contracts && futures.contracts.length){
+    const rows = futures.contracts.map(c => `${c.symbol||c.contract||''}: OI ${fmtNum((c.oi_series && Object.values(c.oi_series).pop()) || c.oi)}`).join('<br>');
+    cards.push(`<div class="ctx-card"><div class="ctx-label">ES Futures OI (current + next 3)</div>
+      <div class="ctx-sub" style="margin-top:0;">${rows || 'no data'}</div></div>`);
+  }
+  wrap.innerHTML = cards.join('');
+}
+
+async function loadData(){
+  const wrap = document.getElementById('tableWrap');
+  wrap.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try{
+    const res = await fetch(`/api/dte/positional_data?symbol=${activeSymbol}`);
+    const data = await res.json();
+    renderContext(data.vix_skew, data.futures);
+    if(!data.ok || !data.rows.length){
+      wrap.innerHTML = '<div class="empty">No cached trend yet for ' + activeSymbol + '. Click Refresh Now, or wait for tomorrow\'s 7:30 AM pipeline run.</div>';
+      return;
+    }
+    let rows = data.rows;
+    let updated = rows.reduce((a,r)=> r.updated_at > a ? r.updated_at : a, '');
+    document.getElementById('updatedAt').textContent = 'Cache updated: ' + updated;
+    let html = '<table><thead><tr>' +
+      '<th>Type</th><th>Expiry</th><th>DTE</th><th>Strike</th><th>OI Today</th>' +
+      '<th>&Delta;OI (1d)</th><th>Slope/day (5d)</th><th>Trend</th>' +
+      '</tr></thead><tbody>';
+    for(const r of rows){
+      html += `<tr>` +
+        `<td>${r.type}</td><td>${r.expiration}</td>` +
+        `<td><span class="chip dte">${r.dte}d</span></td>` +
+        `<td>${r.strike}</td><td>${fmtNum(r.oi_today)}</td>` +
+        `<td>${r.oi_change_1d > 0 ? '+' : ''}${fmtNum(r.oi_change_1d)}</td>` +
+        `<td>${r.slope_per_day > 0 ? '+' : ''}${r.slope_per_day}</td>` +
+        `<td>${labelChip(r.trend_label)}</td>` +
+        `</tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }catch(e){
+    wrap.innerHTML = '<div class="empty">Failed to load: ' + e + '</div>';
+  }
+}
+
+async function refreshNow(){
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true; btn.textContent = 'Refreshing\u2026';
+  try{
+    await fetch('/api/dte/refresh?scope=full', {method:'POST'});
+    await loadData();
+  }catch(e){ alert('Refresh failed: ' + e); }
+  finally{ btn.disabled = false; btn.textContent = 'Refresh Now'; }
+}
+
+renderTabs();
+loadData();
+</script>
+</body>
+</html>

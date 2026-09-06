@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Strategy Analyzer</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f8f9fa;
+        color: #111;
+        margin: 20px;
+      }
+      label {
+        display: block;
+        font-weight: bold;
+        margin-top: 10px;
+      }
+      input,
+      select {
+        width: 200px;
+        padding: 5px;
+      }
+      button {
+        margin-top: 20px;
+        padding: 6px 12px;
+      }
+      #strategy-result {
+        margin-top: 20px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        background: #fff;
+      }
+      table,
+      th,
+      td {
+        border: 1px solid #444;
+        padding: 6px;
+      }
+      th {
+        background: #eee;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h3>Options Strategy Analyzer</h3>
+
+    <div>
+      <label>Symbol:</label>
+      <input id="sym" value="SPY" />
+
+      <label>Expiration:</label>
+      <select id="exp">
+        <option>Loading...</option>
+      </select>
+
+      <label>Spot Price:</label>
+      <input id="spot" readonly />
+
+      <br />
+      <button onclick="runStrategy()">Analyze</button>
+    </div>
+    <hr />
+    <h4>🦅 Iron Condor Finder</h4>
+    <p>
+      Scan all symbols for balanced OI clusters (good for Iron Condor setup).
+    </p>
+    <div>
+      <label for="condor-exp">Expiration:</label>
+      <select id="condor-exp">
+        <option value="">Select...</option>
+      </select>
+      <button onclick="runCondorFinder()">Find Candidates</button>
+    </div>
+
+    <div id="condor-results" style="margin-top: 10px"></div>
+    <hr />
+
+    <div id="strategy-result"></div>
+    <hr />
+    <h4>🎯 High OI Strike Proximity Scanner</h4>
+    <p>
+      Find stocks trading near highest Put or Call Open Interest (support /
+      resistance).
+    </p>
+
+    <div>
+      <label for="oi-exp">Expiration:</label>
+      <select id="oi-exp">
+        <option value="">Select...</option>
+      </select>
+
+      <label for="strike-distance">Strike Distance:</label>
+      <input id="strike-distance" type="number" value="1" min="1" max="5" />
+      <div style="margin-top: 8px">
+        <label>
+          <input type="checkbox" id="filter-bullish" checked />
+          Bullish (Near Put OI)
+        </label>
+
+        <label style="margin-left: 10px">
+          <input type="checkbox" id="filter-bearish" checked />
+          Bearish (Near Call OI)
+        </label>
+
+        <label style="margin-left: 10px">
+          <input type="checkbox" id="filter-range" checked />
+          Range / Pinned
+        </label>
+      </div>
+
+      <button onclick="runHighOIScanner()">Scan</button>
+    </div>
+
+    <div id="oi-results" style="margin-top: 10px"></div>
+
+    <script>
+      console.log("✅ Strategy script loaded");
+
+      // Populate expirations when symbol changes
+      document
+        .getElementById("sym")
+        .addEventListener("change", async function () {
+          const symbol = this.value.trim().toUpperCase();
+          if (!symbol) return;
+          const expSelect = document.getElementById("exp");
+          expSelect.innerHTML = "<option>Loading...</option>";
+          try {
+            const r = await fetch(`/api/expirations?symbol=${symbol}`);
+            let data = await r.json();
+            if (data && data.expirations) data = data.expirations;
+            if (!Array.isArray(data) || data.length === 0) {
+              expSelect.innerHTML = "<option>No expirations found</option>";
+              return;
+            }
+            expSelect.innerHTML = data
+              .map((e) => `<option value="${e}">${e}</option>`)
+              .join("");
+          } catch (err) {
+            expSelect.innerHTML = `<option>Error</option>`;
+          }
+          getSpot(symbol);
+        });
+
+      // Fetch spot price
+      async function getSpot(symbol) {
+        const box = document.getElementById("spot");
+        box.value = "Loading...";
+        try {
+          const r = await fetch(`/api/spot?symbol=${symbol}`);
+          const d = await r.json();
+          if (d && d.spot) box.value = d.spot.toFixed(2);
+          else if (typeof d === "number") box.value = d.toFixed(2);
+          else box.value = "—";
+        } catch {
+          box.value = "Error";
+        }
+      }
+
+      // Run strategy analysis
+      async function runStrategy() {
+        const s = document.getElementById("sym").value.trim().toUpperCase();
+        const e = document.getElementById("exp").value.trim();
+        const p = parseFloat(document.getElementById("spot").value);
+        const div = document.getElementById("strategy-result");
+        if (!s || !e || !p) {
+          div.innerHTML =
+            "<p style='color:red'>Enter symbol and wait for spot/expirations to load.</p>";
+          return;
+        }
+
+        div.innerHTML = "<p><b>Analyzing...</b></p>";
+        try {
+          const r = await fetch(
+            `/strategy/analyze?symbol=${s}&expiry=${e}&spot=${p}`
+          );
+          const data = await r.json();
+          console.log("Strategy API response:", data);
+          if (data.error) {
+            div.innerHTML = `<p style='color:red'>${data.error}</p>`;
+            return;
+          }
+
+          let html = `<h4>${data.symbol} – ${data.expiry} – Spot ${
+            data.spot
+          }</h4>
+                      <p>Snapshot Date: ${data.snapshot || "n/a"}</p>`;
+
+          if (
+            Array.isArray(data.pcr_by_expiration) &&
+            data.pcr_by_expiration.length
+          ) {
+            html += `<h5>PCR Across Expirations</h5>
+                     <table><thead><tr><th>Expiration</th><th>PCR</th><th>Puts</th><th>Calls</th></tr></thead><tbody>`;
+            data.pcr_by_expiration.forEach((x) => {
+              html += `<tr ${
+                x.expiration === data.expiry ? "style='font-weight:600'" : ""
+              }>
+                        <td>${x.expiration}</td>
+                        <td>${x.pcr ?? "—"}</td>
+                        <td>${x.put_oi}</td>
+                        <td>${x.call_oi}</td>
+                       </tr>`;
+            });
+            html += "</tbody></table>";
+          }
+
+          html += `<h5>Suggested Strategies</h5>
+                   <table><thead><tr><th>Strategy</th><th>Legs</th><th>Rationale</th></tr></thead><tbody>`;
+          (data.strategies || []).forEach((st) => {
+            html += `<tr><td><b>${st.name}</b></td><td>${st.legs}</td><td>${st.logic}</td></tr>`;
+          });
+          html += "</tbody></table>";
+
+          div.innerHTML = html;
+        } catch (err) {
+          div.innerHTML = `<p style='color:red'>${err}</p>`;
+        }
+      }
+
+      // Load SPY data initially
+      window.addEventListener("DOMContentLoaded", () => {
+        document.getElementById("sym").dispatchEvent(new Event("change"));
+      });
+      // ========== Populate condor-exp dropdown same as normal exp ==========
+      async function populateCondorExp() {
+        const symbol = document
+          .getElementById("sym")
+          .value.trim()
+          .toUpperCase();
+        if (!symbol) return;
+        const sel = document.getElementById("condor-exp");
+        sel.innerHTML = "<option>Loading...</option>";
+        try {
+          const r = await fetch(`/api/expirations?symbol=${symbol}`);
+          let data = await r.json();
+          if (data && data.expirations) data = data.expirations;
+          if (!Array.isArray(data) || data.length === 0) {
+            sel.innerHTML = "<option>No expirations found</option>";
+            return;
+          }
+          sel.innerHTML = data
+            .map((e) => `<option value="${e}">${e}</option>`)
+            .join("");
+        } catch {
+          sel.innerHTML = "<option>Error</option>";
+        }
+      }
+      // ========== Populate High OI Exp dropdown ==========
+      async function populateOiExp() {
+        const symbol = document
+          .getElementById("sym")
+          .value.trim()
+          .toUpperCase();
+        if (!symbol) return;
+
+        const sel = document.getElementById("oi-exp");
+        sel.innerHTML = "<option>Loading...</option>";
+
+        try {
+          const r = await fetch(`/api/expirations?symbol=${symbol}`);
+          let data = await r.json();
+          if (data && data.expirations) data = data.expirations;
+
+          if (!Array.isArray(data) || data.length === 0) {
+            sel.innerHTML = "<option>No expirations</option>";
+            return;
+          }
+
+          sel.innerHTML = data
+            .map((e) => `<option value="${e}">${e}</option>`)
+            .join("");
+        } catch {
+          sel.innerHTML = "<option>Error</option>";
+        }
+      }
+
+      // ========== Iron Condor Finder ==========
+      async function runCondorFinder() {
+        const exp = document.getElementById("condor-exp").value;
+        if (!exp) {
+          alert("Select expiration first");
+          return;
+        }
+        const div = document.getElementById("condor-results");
+        div.innerHTML = `<p>Scanning for ${exp} ...</p>`;
+        try {
+          const r = await fetch(`/strategy/scan_condors?expiry=${exp}`);
+          const data = await r.json();
+          if (!data || data.length === 0) {
+            div.innerHTML = "<p>No condor candidates found.</p>";
+            return;
+          }
+          let html = `<table>
+          <thead><tr>
+            <th>Symbol</th>
+            <th>Current Price</th>
+            <th>High Put Strike</th>
+            <th>High Call Strike</th>
+            <th>Total OI Near Spot</th>
+            <th>Symmetry</th>
+            <th>Rationale</th>
+          </tr></thead><tbody>`;
+
+          data.forEach((d) => {
+            const dashUrl = `/?symbol=${d.symbol}&expiry=${d.expiration}`;
+            html += `<tr>
+                <td><a href="${dashUrl}" target="_blank">${d.symbol}</a></td>
+              <td>${d.current_price}</td>
+              <td>${d.highest_put_strike}</td>
+              <td>${d.highest_call_strike}</td>
+              <td>${d.total_oi_near_spot}</td>
+              <td>${d.symmetry}</td>
+              <td>${d.rationale}</td>
+            </tr>`;
+          });
+          html += "</tbody></table>";
+          div.innerHTML = html;
+        } catch (err) {
+          div.innerHTML = `<p style='color:red'>${err}</p>`;
+        }
+      }
+      // ========== High OI Strike Scanner ==========
+      async function runHighOIScanner() {
+        const exp = document.getElementById("oi-exp").value;
+        const dist = document.getElementById("strike-distance").value || 1;
+        const div = document.getElementById("oi-results");
+
+        const showBullish = document.getElementById("filter-bullish").checked;
+        const showBearish = document.getElementById("filter-bearish").checked;
+        const showRange = document.getElementById("filter-range").checked;
+
+        if (!exp) {
+          alert("Select expiration first");
+          return;
+        }
+
+        div.innerHTML = `<p>Scanning ${exp} ...</p>`;
+
+        try {
+          const r = await fetch(
+            `/strategy/scan_verticals?expiry=${exp}&distance=${dist}`
+          );
+          let data = await r.json();
+
+          if (!Array.isArray(data) || data.length === 0) {
+            div.innerHTML = "<p>No candidates found.</p>";
+            return;
+          }
+
+          // ========== APPLY BIAS FILTER ==========
+          data = data.filter((d) => {
+            if (d.bias === "Bullish / Support" && showBullish) return true;
+            if (d.bias === "Bearish / Resistance" && showBearish) return true;
+            if (d.bias === "Pinned / Range-bound" && showRange) return true;
+            return false;
+          });
+
+          if (data.length === 0) {
+            div.innerHTML =
+              "<p>No results match the selected bias filters.</p>";
+            return;
+          }
+
+          let html = `<table>
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Spot</th>
+          <th>High Put</th>
+          <th>High Call</th>
+          <th>Near Put</th>
+          <th>Near Call</th>
+          <th>Bias</th>
+          <th>Rationale</th>
+        </tr>
+      </thead>
+      <tbody>`;
+
+          data.forEach((d) => {
+            const dashUrl = `/?symbol=${d.symbol}&expiry=${d.expiration}`;
+            html += `<tr>
+        <td><a href="${dashUrl}" target="_blank">${d.symbol}</a></td>
+        <td>${d.spot}</td>
+        <td>${d.high_put_strike}</td>
+        <td>${d.high_call_strike}</td>
+        <td>${d.near_high_put ? "✅" : "—"}</td>
+        <td>${d.near_high_call ? "✅" : "—"}</td>
+        <td><b>${d.bias}</b></td>
+        <td>${d.rationale}</td>
+      </tr>`;
+          });
+
+          html += "</tbody></table>";
+          div.innerHTML = html;
+        } catch (err) {
+          div.innerHTML = `<p style="color:red">${err}</p>`;
+        }
+      }
+
+      // Auto-populate condor dropdown when page loads
+      window.addEventListener("DOMContentLoaded", () => {
+        document.getElementById("sym").dispatchEvent(new Event("change"));
+        populateCondorExp();
+        populateOiExp();
+      });
+
+      document.getElementById("sym").addEventListener("change", function () {
+        populateCondorExp();
+        populateOiExp();
+      });
+    </script>
+    <script src="/static/panel_tools.js"></script>
+</body>
+</html>

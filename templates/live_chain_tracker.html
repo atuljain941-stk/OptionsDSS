@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Live Chain Tracker</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1700px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:900px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:16px}
+    .card h2{margin:0 0 10px;font-size:15px;font-weight:900}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+    .btn{padding:8px 14px;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:12px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-ghost{background:rgba(255,255,255,.05);color:var(--text,var(--text2));border:1px solid var(--border,var(--border2))}
+    select,input[type=number]{padding:7px 10px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:8px;font-size:12px}
+    .status-msg{font-size:12px;margin-left:4px}
+    .status-ok{color:#4ade80}.status-err{color:#f87171}
+    table.dt{width:100%;border-collapse:collapse;font-size:12px}
+    table.dt th,table.dt td{padding:7px 9px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left}
+    table.dt th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase}
+    .ratio-hot{color:#f87171;font-weight:800}
+    .rec-card{border-left:4px solid #6366f1;background:rgba(255,255,255,.03);border-radius:8px;padding:11px 13px;margin-bottom:8px}
+    .rec-card.conf-high{border-left-color:#4ade80}
+    .rec-card.conf-med{border-left-color:#fbbf24}
+    .rec-conf-badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:800;background:rgba(255,255,255,.08)}
+    .rec-conf-badge.conf-high{background:#22c55e22;color:#4ade80}
+    .rec-conf-badge.conf-med{background:#f59e0b22;color:#fbbf24}
+    .muted{color:var(--muted,var(--muted2))}
+    .disclaimer{font-size:11px;color:#fbbf24;margin-top:10px;line-height:1.5}
+    .two-col{display:flex;gap:14px;align-items:stretch;flex-wrap:wrap}
+    .two-col>.card{flex:1;min-width:420px}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>📡 Live Chain Tracker</h1>
+    <p>Every capture snapshots the full options chain's Greeks + volume per strike, plus the corresponding futures contract's live price at that same moment — so unusual volume at a strike can be checked against what price actually did afterward, not just observed on its own. Snapshots are taken on a schedule (default 5 min), not continuously streamed — see the note on the Capture button.</p>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <select id="symbol-select" onchange="loadAll()">
+        <option value="SPY">SPY (→ /ES)</option>
+        <option value="QQQ">QQQ (→ /NQ)</option>
+        <option value="IWM">IWM (→ /RTY)</option>
+      </select>
+      <button class="btn btn-primary" onclick="captureNow()">⚡ Capture Now</button>
+      <span class="muted" style="font-size:11px"># Strikes/side</span>
+      <input type="number" id="strikes-input" min="3" max="100" value="12" style="width:55px" title="Limits both what gets subscribed live and what's charted, to this many strikes above and below spot. Default 12 based on typical daily move being ~7-8 points."/>
+      <span class="muted" style="font-size:11px">Background auto-capture every</span>
+      <input type="number" id="interval-input" min="1" max="60" value="5" style="width:55px"/>
+      <span class="muted" style="font-size:11px">min</span>
+      <button class="btn btn-ghost" onclick="saveInterval()">Set</button>
+      <button class="btn btn-ghost" onclick="loadAll()">↺ Refresh</button>
+      <span id="status" class="status-msg"></span>
+    </div>
+  </div>
+
+  <div class="card" style="border-color:#4f46e5;background:rgba(79,70,229,.06)">
+    <h2>🎯 Trade Recommendations</h2>
+    <div class="muted" style="font-size:11.5px;margin-bottom:8px">Cross-references GEX Trend Tracker's Key Levels against this page's live unusual-volume and vega signals — only shows a level here if it has at least one LIVE confirmation today, not every GEX level. A level with no confirmation isn't wrong, it just doesn't have same-day evidence backing it yet.</div>
+    <div id="recommendations-body"><div class="spinner"></div> Loading...</div>
+  </div>
+
+  <div class="two-col">
+  <div class="card">
+    <h2>Unusual volume</h2>
+    <div class="muted" style="font-size:11.5px;margin-bottom:8px">Strikes where volume in the latest capture is 3x+ that strike's own average across earlier captures today — a relative-to-itself spike detector. Future-price-move shows what price has done since the first capture, so you can see if it's already reacted.</div>
+    <div id="unusual-volume-body"><div class="spinner"></div> Loading...</div>
+  </div>
+
+  <div class="card">
+    <h2>Early institutional footprint (first 2 hrs)</h2>
+    <div class="muted" style="font-size:11.5px;margin-bottom:8px">Different signal than Unusual Volume — a single LARGE print (50+ contracts, one execution), not aggregate volume. 500 contracts from one block print reads very differently than 500 contracts from 500 retail 1-lots.</div>
+    <div id="early-footprint-body"><div class="spinner"></div> Loading...</div>
+  </div>
+  </div>
+
+  <div class="card">
+    <h2>Delta & Gamma by strike — Call vs Put (latest capture)</h2>
+    <div class="muted" style="font-size:11.5px;margin-bottom:8px">Delta (light, natural sign — call above zero, put below) is the skew shape itself. Gamma (darker, same color family, right-hand scale) is mechanical dealer-hedging pressure, always positive for both sides. Layered so gamma reads as sitting "on top of" delta rather than an unrelated series. Vega dropped from this view — same info lives in the Call vs Put IV Skew chart below.</div>
+    <div class="muted" style="font-size:10.5px;margin-bottom:8px">🔵 light = call delta · 🔷 dark = call gamma &nbsp;&nbsp; 🟢 light = put delta · 🟩 dark = put gamma</div>
+    <div id="gamma-vega-chart" style="height:420px"></div>
+  </div>
+
+  <div class="two-col">
+  <div class="card">
+    <h2>Volume by strike</h2>
+    <div class="muted" style="font-size:11.5px;margin-bottom:8px">Call volume above zero, put volume below, so both sides stay visible without one hiding the other. Full picture behind the Unusual Volume table above.</div>
+    <div id="volume-chart" style="height:380px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Call vs Put IV Skew</h2>
+    <div class="muted" style="font-size:11.5px;margin-bottom:8px">The volatility-surface slice — split by side, since one blended average hides which side actually carries elevated IV. Steep put-side rise = classic "downside protection is expensive" read.</div>
+    <div id="skew-chart" style="height:380px"></div>
+  </div>
+  </div>
+</div>
+
+<script>
+async function captureNow() {
+  const status = document.getElementById("status");
+  const symbol = document.getElementById("symbol-select").value;
+  const strikesEachSide = document.getElementById("strikes-input").value || 12;
+  status.innerHTML = '<span class="spinner"></span> Capturing (this opens a live streaming session, ~15s)...';
+  status.className = "status-msg";
+  try {
+    const resp = await fetch(`/live-chain/api/capture_now?symbol=${symbol}&strikes_each_side=${strikesEachSide}`, { method: "POST" });
+    const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "Capture failed");
+    status.textContent = `✓ Captured ${d.rows_stored} strikes for ${d.expiry}, future @ ${d.future_price ?? "—"}`;
+    status.className = "status-msg status-ok";
+    await loadAll();
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+    status.className = "status-msg status-err";
+  }
+}
+
+async function saveInterval() {
+  const status = document.getElementById("status");
+  const minutes = parseFloat(document.getElementById("interval-input").value) || 5;
+  try {
+    const resp = await fetch("/live-chain/api/interval", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ minutes }),
+    });
+    const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "Failed to save interval");
+    status.textContent = `✓ Auto-capture set to every ${minutes} min`;
+    status.className = "status-msg status-ok";
+    _restartAutoRefresh(minutes);
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+    status.className = "status-msg status-err";
+  }
+}
+
+// No client-side auto-refresh existed at all -- the background capture
+// job runs on its own schedule regardless of whether this tab is open,
+// but an already-open tab never re-fetched to show what it captured.
+// Re-loads everything (recommendations, tables, charts) on the same
+// interval configured above, so an open tab actually reflects new
+// captures without a manual reload.
+let _autoRefreshTimer = null;
+function _restartAutoRefresh(minutes) {
+  if (_autoRefreshTimer) clearInterval(_autoRefreshTimer);
+  const ms = Math.max(1, minutes) * 60000;
+  _autoRefreshTimer = setInterval(loadAll, ms);
+}
+
+async function loadInterval() {
+  try {
+    const resp = await fetch("/live-chain/api/interval");
+    const d = await resp.json();
+    if (d.ok && d.interval_min) document.getElementById("interval-input").value = d.interval_min;
+  } catch (e) { /* non-fatal */ }
+}
+
+function renderPeakZone(pz) {
+  const confirmed = !!pz.early_footprint_confirmed;
+  const borderColor = confirmed ? "#f472b6" : "#a855f7";
+  const bg = confirmed ? "rgba(244,114,182,.1)" : "rgba(168,85,247,.08)";
+  const badge = confirmed
+    ? `<span class="rec-conf-badge" style="background:#f472b622;color:#f472b6">✓ same-day print confirmed</span>`
+    : "";
+  return `<div class="rec-card" style="border-left-color:${borderColor};background:${bg};margin-top:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+        <b>⚡ Peak Gamma Zone — spot is AT a large pre-existing ${pz.side} strike</b>
+        ${badge}
+      </div>
+      <div style="font-size:12.5px;line-height:1.6">${pz.note}</div>
+    </div>`;
+}
+
+async function loadRecommendations() {
+  const symbol = document.getElementById("symbol-select").value;
+  const el = document.getElementById("recommendations-body");
+  el.innerHTML = '<div class="spinner"></div> Loading...';
+  try {
+    const resp = await fetch(`/live-chain/api/recommendations?symbol=${symbol}`);
+    const d = await resp.json();
+    if (!d.ok) {
+      el.innerHTML = `<div class="muted">${d.error || "No data yet"}</div>`;
+      return;
+    }
+    if (!d.recommendations || !d.recommendations.length) {
+      const combined0 = d.combined_conviction;
+      const combinedHtml0 = combined0
+        ? `<div class="rec-card" style="border-left-color:${combined0.agreement ? '#4ade80' : '#fbbf24'};background:${combined0.agreement ? 'rgba(74,222,128,.1)' : 'rgba(251,191,36,.1)'}">
+             <b>${combined0.agreement ? '✓✓ Combined Conviction — Footprint + Gamma Profile Agree' : '⚠ Combined Read — Footprint vs Gamma Profile Disagree'}</b>
+             <div style="font-size:12.5px;line-height:1.6;margin-top:6px">${combined0.text}</div>
+           </div>`
+        : "";
+      const peakOnly = (d.peak_gamma_zone ? renderPeakZone(d.peak_gamma_zone) : "") + combinedHtml0;
+      el.innerHTML = peakOnly || `<div class="muted">No GEX level has a live confirmation yet today for ${d.underlying} (spot ${d.spot ?? "—"}, regime ${d.regime ?? "—"}). Run a few more captures through the session, or check GEX Trend Tracker directly for the unconfirmed levels.</div>`;
+      return;
+    }
+    const rows = d.recommendations.map(r => {
+      const confClass = r.confidence >= 70 ? "conf-high" : r.confidence >= 45 ? "conf-med" : "";
+      return `
+        <div class="rec-card ${confClass}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+            <b>${r.label} — $${r.price.toFixed(2)}</b>
+            <span class="rec-conf-badge ${confClass}">${r.confidence}% · ${r.distance_pct > 0 ? "+" : ""}${r.distance_pct}% from spot</span>
+          </div>
+          <div style="font-size:12.5px;line-height:1.5">${r.text}</div>
+        </div>`;
+    }).join("");
+    const planHtml = d.primary_plan_trigger
+      ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08);font-size:12px"><b>GEX Trend Tracker's current plan (${d.primary_plan_direction || ""}):</b> ${d.primary_plan_trigger}</div>`
+      : "";
+    const peakZoneHtml = d.peak_gamma_zone ? renderPeakZone(d.peak_gamma_zone) : "";
+    const combined = d.combined_conviction;
+    const combinedHtml = combined
+      ? `<div class="rec-card" style="border-left-color:${combined.agreement ? '#4ade80' : '#fbbf24'};background:${combined.agreement ? 'rgba(74,222,128,.1)' : 'rgba(251,191,36,.1)'};margin-top:10px">
+           <b>${combined.agreement ? '✓✓ Combined Conviction — Footprint + Gamma Profile Agree' : '⚠ Combined Read — Footprint vs Gamma Profile Disagree'}</b>
+           <div style="font-size:12.5px;line-height:1.6;margin-top:6px">${combined.text}</div>
+         </div>`
+      : "";
+    el.innerHTML = `${rows}${peakZoneHtml}${combinedHtml}${planHtml}<div class="disclaimer">⚠️ ${d.disclaimer}</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="status-err">Error: ${e.message}</div>`;
+  }
+}
+
+async function loadUnusualVolume() {
+  const symbol = document.getElementById("symbol-select").value;
+  const el = document.getElementById("unusual-volume-body");
+  el.innerHTML = '<div class="spinner"></div> Loading...';
+  try {
+    const resp = await fetch(`/live-chain/api/unusual_volume?symbol=${symbol}`);
+    const d = await resp.json();
+    if (!d.ok) {
+      el.innerHTML = `<div class="muted">${d.error || "No data yet"}</div>`;
+      return;
+    }
+    if (!d.flagged || !d.flagged.length) {
+      el.innerHTML = `<div class="muted">No unusual volume flagged in the latest capture (${d.captures_count} captures so far today).</div>`;
+      return;
+    }
+    const rows = d.flagged.map(f => `
+      <tr>
+        <td><b>${f.type} ${f.strike}</b></td>
+        <td>${f.latest_volume.toLocaleString()}</td>
+        <td>${f.avg_volume.toLocaleString()}</td>
+        <td class="ratio-hot">${f.volume_ratio}x</td>
+        <td>${f.gamma != null ? f.gamma.toFixed(4) : "—"}</td>
+        <td>${f.vega != null ? f.vega.toFixed(4) : "—"}</td>
+        <td>${f.iv != null ? (f.iv * 100).toFixed(1) + "%" : "—"}</td>
+        <td>${f.future_price_move_since_first_capture_pct != null ? (f.future_price_move_since_first_capture_pct > 0 ? "+" : "") + f.future_price_move_since_first_capture_pct + "%" : "—"}</td>
+      </tr>`).join("");
+    el.innerHTML = `
+      <table class="dt">
+        <thead><tr><th>Strike</th><th>Latest Vol</th><th>Avg Vol</th><th>Ratio</th><th>Gamma</th><th>Vega</th><th>IV</th><th>Future Δ Since First Capture</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="disclaimer">⚠️ ${d.note}</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="status-err">Error: ${e.message}</div>`;
+  }
+}
+
+async function loadEarlyFootprint() {
+  const symbol = document.getElementById("symbol-select").value;
+  const el = document.getElementById("early-footprint-body");
+  el.innerHTML = '<div class="spinner"></div> Loading...';
+  try {
+    const resp = await fetch(`/live-chain/api/early_footprint?symbol=${symbol}`);
+    const d = await resp.json();
+    if (!d.ok) {
+      el.innerHTML = `<div class="muted">${d.error || "No data yet"}</div>`;
+      return;
+    }
+    if (!d.flagged || !d.flagged.length) {
+      el.innerHTML = `<div class="muted">No single print of ${d.block_size_threshold || 50}+ contracts seen yet within the first ${d.session_window_minutes || 120} minutes of today's captures. This accumulates as the session progresses — check back through the morning window.</div>`;
+      return;
+    }
+    const rows = d.flagged.map(f => `
+      <tr>
+        <td><b>${f.type} ${f.strike}</b></td>
+        <td class="ratio-hot">${f.max_print_size.toLocaleString()}</td>
+        <td>${f.large_print_count}</td>
+        <td>${f.captured_at.slice(11, 16)}</td>
+        <td>${f.future_price_at_capture ?? "—"}</td>
+      </tr>`).join("");
+    el.innerHTML = `
+      <table class="dt">
+        <thead><tr><th>Strike</th><th>Largest Print</th><th># Block Prints</th><th>Time Seen</th><th>Future Price Then</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="disclaimer">⚠️ ${d.note}</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="status-err">Error: ${e.message}</div>`;
+  }
+}
+
+async function loadStrikeCharts() {
+  const symbol = document.getElementById("symbol-select").value;
+  try {
+    const resp = await fetch(`/live-chain/api/vega_exposure?symbol=${symbol}`);
+    const d = await resp.json();
+    if (!d.ok || !d.rows || !d.rows.length) {
+      const msg = '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12px">No snapshots captured yet — click Capture Now above.</div>';
+      document.getElementById("gamma-vega-chart").innerHTML = msg;
+      document.getElementById("volume-chart").innerHTML = msg;
+      document.getElementById("skew-chart").innerHTML = msg;
+      return;
+    }
+
+    // Delta & Gamma clouds, split by call/put -- the old version combined
+    // BOTH call and put rows into one gamma series keyed only by strike,
+    // so at every strike two different gamma values (call's and put's)
+    // were plotted on top of each other with no way to tell which was
+    // which. Delta is plotted with its natural sign (call positive, put
+    // negative) so calls and puts mirror around zero -- that mirroring
+    // IS the skew shape. Gamma is always positive for both sides, so it
+    // gets its own axis rather than being forced onto delta's -1..1
+    // scale, plotted as a darker shade of the same color family (darker
+    // blue over light blue for calls, darker green over light green for
+    // puts) so it reads as "layered on top of" delta rather than a
+    // separate unrelated series.
+    const callRows = d.rows.filter(r => (r.type || "").toLowerCase() === "call").sort((a, b) => a.strike - b.strike);
+    const putRowsForClouds = d.rows.filter(r => (r.type || "").toLowerCase() === "put").sort((a, b) => a.strike - b.strike);
+    Plotly.newPlot("gamma-vega-chart", [
+      { x: callRows.map(r => r.strike), y: callRows.map(r => r.delta || 0), name: "Call Delta",
+        type: "scatter", mode: "lines", fill: "tozeroy",
+        line: { color: "#7dd3fc", width: 1 }, fillcolor: "rgba(125,211,252,0.30)", yaxis: "y" },
+      { x: callRows.map(r => r.strike), y: callRows.map(r => r.gamma || 0), name: "Call Gamma",
+        type: "scatter", mode: "lines", fill: "tozeroy",
+        line: { color: "#1d4ed8", width: 1.5 }, fillcolor: "rgba(29,78,216,0.55)", yaxis: "y2" },
+      { x: putRowsForClouds.map(r => r.strike), y: putRowsForClouds.map(r => r.delta || 0), name: "Put Delta",
+        type: "scatter", mode: "lines", fill: "tozeroy",
+        line: { color: "#4ade80", width: 1 }, fillcolor: "rgba(74,222,128,0.30)", yaxis: "y" },
+      { x: putRowsForClouds.map(r => r.strike), y: putRowsForClouds.map(r => r.gamma || 0), name: "Put Gamma",
+        type: "scatter", mode: "lines", fill: "tozeroy",
+        line: { color: "#15803d", width: 1.5 }, fillcolor: "rgba(21,128,61,0.55)", yaxis: "y2" },
+    ], {
+      paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+      font: { color: "#e2e8f0", size: 12 },
+      margin: { t: 20, l: 55, r: 55, b: 40 },
+      xaxis: { title: "Strike", gridcolor: "#2a2f42" },
+      yaxis: { title: "Delta", gridcolor: "#2a2f42", side: "left", range: [-1.05, 1.05], zeroline: true, zerolinecolor: "#667" },
+      yaxis2: { title: "Gamma", overlaying: "y", side: "right", gridcolor: "transparent" },
+      legend: { orientation: "h", y: 1.15 },
+    }, { responsive: true, displayModeBar: false });
+
+    // Volume by strike -- calls above zero, puts mirrored below zero so
+    // both sides are visible without one hiding the other at the same strike.
+    // Reuses callRows/putRowsForClouds from the delta/gamma chart above --
+    // same filtered data, declaring it again here under the same names
+    // would be a JS redeclaration error.
+    const putRows = putRowsForClouds;
+    Plotly.newPlot("volume-chart", [
+      { x: callRows.map(r => r.strike), y: callRows.map(r => r.volume || 0), name: "Call volume",
+        type: "bar", marker: { color: "#7dd3fc" } },
+      { x: putRows.map(r => r.strike), y: putRows.map(r => -(r.volume || 0)), name: "Put volume",
+        type: "bar", marker: { color: "#4ade80" } },
+    ], {
+      paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+      font: { color: "#e2e8f0", size: 12 },
+      margin: { t: 20, l: 55, r: 20, b: 40 },
+      xaxis: { title: "Strike", gridcolor: "#2a2f42" },
+      yaxis: { title: "Volume (put mirrored below zero)", gridcolor: "#2a2f42", zerolinecolor: "#666" },
+      barmode: "relative",
+      legend: { orientation: "h", y: 1.1 },
+    }, { responsive: true, displayModeBar: false });
+
+    // Call vs Put IV skew -- two lines, not one blended average, so
+    // which side is actually carrying the skew is visible directly.
+    Plotly.newPlot("skew-chart", [
+      { x: callRows.map(r => r.strike), y: callRows.map(r => r.iv != null ? r.iv * 100 : null), name: "Call IV",
+        type: "scatter", mode: "lines+markers", marker: { color: "#7dd3fc" }, connectgaps: false },
+      { x: putRows.map(r => r.strike), y: putRows.map(r => r.iv != null ? r.iv * 100 : null), name: "Put IV",
+        type: "scatter", mode: "lines+markers", marker: { color: "#4ade80" }, connectgaps: false },
+    ], {
+      paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+      font: { color: "#e2e8f0", size: 12 },
+      margin: { t: 20, l: 55, r: 20, b: 40 },
+      xaxis: { title: "Strike", gridcolor: "#2a2f42" },
+      yaxis: { title: "Implied Volatility (%)", gridcolor: "#2a2f42" },
+      legend: { orientation: "h", y: 1.1 },
+    }, { responsive: true, displayModeBar: false });
+  } catch (e) {
+    const msg = `<div class="status-err">Error: ${e.message}</div>`;
+    document.getElementById("gamma-vega-chart").innerHTML = msg;
+    document.getElementById("volume-chart").innerHTML = msg;
+    document.getElementById("skew-chart").innerHTML = msg;
+  }
+}
+
+function loadAll() {
+  loadRecommendations();
+  loadUnusualVolume();
+  loadEarlyFootprint();
+  loadStrikeCharts();
+}
+
+loadInterval().then(() => {
+  const minutes = parseFloat(document.getElementById("interval-input").value) || 5;
+  _restartAutoRefresh(minutes);
+});
+loadAll();
+</script>
+</body>
+</html>

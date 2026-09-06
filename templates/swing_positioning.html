@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Swing Positioning Scanner</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1300px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:920px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:16px}
+    .card h2{margin:0 0 10px;font-size:15px;font-weight:900}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:8px 16px;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:12px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-ghost{background:rgba(255,255,255,.05);color:var(--text,var(--text2));border:1px solid var(--border,var(--border2))}
+    input[type=text],input[type=number]{padding:8px 10px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:8px;font-size:12px}
+    .tabs{display:flex;gap:6px;margin-bottom:14px}
+    .tab-btn{padding:8px 16px;border-radius:8px;font-weight:800;font-size:12px;cursor:pointer;background:rgba(255,255,255,.05);border:1px solid var(--border,var(--border2));color:var(--muted,var(--muted2))}
+    .tab-btn.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+    .bias-badge{display:inline-block;padding:4px 12px;border-radius:999px;font-size:12px;font-weight:900}
+    .bias-bullish{background:#22c55e22;color:#4ade80}
+    .bias-bearish{background:#f8717122;color:#f87171}
+    .bias-neutral{background:rgba(255,255,255,.06);color:#94a3b8}
+    .day-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:12px}
+    .day-row.flagged{background:rgba(255,255,255,.03)}
+    .class-absorption{color:#4ade80;font-weight:800}
+    .class-distribution{color:#f87171;font-weight:800}
+    .class-confirmed_move{color:#7dd3fc}
+    .class-weak_move{color:#fbbf24}
+    .class-neutral,.class-high_effort_flat_trend{color:#94a3b8}
+    .scan-card{border-left:4px solid #6366f1;background:rgba(255,255,255,.03);border-radius:8px;padding:11px 13px;margin-bottom:8px}
+    .scan-card.bias-bullish{border-left-color:#4ade80}
+    .scan-card.bias-bearish{border-left-color:#f87171}
+    .conf-pill{font-size:11px;font-weight:800;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.08)}
+    .muted{color:var(--muted,var(--muted2))}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .status-err{color:#f87171;font-size:12px}
+    .wall-line{padding:8px 10px;border-radius:6px;background:rgba(255,255,255,.03);margin-bottom:6px;font-size:12.5px}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>📐 Swing Positioning Scanner</h1>
+    <p>The multi-day version of the 0DTE/GEX work — reads stock volume vs price over the last ~2 weeks (Wyckoff effort-vs-result: heavy volume with little price movement is absorption or distribution, a leading indicator, not noise) and crosses it against options walls at a 20-45 DTE swing horizon. Only flags a symbol when the stock-side signal and the options-side signal agree — either one alone is a hypothesis, not a high-probability setup.</p>
+  </div>
+
+  <div class="tabs">
+    <div class="tab-btn active" id="tab-single" onclick="switchTab('single')">Single Symbol</div>
+    <div class="tab-btn" id="tab-scan" onclick="switchTab('scan')">Scan Watchlist</div>
+  </div>
+
+  <div id="panel-single">
+    <div class="card">
+      <div class="toolbar">
+        <input type="text" id="symbol-input" placeholder="Symbol (e.g. AAPL)" style="width:140px;text-transform:uppercase"/>
+        <span class="muted" style="font-size:11px">Min OI</span>
+        <input type="number" id="single-min-oi-input" min="0" step="1000" value="50000" style="width:90px" title="Minimum total open interest at the swing expiry (20-45 DTE) for the wall read to be trusted. This app's own existing default elsewhere is 50,000."/>
+        <span class="muted" style="font-size:11px">Min avg daily volume</span>
+        <input type="number" id="single-min-vol-input" min="0" step="100000" value="1000000" style="width:110px" title="Minimum 20-day average daily share volume. Below ~1M, options markets tend to get genuinely thin regardless of what OI shows."/>
+        <button class="btn btn-primary" onclick="analyzeSymbol()">Analyze</button>
+        <span id="single-status" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
+    <div id="single-results"></div>
+  </div>
+
+  <div id="panel-scan" style="display:none">
+    <div class="card">
+      <div class="toolbar">
+        <span class="muted" style="font-size:12px">Watchlist</span>
+        <select id="watchlist-select" style="width:220px"><option value="">All symbols with options OI tracked</option></select>
+        <span class="muted" style="font-size:12px">Min confidence</span>
+        <input type="number" id="min-confidence-input" min="0" max="100" value="40" style="width:70px"/>
+        <span class="muted" style="font-size:11px">Min OI</span>
+        <input type="number" id="scan-min-oi-input" min="0" step="1000" value="50000" style="width:90px"/>
+        <span class="muted" style="font-size:11px">Min avg daily volume</span>
+        <input type="number" id="scan-min-vol-input" min="0" step="100000" value="1000000" style="width:110px"/>
+        <button class="btn btn-primary" onclick="runScan()">▶ Scan Watchlist</button>
+        <span class="muted" style="font-size:11px">Defaults to every symbol with options OI tracked across all watchlists — pick a specific one above to narrow it.</span>
+        <span id="scan-status" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
+    <div id="scan-results"></div>
+  </div>
+</div>
+
+<script>
+function switchTab(tab) {
+  document.getElementById("panel-single").style.display = tab === "single" ? "block" : "none";
+  document.getElementById("panel-scan").style.display = tab === "scan" ? "block" : "none";
+  document.getElementById("tab-single").classList.toggle("active", tab === "single");
+  document.getElementById("tab-scan").classList.toggle("active", tab === "scan");
+}
+
+function renderSingleResult(d) {
+  if (!d.ok) {
+    return `<div class="card"><div class="status-err">Error: ${d.error}</div></div>`;
+  }
+  const biasClass = "bias-" + d.bias;
+  const daysRows = (d.days || []).slice().reverse().map(day => {
+    const flagged = day.classification === "absorption" || day.classification === "distribution";
+    return `<div class="day-row ${flagged ? 'flagged' : ''}">
+      <span>${day.date}</span>
+      <span>${day.pct_change > 0 ? "+" : ""}${day.pct_change}%</span>
+      <span>${day.volume_ratio}x vol</span>
+      <span class="class-${day.classification}">${day.classification.replace(/_/g, " ")}${day.direction ? " (" + day.direction + ")" : ""}</span>
+    </div>`;
+  }).join("");
+
+  let wallsHtml = '<div class="muted" style="font-size:12px">No swing-DTE (20-45) wall data available for this symbol.</div>';
+  if (d.walls && d.walls.ok) {
+    const cw = d.walls.call_wall, pw = d.walls.put_wall;
+    wallsHtml = `<div class="muted" style="font-size:11.5px;margin-bottom:8px">Expiry ${d.walls.expiry} (${d.walls.dte}d)</div>`;
+    if (cw) wallsHtml += `<div class="wall-line">🔵 Call wall: <b>$${cw.strike.toFixed(2)}</b> — score ${cw.score}${cw.fresh ? ' · <span style="color:#4ade80">fresh-building</span>' : cw.unwinding ? ' · <span style="color:#f87171">unwinding</span>' : ''}</div>`;
+    if (pw) wallsHtml += `<div class="wall-line">🟢 Put wall: <b>$${pw.strike.toFixed(2)}</b> — score ${pw.score}${pw.fresh ? ' · <span style="color:#4ade80">fresh-building</span>' : pw.unwinding ? ' · <span style="color:#f87171">unwinding</span>' : ''}</div>`;
+  }
+
+  return `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h2 style="margin:0">${d.symbol} — $${d.spot.toFixed(2)}</h2>
+        <div><span class="bias-badge ${biasClass}">${d.bias.toUpperCase()}</span> <span class="conf-pill">${d.confidence}% confidence</span></div>
+      </div>
+      <div style="font-size:13px;line-height:1.6;margin-bottom:6px">${d.narrative}</div>
+    </div>
+    <div class="card">
+      <h2>Swing options walls (20-45 DTE)</h2>
+      ${wallsHtml}
+    </div>
+    <div class="card">
+      <h2>Daily effort vs result (last 10 days)</h2>
+      <div class="muted" style="font-size:11px;margin-bottom:6px">Volume ratio = day's volume ÷ 20-day average. High volume + small move = absorption (after a decline, bullish) or distribution (after an advance, bearish). High volume + big move = confirmed. Low volume + big move = weak, prone to reverse.</div>
+      ${daysRows}
+    </div>`;
+}
+
+async function analyzeSymbol() {
+  const symbol = document.getElementById("symbol-input").value.trim().toUpperCase();
+  const minOi = document.getElementById("single-min-oi-input").value || 50000;
+  const minVol = document.getElementById("single-min-vol-input").value || 1000000;
+  const status = document.getElementById("single-status");
+  const el = document.getElementById("single-results");
+  if (!symbol) { status.textContent = "Enter a symbol"; return; }
+  status.innerHTML = '<span class="spinner"></span> Analyzing...';
+  el.innerHTML = "";
+  try {
+    const resp = await fetch(`/swing-positioning/api/analyze?symbol=${symbol}&min_total_oi=${minOi}&min_avg_daily_volume=${minVol}`);
+    const d = await resp.json();
+    status.textContent = "";
+    el.innerHTML = renderSingleResult(d);
+  } catch (e) {
+    status.textContent = "";
+    el.innerHTML = `<div class="card"><div class="status-err">Error: ${e.message}</div></div>`;
+  }
+}
+
+async function loadWatchlists() {
+  try {
+    const resp = await fetch("/watchlists/");
+    const d = await resp.json();
+    const sel = document.getElementById("watchlist-select");
+    (d.watchlists || []).forEach(wl => {
+      const opt = document.createElement("option");
+      opt.value = wl.id;
+      opt.textContent = `${wl.name} (${wl.symbol_count})`;
+      sel.appendChild(opt);
+    });
+  } catch (e) { /* non-fatal -- dropdown just stays at "All symbols" */ }
+}
+
+async function runScan() {
+  const minConf = document.getElementById("min-confidence-input").value || 40;
+  const minOi = document.getElementById("scan-min-oi-input").value || 50000;
+  const minVol = document.getElementById("scan-min-vol-input").value || 1000000;
+  const wlId = document.getElementById("watchlist-select").value;
+  const status = document.getElementById("scan-status");
+  const el = document.getElementById("scan-results");
+  status.innerHTML = '<span class="spinner"></span> Scanning (this can take a minute across a full watchlist)...';
+  el.innerHTML = "";
+  try {
+    let symbolsParam = "";
+    if (wlId) {
+      status.innerHTML = '<span class="spinner"></span> Loading watchlist symbols...';
+      const wlResp = await fetch(`/watchlists/${wlId}/symbols?prices=0`);
+      const wlData = await wlResp.json();
+      const syms = (wlData.symbols || wlData.items || []).map(s => s.symbol || s).filter(Boolean);
+      if (!syms.length) { status.innerHTML = '<span class="status-err">Selected watchlist has no symbols</span>'; return; }
+      symbolsParam = `&symbols=${encodeURIComponent(syms.join(","))}`;
+      status.innerHTML = '<span class="spinner"></span> Scanning...';
+    }
+    const resp = await fetch(`/swing-positioning/api/scan?min_confidence=${minConf}&min_total_oi=${minOi}&min_avg_daily_volume=${minVol}${symbolsParam}`);
+    const d = await resp.json();
+    if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
+    status.textContent = `✓ Scanned ${d.scanned} symbols`;
+    const breakdownHtml = `<div class="card">
+        <div style="font-weight:800;font-size:13px;margin-bottom:8px">Breakdown of all ${d.scanned} scanned</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;font-size:12.5px">
+          <div>✅ Flagged: <b>${d.results.length}</b></div>
+          <div>😐 Neutral (no signal): <b>${d.neutral_count || 0}</b></div>
+          <div>📉 Below confidence: <b>${d.below_confidence_count || 0}</b></div>
+          <div>🚫 Excluded illiquid: <b>${d.excluded_illiquid_count || 0}</b></div>
+          <div>⚠️ Errors: <b>${d.errors_count || 0}</b></div>
+        </div>
+        ${(d.below_confidence_sample && d.below_confidence_sample.length) ? `<div class="muted" style="font-size:11.5px;margin-top:8px">Closest misses: ${d.below_confidence_sample.map(b => `${b.symbol} (${b.bias}, ${b.confidence}%)`).join(", ")}</div>` : ""}
+        ${(d.errors_sample && d.errors_sample.length) ? `<div class="muted" style="font-size:11.5px;margin-top:6px">Sample errors: ${d.errors_sample.map(e => `${e.symbol}: ${e.error}`).join(" · ")}</div>` : ""}
+      </div>`;
+    if (!d.results.length) {
+      el.innerHTML = breakdownHtml + `<div class="card muted">No symbols flagged above ${minConf}% confidence right now. The breakdown above shows exactly why each symbol didn't qualify -- if most are "neutral," that's genuinely no absorption/distribution signal today, not a filter being too strict. Try a lower confidence threshold, or check the "closest misses" if any showed up.</div>`;
+      return;
+    }
+    el.innerHTML = breakdownHtml + d.results.map(r => `
+      <div class="scan-card bias-${r.bias}">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+          <b>${r.symbol} — $${r.spot.toFixed(2)}</b>
+          <div><span class="bias-badge bias-${r.bias}">${r.bias.toUpperCase()}</span> <span class="conf-pill">${r.confidence}%</span></div>
+        </div>
+        <div style="font-size:12.5px;line-height:1.5">${r.narrative}</div>
+      </div>`).join("");
+  } catch (e) {
+    status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
+  }
+}
+
+loadWatchlists();
+</script>
+</body>
+</html>

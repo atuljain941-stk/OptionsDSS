@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Signal Notifier</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root {
+      --sn-bg: #0f1424; --sn-panel: #1b2235; --sn-panel-2: #20283d;
+      --sn-border: rgba(148,163,184,.16); --sn-text: #e5eefc; --sn-muted: #7b8ab5;
+      --sn-accent: #7c9df8; --sn-good: #22c55e; --sn-warn: #f59e0b; --sn-bad: #ef4444;
+      --sn-chip: rgba(124,157,248,.12);
+    }
+    html,body { height:100%; }
+    body {
+      margin:0; background: linear-gradient(180deg, #0c1120 0%, #0f1424 100%);
+      color: var(--sn-text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      font-size:14px;
+    }
+    * { box-sizing: border-box; }
+    button, input, select, textarea { font: inherit; }
+    .sn-shell { min-height:100vh; padding:16px; }
+    .sn-card { background: rgba(28,36,56,.88); border:1px solid var(--sn-border); border-radius:14px; box-shadow: 0 8px 30px rgba(0,0,0,.22); padding:14px; margin-bottom:14px; }
+    .sn-topbar { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+    .sn-brand { font-weight:900; font-size:20px; display:flex; gap:8px; align-items:center; }
+    .sn-sub { color:var(--sn-muted); font-size:13px; margin-top:2px; }
+    .sn-btn, .sn-input, .sn-select {
+      border-radius:10px; border:1px solid var(--sn-border);
+      background: rgba(8,12,24,.7); color: var(--sn-text); padding:9px 11px; outline:none;
+    }
+    .sn-btn { cursor:pointer; user-select:none; transition:.15s ease; background: linear-gradient(180deg, rgba(124,157,248,.28), rgba(124,157,248,.16)); font-weight:700; }
+    .sn-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+    .sn-btn:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+    .sn-btn.primary { background: linear-gradient(180deg, rgba(124,157,248,.42), rgba(124,157,248,.22)); }
+    .sn-btn.good { background: linear-gradient(180deg, rgba(34,197,94,.32), rgba(34,197,94,.15)); }
+    .sn-btn.bad { background: linear-gradient(180deg, rgba(239,68,68,.34), rgba(239,68,68,.14)); }
+    .sn-btn.sm { padding:5px 9px; font-size:12px; border-radius:8px; }
+    .sn-input, .sn-select { min-height:38px; font-size:13px; }
+    .sn-switch { position:relative; display:inline-block; width:42px; height:24px; flex:0 0 auto; }
+    .sn-switch input { opacity:0; width:0; height:0; }
+    .sn-slider { position:absolute; cursor:pointer; inset:0; background: rgba(148,163,184,.28); border-radius:999px; transition:.15s; }
+    .sn-slider::before { content:''; position:absolute; height:18px; width:18px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.15s; }
+    .sn-switch input:checked + .sn-slider { background: linear-gradient(180deg, #34d399, #22c55e); }
+    .sn-switch input:checked + .sn-slider::before { transform: translateX(18px); }
+    .sn-global-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .sn-pill { display:inline-flex; gap:8px; align-items:center; border:1px solid var(--sn-border); background: rgba(8,12,24,.65); color: #c7d2fe; border-radius:999px; padding:6px 12px; font-size:12px; font-weight:700; }
+    .sn-note { margin-top:8px; color:var(--sn-muted); font-size:13px; }
+    .sn-time-chip { display:inline-flex; align-items:center; gap:6px; background:rgba(124,157,248,.14); border-radius:999px; padding:4px 10px 4px 12px; font-size:12.5px; font-weight:700; }
+    .sn-time-chip button { background:none; border:none; color:#fca5a5; cursor:pointer; font-size:14px; padding:0; line-height:1; }
+    .sn-error-banner { display:none; margin-top:8px; padding:10px 12px; border-radius:10px; background:rgba(239,68,68,.14); border:1px solid rgba(239,68,68,.4); color:#fecaca; font-size:13px; font-weight:600; }
+    .sn-section-title { font-weight:900; font-size:16px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:10px; cursor:pointer; user-select:none; }
+    .sn-section-title .sn-caret { display:inline-block; transition:transform .15s ease; margin-right:8px; color:var(--sn-muted); }
+    .sn-section-title.collapsed .sn-caret { transform:rotate(-90deg); }
+    .sn-collapsible-body { overflow:hidden; }
+    .sn-collapsible-body.collapsed { display:none; }
+    .sn-sources { display:flex; flex-direction:column; gap:10px; }
+    .sn-source-card { background: rgba(8,12,24,.4); border:1px solid var(--sn-border); border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:8px; }
+    .sn-source-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:space-between; }
+    .sn-source-title { font-weight:800; font-size:14px; display:flex; align-items:center; gap:8px; }
+    .sn-kind-tag { display:inline-flex; align-items:center; padding:3px 8px; border-radius:999px; background:var(--sn-chip); color:#95a8d6; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
+    .sn-source-meta { color:var(--sn-muted); font-size:12px; display:flex; gap:14px; flex-wrap:wrap; }
+    .sn-source-actions { display:flex; gap:6px; flex-wrap:wrap; }
+    .sn-empty { color:var(--sn-muted); padding:20px; text-align:center; border:1px dashed var(--sn-border); border-radius:12px; }
+    .sn-table-wrap { overflow:auto; border:1px solid var(--sn-border); border-radius:12px; background: rgba(8,12,24,.35); max-height:420px; }
+    table.sn-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .sn-table th, .sn-table td { padding:8px 10px; border-bottom:1px solid rgba(148,163,184,.08); white-space:nowrap; text-align:left; }
+    .sn-table th { position:sticky; top:0; background: rgba(20,28,44,.95); color:#c7d2fe; font-weight:800; }
+    .sn-sortable { cursor:pointer; user-select:none; }
+    .sn-sortable:hover { color:#e0e7ff; }
+    .sn-sortable.sn-sort-active { color:#fff; }
+    .sn-table tr:nth-child(even) td { background: rgba(255,255,255,.01); }
+    .sn-modal-backdrop { position: fixed; inset:0; background: rgba(4,8,16,.78); display:none; align-items:center; justify-content:center; z-index:99999; padding:16px; }
+    .sn-modal { width:min(640px, 100%); max-height: calc(100vh - 32px); overflow:auto; background: linear-gradient(180deg, #1b2235, #171e2f); border:1px solid var(--sn-border); border-radius:18px; box-shadow:0 30px 80px rgba(0,0,0,.45); padding:16px; }
+    .sn-modal-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px; }
+    .sn-field { margin-bottom:12px; }
+    .sn-field label { display:block; font-size:12px; color:var(--sn-muted); margin-bottom:5px; text-transform:uppercase; letter-spacing:.03em; }
+    .sn-field .sn-input, .sn-field .sn-select, .sn-field textarea { width:100%; }
+    .sn-field textarea { min-height:90px; resize:vertical; background: rgba(8,12,24,.72); color: var(--sn-text); border:1px solid var(--sn-border); border-radius:10px; padding:10px; font-family: ui-monospace, monospace; font-size:12.5px; }
+    .sn-row2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    .sn-kind-tabs { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+    .sn-kind-tab { padding:7px 12px; border-radius:999px; border:1px solid var(--sn-border); background:rgba(8,12,24,.5); cursor:pointer; font-size:12px; font-weight:700; color:var(--sn-muted); }
+    .sn-kind-tab.active { background: linear-gradient(180deg, rgba(124,157,248,.42), rgba(124,157,248,.22)); color:#fff; }
+    .sn-footer-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }
+    .sn-legend { color: var(--sn-muted); font-size:12px; margin-top:4px; }
+    @media (max-width: 720px) { .sn-row2 { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="sn-shell">
+    <div class="sn-card sn-topbar">
+      <div>
+        <div class="sn-brand">🔔 Signal Notifier</div>
+        <div class="sn-sub">Push high-probability setups to Telegram. One alert per symbol per day — no repeats.</div>
+        <div class="sn-sub" id="sn-ai-gate-legend" style="display:none">🤖 AI risk-gate is ON — every candidate is checked by AI Copilot's pre-trade risk agent before it's sent; REJECTED candidates are logged but not delivered. Requires an LLM key in AI Copilot → Settings.</div>
+      </div>
+      <div class="sn-global-row">
+        <label class="sn-pill">
+          <span class="sn-switch"><input type="checkbox" id="sn-global-enabled"><span class="sn-slider"></span></span>
+          Global switch
+        </label>
+        <label class="sn-pill">
+          <span class="sn-switch"><input type="checkbox" id="sn-ai-gate-enabled"><span class="sn-slider"></span></span>
+          🤖 AI risk-gate before send
+        </label>
+        <span class="sn-pill" id="sn-telegram-status">Telegram: —</span>
+        <button class="sn-btn" id="sn-refresh-all">⟳ Refresh</button>
+      </div>
+    </div>
+
+    <div class="sn-card">
+      <div class="sn-section-title" id="sn-default-title">
+        <span><span class="sn-caret">▾</span>Default Trade Opportunity Scanner (legacy)</span>
+      </div>
+      <div class="sn-collapsible-body collapsed" id="sn-default-body">
+      <div class="sn-row2">
+        <div class="sn-field">
+          <label>Watchlist</label>
+          <select id="sn-default-watchlist" class="sn-select"></select>
+        </div>
+        <div class="sn-field">
+          <label>Min score</label>
+          <input id="sn-default-min-score" class="sn-input" type="number" min="0" max="100" step="1" value="70" />
+        </div>
+        <div class="sn-field">
+          <label>Schedule</label>
+          <select id="sn-schedule-kind" class="sn-select">
+            <option value="interval">Every N minutes</option>
+            <option value="time">At specific times</option>
+          </select>
+        </div>
+      </div>
+      <div class="sn-row2" id="sn-schedule-interval-row">
+        <div class="sn-field">
+          <label>Scan every (minutes)</label>
+          <input id="sn-default-interval" class="sn-input" type="number" min="1" step="1" value="15" />
+        </div>
+      </div>
+      <div class="sn-field" id="sn-schedule-times-row" style="display:none">
+        <label>Run at these times daily</label>
+        <div id="sn-schedule-times-list" style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0"></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="sn-schedule-time-input" class="sn-input" type="time" style="max-width:140px" />
+          <button class="sn-btn" id="sn-schedule-time-add" type="button">+ Add time</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="sn-btn primary" id="sn-save-default">💾 Save</button>
+        <button class="sn-btn" id="sn-run-default-dry">🧪 Dry run now</button>
+        <button class="sn-btn good" id="sn-run-default-live">📨 Run &amp; send now</button>
+      </div>
+      <div class="sn-note" id="sn-default-note"></div>
+      </div>
+    </div>
+
+    <div class="sn-card">
+      <div class="sn-section-title" id="sn-journal-title">
+        <span><span class="sn-caret">▾</span>Journal &amp; Telegram Alerts</span>
+      </div>
+      <div class="sn-collapsible-body collapsed" id="sn-journal-body">
+      <div class="sn-legend">These used to be separate always-on background watchers — now they run from this same Signal Notifier loop, each with its own on/off switch and interval.</div>
+      <div class="sn-row2" style="margin-top:10px">
+        <div class="sn-field">
+          <label class="sn-pill">
+            <span class="sn-switch"><input type="checkbox" id="sn-journal-pnl-enabled"><span class="sn-slider"></span></span>
+            Journal: P&amp;L / risk alerts
+          </label>
+          <input id="sn-journal-pnl-interval" class="sn-input" type="number" min="1" step="1" value="240" style="margin-top:6px" />
+          <span class="sn-sub">minutes (default 240 = 4h — P&amp;L/DTE/OI inputs move on the scale of hours, not minutes)</span>
+        </div>
+        <div class="sn-field">
+          <label class="sn-pill">
+            <span class="sn-switch"><input type="checkbox" id="sn-journal-deep-loss-enabled"><span class="sn-slider"></span></span>
+            Journal: deep loss alert
+          </label>
+          <input id="sn-journal-deep-loss-threshold" class="sn-input" type="number" min="1" max="99" step="1" value="75" style="margin-top:6px" />
+          <span class="sn-sub">% of max loss (global, applies to every open position) — a 50% loss is common and often recoverable; this fires once a position first crosses this deeper, much rarer threshold. Checked on the same cadence as P&amp;L/risk alerts above.</span>
+        </div>
+        <div class="sn-field">
+          <label class="sn-pill">
+            <span class="sn-switch"><input type="checkbox" id="sn-journal-health-enabled"><span class="sn-slider"></span></span>
+            Journal: position health alerts
+          </label>
+          <input id="sn-journal-health-interval" class="sn-input" type="number" min="1" step="1" value="5" style="margin-top:6px" />
+          <span class="sn-sub">minutes</span>
+        </div>
+        <div class="sn-field">
+          <label class="sn-pill">
+            <span class="sn-switch"><input type="checkbox" id="sn-telegram-price-enabled"><span class="sn-slider"></span></span>
+            Telegram: watchlist price alerts
+          </label>
+          <input id="sn-telegram-price-interval" class="sn-input" type="number" min="1" step="1" value="1" style="margin-top:6px" />
+          <span class="sn-sub">minutes</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="sn-btn primary" id="sn-save-journal">💾 Save</button>
+      </div>
+      <div class="sn-note" id="sn-journal-note"></div>
+      </div>
+    </div>
+
+    <div class="sn-card">
+      <div class="sn-section-title" id="sn-sources-title">
+        <span><span class="sn-caret">▾</span>Alert sources</span>
+        <button class="sn-btn primary" id="sn-add-source">+ Add source</button>
+      </div>
+      <div class="sn-collapsible-body collapsed" id="sn-sources-body">
+      <div class="sn-legend">Each source has its own on/off switch and frequency. Add a Scanner Dashboard tile, a saved Scanner Builder query, a custom query, or another Trade Opportunity Scanner sweep on a different watchlist.</div>
+      <div class="sn-bulk-bar" id="sn-bulk-bar" style="display:flex;align-items:center;gap:10px;margin-top:10px;padding:6px 10px;border-radius:6px;background:rgba(255,255,255,.03)">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px">
+          <input type="checkbox" id="sn-select-all" /> Select all
+        </label>
+        <span id="sn-select-count" style="font-size:11px;color:var(--sn-muted)"></span>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="sn-btn sm" id="sn-bulk-enable" disabled>Enable selected</button>
+          <button class="sn-btn sm" id="sn-bulk-disable" disabled>Disable selected</button>
+        </div>
+      </div>
+      <div id="sn-sources" class="sn-sources" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <div class="sn-card">
+      <div class="sn-section-title" id="sn-history-title">
+        <span><span class="sn-caret">▾</span>Recent alerts sent</span>
+        <button class="sn-btn sm" id="sn-refresh-history">⟳</button>
+      </div>
+      <div class="sn-collapsible-body collapsed" id="sn-history-body-wrap">
+      <div class="sn-row2" style="align-items:flex-end;margin-bottom:10px">
+        <div class="sn-field">
+          <label>From</label>
+          <input type="date" id="sn-history-from" class="sn-input" />
+        </div>
+        <div class="sn-field">
+          <label>To</label>
+          <input type="date" id="sn-history-to" class="sn-input" />
+        </div>
+        <div class="sn-field">
+          <label>Symbol</label>
+          <input type="text" id="sn-history-symbol" class="sn-input" placeholder="e.g. AAPL" style="width:100px;text-transform:uppercase" />
+        </div>
+        <div class="sn-field">
+          <label>Scanner</label>
+          <select id="sn-history-source" class="sn-input"><option value="">All scanners</option></select>
+        </div>
+        <button class="sn-btn" id="sn-history-apply-range">Apply</button>
+        <button class="sn-btn sm" id="sn-history-reset-range">Last 5 days</button>
+        <a class="sn-btn sm good" id="sn-history-export-csv" href="#" download style="margin-left:auto;text-decoration:none;display:inline-flex;align-items:center">⬇ Export CSV</a>
+      </div>
+      <div class="sn-table-wrap">
+        <table class="sn-table" id="sn-history-table">
+          <thead><tr><th>Time</th><th>Symbol</th><th>Source</th><th>Bucket</th><th>Grade</th><th>Score</th><th>Spot</th><th>Expiry</th><th>DTE</th><th>Strikes</th><th>AI</th><th>Sent</th><th></th></tr></thead>
+          <tbody id="sn-history-body"></tbody>
+        </table>
+      </div>
+      </div>
+    </div>
+
+    <div class="sn-card">
+      <div class="sn-section-title" id="sn-backtest-title">
+        <span><span class="sn-caret">▾</span>Backtest — options-trade alerts vs actual outcome</span>
+        <a class="sn-btn sm good" id="sn-backtest-export-csv" href="#" download style="text-decoration:none;display:inline-flex;align-items:center">⬇ Export CSV</a>
+      </div>
+      <div class="sn-collapsible-body collapsed" id="sn-backtest-body-wrap">
+      <div class="sn-legend">
+        For every PS/CS/IC alert whose expiry has already passed, checks the underlying's actual closing price near expiry (from your local price cache — no live fetch) and computes what the credit spread would have earned held to expiry with no early management. Compares the realized win rate to the scanner's own predicted POP, so you can see if its probability estimates are actually calibrated. This is a worst-case-timing baseline, not a replay of your real Trade Management exits (which usually close well before expiry).
+      </div>
+      <div class="sn-row2" style="align-items:flex-end;margin:10px 0">
+        <div class="sn-field">
+          <label>From (alert date)</label>
+          <input type="date" id="sn-backtest-from" class="sn-input" />
+        </div>
+        <div class="sn-field">
+          <label>To (alert date)</label>
+          <input type="date" id="sn-backtest-to" class="sn-input" />
+        </div>
+        <div class="sn-field">
+          <label>Symbol</label>
+          <input type="text" id="sn-backtest-symbol" class="sn-input" placeholder="e.g. AAPL" style="width:100px;text-transform:uppercase" />
+        </div>
+        <div class="sn-field">
+          <label>Scanner</label>
+          <select id="sn-backtest-source" class="sn-input"><option value="">All scanners</option></select>
+        </div>
+        <button class="sn-btn primary" id="sn-backtest-run">▶ Run backtest</button>
+        <label class="sn-pill" style="font-weight:600"><input type="checkbox" id="sn-backtest-force" style="margin-right:6px">Recompute all (ignore cache)</label>
+      </div>
+      <div class="sn-note" id="sn-backtest-note"></div>
+
+      <div id="sn-backtest-summary" style="display:none;margin-top:12px">
+        <div class="sn-row2" id="sn-backtest-overall-cards" style="grid-template-columns:repeat(4,1fr)"></div>
+        <div style="margin-top:14px">
+          <div style="font-weight:800;font-size:13px;margin-bottom:6px">By grade</div>
+          <div class="sn-table-wrap"><table class="sn-table" id="sn-backtest-grade-table">
+            <thead><tr><th>Grade</th><th>Count</th><th>Realized Win %</th><th>Avg Predicted POP %</th><th>Calibration Gap</th><th>Total PnL</th><th>Avg PnL</th></tr></thead>
+            <tbody id="sn-backtest-grade-body"></tbody>
+          </table></div>
+        </div>
+        <div style="margin-top:14px">
+          <div style="font-weight:800;font-size:13px;margin-bottom:6px">By trade type</div>
+          <div class="sn-table-wrap"><table class="sn-table" id="sn-backtest-type-table">
+            <thead><tr><th>Type</th><th>Count</th><th>Realized Win %</th><th>Avg Predicted POP %</th><th>Calibration Gap</th><th>Total PnL</th><th>Avg PnL</th></tr></thead>
+            <tbody id="sn-backtest-type-body"></tbody>
+          </table></div>
+        </div>
+        <div style="margin-top:14px">
+          <div style="font-weight:800;font-size:13px;margin-bottom:6px">Calibration suggestions</div>
+          <div class="sn-legend">Grade/type buckets whose realized win rate diverges meaningfully from predicted POP, translated into a reviewable suggestion — this does NOT change scoring automatically, it's a list for you to act on.</div>
+          <div id="sn-calibration-suggestions" style="margin-top:8px"></div>
+        </div>
+        <div style="margin-top:14px">
+          <div style="font-weight:800;font-size:13px;margin-bottom:6px">Factor-level calibration</div>
+          <div class="sn-legend">Parses the "Why:"/"Caution:" text already sent in each alert to see whether each scoring factor's presence actually correlates with a higher realized win rate — compares alerts that cited a factor as a pro against alerts where it wasn't mentioned at all.</div>
+          <div class="sn-table-wrap"><table class="sn-table" id="sn-factor-calibration-table">
+            <thead><tr><th>Factor</th><th>Cited as Pro (n)</th><th>Win % when Pro</th><th>Win % when Absent</th><th>Separation</th><th>Read</th></tr></thead>
+            <tbody id="sn-factor-calibration-body"></tbody>
+          </table></div>
+        </div>
+        <div style="margin-top:14px">
+          <div style="font-weight:800;font-size:13px;margin-bottom:6px">Suggested parameter changes</div>
+          <div class="sn-legend">Translates the factor-level calibration above into specific scoring_params.py values — which key to change, current value, suggested value, and why. Each links directly to the Scoring Parameters page with the change pre-filled for review, nothing is applied automatically.</div>
+          <div id="sn-specific-param-suggestions" style="margin-top:8px"></div>
+        </div>
+        <div style="margin-top:14px">
+          <div style="font-weight:800;font-size:13px;margin-bottom:6px">Individual results <span class="sn-legend" style="display:inline;font-size:11px">(click a column header to sort)</span></div>
+          <div class="sn-table-wrap">
+            <table class="sn-table" id="sn-backtest-results-table">
+              <thead><tr>
+                <th data-sort="alert_date" class="sn-sortable">Alert Date</th>
+                <th data-sort="symbol" class="sn-sortable">Symbol</th>
+                <th data-sort="trade_type" class="sn-sortable">Type</th>
+                <th data-sort="grade" class="sn-sortable">Grade</th>
+                <th data-sort="score" class="sn-sortable">Score</th>
+                <th data-sort="pop" class="sn-sortable">POP</th>
+                <th data-sort="expiry" class="sn-sortable">Expiry</th>
+                <th>Strikes</th>
+                <th data-sort="est_credit" class="sn-sortable">Credit</th>
+                <th data-sort="max_loss_amt" class="sn-sortable">Max Loss</th>
+                <th data-sort="bt_expiry_price" class="sn-sortable">Expiry Price</th>
+                <th data-sort="bt_outcome" class="sn-sortable">Outcome</th>
+                <th data-sort="bt_pnl" class="sn-sortable">PnL</th>
+              </tr></thead>
+              <tbody id="sn-backtest-results-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sn-modal-backdrop" id="sn-modal-backdrop">
+    <div class="sn-modal">
+      <div class="sn-modal-head">
+        <div style="font-weight:900;font-size:18px" id="sn-modal-title-text">Add alert source</div>
+        <button class="sn-btn sm" id="sn-modal-close">✕</button>
+      </div>
+      <div id="sn-modal-error" class="sn-error-banner"></div>
+      <div class="sn-kind-tabs" id="sn-kind-tabs">
+        <div class="sn-kind-tab active" data-kind="trade_scanner">Trade Opportunity Scanner</div>
+        <div class="sn-kind-tab" data-kind="dashboard_tile">Scanner Dashboard Tile</div>
+        <div class="sn-kind-tab" data-kind="scanner_query">Scanner Query</div>
+        <div class="sn-kind-tab" data-kind="swing_positioning">Swing Positioning Scanner</div>
+      </div>
+
+      <div class="sn-field">
+        <label>Label</label>
+        <input id="sn-f-label" class="sn-input" type="text" placeholder="e.g. Gold futures breakout watch" />
+      </div>
+
+      <div class="sn-row2">
+        <div class="sn-field">
+          <label>Enabled</label>
+          <span class="sn-switch"><input type="checkbox" id="sn-f-enabled" checked><span class="sn-slider"></span></span>
+        </div>
+        <div class="sn-field">
+          <label>Check every (minutes)</label>
+          <input id="sn-f-interval" class="sn-input" type="number" min="1" step="1" value="15" />
+        </div>
+        <div class="sn-field">
+          <label>Schedule</label>
+          <select id="sn-f-schedule-kind" class="sn-select">
+            <option value="interval">Every N minutes</option>
+            <option value="time">At specific times</option>
+          </select>
+        </div>
+      </div>
+      <div class="sn-field" id="sn-f-schedule-times-row" style="display:none">
+        <label>Run at these times daily</label>
+        <div id="sn-f-schedule-times-list" style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0"></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="sn-f-schedule-time-input" class="sn-input" type="time" style="max-width:140px" />
+          <button class="sn-btn" id="sn-f-schedule-time-add" type="button">+ Add time</button>
+        </div>
+      </div>
+
+      <div id="sn-kind-trade_scanner" class="sn-kind-panel">
+        <div class="sn-row2">
+          <div class="sn-field">
+            <label>Watchlist</label>
+            <select id="sn-f-ts-watchlist" class="sn-select"></select>
+          </div>
+          <div class="sn-field">
+            <label>Min score</label>
+            <input id="sn-f-ts-min-score" class="sn-input" type="number" min="0" max="100" step="1" value="70" />
+          </div>
+        </div>
+      </div>
+
+      <div id="sn-kind-dashboard_tile" class="sn-kind-panel" style="display:none">
+        <div class="sn-row2">
+          <div class="sn-field">
+            <label>Dashboard</label>
+            <select id="sn-f-dt-dashboard" class="sn-select"></select>
+          </div>
+          <div class="sn-field">
+            <label>Tile</label>
+            <select id="sn-f-dt-tile" class="sn-select"></select>
+          </div>
+        </div>
+        <div class="sn-field">
+          <label>What kind of setup is this query looking for? (optional, but recommended)</label>
+          <div style="display:flex;flex-wrap:wrap;gap:14px">
+            <label class="sn-pill" style="font-weight:600"><input type="checkbox" class="sn-dt-direction" value="BULLISH" style="margin-right:6px">Bullish</label>
+            <label class="sn-pill" style="font-weight:600"><input type="checkbox" class="sn-dt-direction" value="BEARISH" style="margin-right:6px">Bearish</label>
+            <label class="sn-pill" style="font-weight:600"><input type="checkbox" class="sn-dt-direction" value="SIDEWAYS" style="margin-right:6px">Sideways</label>
+            <label class="sn-pill" style="font-weight:600"><input type="checkbox" class="sn-dt-direction" value="MRT" style="margin-right:6px">MRT (mean reversion)</label>
+          </div>
+        </div>
+        <div class="sn-field">
+          <label>Min score (0 = don't filter)</label>
+          <input id="sn-f-dt-min-conviction" class="sn-input" type="number" min="0" max="100" step="5" value="0" style="width:120px" />
+        </div>
+        <div class="sn-legend">Any tile on the Scanner Dashboard can be a source — the notifier re-runs that tile's exact query on its own schedule. <b>If you check a direction above</b>, a match only alerts when a real options setup aligned to that direction exists right now (proper strikes/legs from the same engine as Trade Opportunity Scanner, scored 0-100) — a bearish query won't get penalized for not looking bullish. Leave all unchecked to keep the old behavior (generic conviction score, any direction).</div>
+      </div>
+
+      <div id="sn-kind-scanner_query" class="sn-kind-panel" style="display:none">
+        <div class="sn-field">
+          <label>Saved scanner (optional — picking one fills the query below)</label>
+          <select id="sn-f-sq-definition" class="sn-select">
+            <option value="">— Use custom query below —</option>
+          </select>
+        </div>
+        <div class="sn-row2">
+          <div class="sn-field">
+            <label>Watchlist</label>
+            <select id="sn-f-sq-watchlist" class="sn-select"></select>
+          </div>
+          <div class="sn-field">
+            <label>Benchmark</label>
+            <input id="sn-f-sq-benchmark" class="sn-input" type="text" value="SPY" />
+          </div>
+        </div>
+        <div class="sn-field">
+          <label>Query text</label>
+          <textarea id="sn-f-sq-query" placeholder="e.g. RSIDiff90() >= 12 OR RSIDiff90() <= -12"></textarea>
+        </div>
+        <div class="sn-field">
+          <label>What kind of setup is this query looking for? (optional, but recommended)</label>
+          <div style="display:flex;flex-wrap:wrap;gap:14px">
+            <label class="sn-pill" style="font-weight:600"><input type="checkbox" class="sn-sq-direction" value="BULLISH" style="margin-right:6px">Bullish</label>
+            <label class="sn-pill" style="font-weight:600"><input type="checkbox" class="sn-sq-direction" value="BEARISH" style="margin-right:6px">Bearish</label>
+            <label class="sn-pill" style="font-weight:600"><input type="checkbox" class="sn-sq-direction" value="SIDEWAYS" style="margin-right:6px">Sideways</label>
+            <label class="sn-pill" style="font-weight:600"><input type="checkbox" class="sn-sq-direction" value="MRT" style="margin-right:6px">MRT (mean reversion)</label>
+          </div>
+        </div>
+        <div class="sn-field">
+          <label>Min score (0 = don't filter)</label>
+          <input id="sn-f-sq-min-conviction" class="sn-input" type="number" min="0" max="100" step="5" value="0" style="width:120px" />
+        </div>
+        <div class="sn-legend"><b>If you check a direction above</b>, a match only alerts when a real options setup aligned to that direction exists right now (proper strikes/legs from the same engine as Trade Opportunity Scanner, scored 0-100) — e.g. a query written to find bearish setups won't get scored/penalized as if it should look bullish. Leave all unchecked to keep the old behavior (generic conviction score, any direction).</div>
+        <div class="sn-field" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--sn-border,#333)">
+          <label><input type="checkbox" id="sn-f-sq-combine" onchange="document.getElementById('sn-f-sq-score-expr-wrap').style.display = this.checked ? '' : 'none'" style="margin-right:6px">Combine into ONE daily digest instead of one alert per symbol</label>
+          <div class="sn-legend" style="margin-top:4px">For a large watchlist (200+ symbols), one Telegram push per match is unusable. When checked, this sends a SINGLE message listing every symbol that matched today with its score, sorted strongest first — one digest per day per source instead of a flood of individual pushes. The direction/min-score settings above don't apply in this mode (no per-symbol trade-setup lookup); scoring uses the expression below instead.</div>
+        </div>
+        <div class="sn-field" id="sn-f-sq-score-expr-wrap" style="display:none">
+          <label>Score expression (any Scanner Builder primitive/expression, evaluated per matched symbol)</label>
+          <input id="sn-f-sq-score-expr" class="sn-input" type="text" value="Score()" placeholder='e.g. Score(), ConfScore(), RSIDiff90()' />
+        </div>
+      </div>
+
+      <div id="sn-kind-swing_positioning" class="sn-kind-panel" style="display:none">
+        <div class="sn-row2">
+          <div class="sn-field">
+            <label>Watchlist (blank = every symbol with options OI tracked)</label>
+            <select id="sn-f-sp-watchlist" class="sn-select"></select>
+          </div>
+          <div class="sn-field">
+            <label>Min confidence</label>
+            <input id="sn-f-sp-min-confidence" class="sn-input" type="number" min="0" max="100" step="5" value="40" />
+          </div>
+        </div>
+        <div class="sn-row2">
+          <div class="sn-field">
+            <label>Min total OI (liquidity gate)</label>
+            <input id="sn-f-sp-min-oi" class="sn-input" type="number" min="0" step="1000" value="50000" />
+          </div>
+          <div class="sn-field">
+            <label>Min avg daily volume (liquidity gate)</label>
+            <input id="sn-f-sp-min-volume" class="sn-input" type="number" min="0" step="100000" value="1000000" />
+          </div>
+        </div>
+        <div class="sn-legend">Reads stock volume vs price over the last ~2 weeks (Wyckoff effort-vs-result: heavy volume with little price movement is absorption or distribution) crossed against options walls at a 20-45 DTE swing horizon. Only alerts when the stock-side and options-side signals agree — either alone is a hypothesis, not a high-probability setup. One alert per symbol per day, same rule as Trade Opportunity Scanner. No defined entry/stop/POP-RR the way a trade alert has — this is a positioning read, not a specific trade.</div>
+      </div>
+
+      <div class="sn-footer-actions">
+        <button class="sn-btn" id="sn-modal-cancel">Cancel</button>
+        <button class="sn-btn good" id="sn-modal-save">Save source</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sn-modal-backdrop" id="sn-detail-backdrop">
+    <div class="sn-modal">
+      <div class="sn-modal-head">
+        <div style="font-weight:900;font-size:18px" id="sn-detail-title">Alert detail</div>
+        <button class="sn-btn sm" id="sn-detail-close">✕</button>
+      </div>
+      <div class="sn-legend" id="sn-detail-meta" style="margin-bottom:10px"></div>
+      <div class="sn-field">
+        <label>Exact message sent</label>
+        <textarea id="sn-detail-message" readonly style="min-height:180px;width:100%;background:rgba(8,12,24,.72);color:var(--sn-text);border:1px solid var(--sn-border);border-radius:10px;padding:10px;font-family:ui-monospace,monospace;font-size:12.5px"></textarea>
+      </div>
+      <div class="sn-footer-actions">
+        <button class="sn-btn" id="sn-detail-close2">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/signal_notifier.js"></script>
+  <script src="/static/panel_tools.js"></script>
+</body>
+</html>

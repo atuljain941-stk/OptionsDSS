@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scanner Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root {
+      --sd-bg: #0f1424;
+      --sd-panel: #1b2235;
+      --sd-panel-2: #20283d;
+      --sd-border: rgba(148,163,184,.16);
+      --sd-text: #e5eefc;
+      --sd-muted: #7b8ab5;
+      --sd-accent: #7c9df8;
+      --sd-accent-2: #bf5af2;
+      --sd-good: #22c55e;
+      --sd-warn: #f59e0b;
+      --sd-bad: #ef4444;
+      --sd-chip: rgba(124,157,248,.12);
+    }
+    html,body { height:100%; }
+    body {
+      margin:0;
+      background: linear-gradient(180deg, #0c1120 0%, #0f1424 100%);
+      color: var(--sd-text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      font-size:14px;
+    }
+    * { box-sizing: border-box; }
+    button, input, select, textarea { font: inherit; }
+    body { font-size:14px; }
+    .sd-shell { min-height:100vh; padding:16px; font-size:14px; }
+    .sd-topbar, .sd-meta, .sd-toolbar { background: rgba(28,36,56,.88); border:1px solid var(--sd-border); border-radius:14px; box-shadow: 0 8px 30px rgba(0,0,0,.22); }
+    .sd-topbar { padding:12px 14px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between; }
+    .sd-brand { font-weight:900; font-size:20px; display:flex; gap:8px; align-items:center; }
+    .sd-controls, .sd-right { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .sd-input, .sd-select, .sd-btn {
+      border-radius:10px; border:1px solid var(--sd-border);
+      background: rgba(8,12,24,.7); color: var(--sd-text);
+      padding:9px 11px; outline:none;
+    }
+    .sd-input, .sd-select { min-height: 38px; font-size:13px; }
+    .sd-input { min-width: 220px; }
+    .sd-select { min-width: 180px; }
+    .sd-size-input { min-width:74px; width:82px; padding:6px 8px; }
+    .sd-btn {
+      cursor:pointer; user-select:none; transition:.15s ease;
+      background: linear-gradient(180deg, rgba(124,157,248,.28), rgba(124,157,248,.16));
+      font-weight:700;
+    }
+    .sd-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+    .sd-btn.primary { background: linear-gradient(180deg, rgba(124,157,248,.42), rgba(124,157,248,.22)); }
+    .sd-btn.good { background: linear-gradient(180deg, rgba(34,197,94,.32), rgba(34,197,94,.15)); }
+    .sd-btn.bad { background: linear-gradient(180deg, rgba(239,68,68,.34), rgba(239,68,68,.14)); }
+    .sd-btn.purple { background: linear-gradient(180deg, rgba(191,90,242,.35), rgba(191,90,242,.18)); }
+    .sd-toolbar { margin-top:12px; padding:12px 14px; }
+    .sd-summary { display:grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+    .sd-chip { background: rgba(7,11,23,.6); border:1px solid var(--sd-border); border-radius:12px; padding:10px 12px; }
+    .sd-chip .l { color:var(--sd-muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    .sd-chip .v { font-size:20px; font-weight:900; margin-top:2px; }
+    .sd-note { margin-top:10px; color:var(--sd-muted); font-size:13px; }
+    .sd-tiles {
+      margin-top:14px;
+      display:grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr));
+      gap:12px;
+      align-items:start;
+      width:100%;
+      overflow-x:auto;
+      overflow-y:visible;
+    }
+    .sd-tiles.fixed-size {
+      display:flex;
+      flex-wrap:wrap;
+      align-items:flex-start;
+      overflow-x:auto;
+      overflow-y:visible;
+    }
+    .sd-tiles.fixed-size .sd-tile {
+      flex:0 0 var(--tile-w, 420px);
+      width:var(--tile-w, 420px);
+      min-width:var(--tile-w, 420px);
+      max-width:var(--tile-w, 420px);
+      height:var(--tile-h, 380px);
+      min-height:var(--tile-h, 380px);
+      max-height:var(--tile-h, 380px);
+      display:flex;
+      flex-direction:column;
+    }
+    .sd-tile {
+      position:relative;
+      background: linear-gradient(180deg, rgba(28,36,56,.94), rgba(23,30,49,.94));
+      border:1px solid var(--sd-border);
+      border-radius:16px;
+      padding:12px;
+      min-width:0;
+      width:100%;
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      min-height:var(--tile-h, 380px);
+      transition: box-shadow .15s ease, transform .15s ease;
+    }
+    .sd-tile:hover { box-shadow:0 12px 26px rgba(0,0,0,.22); }
+    .sd-tiles.layout-editing { display:flex; flex-wrap:wrap; align-items:flex-start; overflow-x:auto; overflow-y:visible; border:1px dashed rgba(124,157,248,.25); border-radius:16px; padding:10px; background:rgba(124,157,248,.025); }
+    .sd-tiles.layout-editing .sd-tile { position:relative; flex:0 0 var(--tile-w, 420px); width:var(--tile-w, 420px); }
+    .sd-tile.editable { resize:none; overflow:hidden; }
+    .sd-resize-handle { display:none; position:absolute; right:4px; bottom:4px; width:22px; height:22px; border-radius:8px; border:1px solid rgba(148,163,184,.35); background:rgba(124,157,248,.28); cursor:nwse-resize; z-index:20; }
+    .sd-resize-handle::after { content:'↘'; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:12px; color:#dbe7ff; }
+    .sd-tile.editable .sd-resize-handle { display:block; }
+    body.sd-resizing-active, body.sd-resizing-active * { cursor:nwse-resize !important; user-select:none !important; }
+    .sd-tile.sd-dragging { opacity:.55; outline:2px dashed var(--sd-accent); }
+    .sd-drag-handle { display:none; width:28px; height:28px; align-items:center; justify-content:center; border-radius:8px; border:1px solid var(--sd-border); background:rgba(124,157,248,.14); color:#c7d2fe; cursor:grab; user-select:none; }
+    .sd-tiles.layout-editing .sd-drag-handle { display:inline-flex; }
+    .sd-drag-handle:active { cursor:grabbing; }
+    .sd-tile-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; flex:0 0 auto; }
+    .sd-title { font-size:19px; font-weight:900; line-height:1.1; }
+    .sd-subtitle { margin-top:4px; color:var(--sd-muted); font-size:13px; line-height:1.35; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+    .sd-tag { display:inline-flex; align-items:center; gap:6px; margin-left:8px; padding:4px 8px; border-radius:999px; background:var(--sd-chip); color:#95a8d6; font-size:12px; font-weight:700; }
+    .sd-actions { display:flex; gap:6px; flex-wrap:wrap; }
+    .sd-ico { width:30px; height:30px; border-radius:8px; border:1px solid var(--sd-border); background: rgba(8,12,24,.65); color:var(--sd-text); cursor:pointer; }
+    .sd-ico:hover { background: rgba(124,157,248,.18); }
+    .sd-config { margin-top:10px; display:grid; grid-template-columns: repeat(auto-fit, minmax(86px, 1fr)); gap:8px; align-items:end; flex:0 0 auto; }
+    .sd-template-line { margin-top:7px; color:var(--sd-muted); font-size:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; flex:0 0 auto; }
+    .sd-config label { display:block; font-size:12px; color:var(--sd-muted); margin-bottom:4px; text-transform:uppercase; letter-spacing:.03em; }
+    .sd-config .sd-input, .sd-config .sd-select { width:100%; min-width:0; }
+    .sd-results { margin-top:12px; min-height:0; flex:1 1 auto; display:flex; flex-direction:column; overflow:hidden; }
+    .sd-res-meta { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; color:var(--sd-muted); font-size:12px; margin-bottom:8px; flex:0 0 auto; }
+    .sd-table-wrap { overflow:auto; border:1px solid var(--sd-border); border-radius:12px; background: rgba(8,12,24,.35); max-width:100%; max-height:none; min-height:0; flex:1 1 auto; }
+    table.sd-table { width:100%; min-width:max-content; border-collapse:collapse; font-size:13px; table-layout:auto; }
+    .sd-table th, .sd-table td { padding:9px 11px; border-bottom:1px solid rgba(148,163,184,.08); white-space:nowrap; }
+    .sd-table th { position:sticky; top:0; background: rgba(20,28,44,.95); color:#c7d2fe; text-align:left; font-weight:800; z-index:1; user-select:none; }.sd-table th.sd-sortable{cursor:pointer}.sd-table th.sd-sortable:hover{background:rgba(124,157,248,.15);color:#fff}.sd-sort-mark{font-size:12px;margin-left:4px;color:#93c5fd}
+    .sd-table tr:nth-child(even) td { background: rgba(255,255,255,.01); }
+    .sd-table .pos { color: var(--sd-good); }
+    .sd-table .neg { color: var(--sd-bad); }
+    .sd-table .muted { color: var(--sd-muted); }
+    .sd-empty { color:var(--sd-muted); padding:16px; text-align:center; }
+    .sd-status { margin-left:auto; color: var(--sd-muted); font-size:12px; }
+    .sd-modal-backdrop {
+      position: fixed; inset:0; background: rgba(4,8,16,.78); display:none; align-items:center; justify-content:center; z-index:99999;
+    }
+    .sd-modal {
+      width:min(980px, calc(100vw - 20px)); max-height: calc(100vh - 20px); overflow:auto;
+      background: linear-gradient(180deg, #1b2235, #171e2f);
+      border:1px solid var(--sd-border); border-radius:18px; box-shadow:0 30px 80px rgba(0,0,0,.45);
+      padding:14px;
+    }
+    .sd-modal-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
+    .sd-modal-grid { display:grid; grid-template-columns: 1.4fr .8fr .55fr .55fr .55fr .55fr; gap:10px; margin-bottom:10px; }
+    .sd-modal-grid .block { min-width:0; }
+    .sd-textarea {
+      width:100%; min-height:170px; resize:vertical;
+      background: rgba(8,12,24,.72); color: var(--sd-text); border:1px solid var(--sd-border);
+      border-radius:12px; padding:12px; outline:none; line-height:1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .sd-autocomplete { margin-top:8px; border:1px solid var(--sd-border); border-radius:12px; background: rgba(8,12,24,.96); max-height:280px; overflow:auto; display:none; }
+    .sd-ac-item { padding:10px 12px; border-bottom:1px solid rgba(148,163,184,.08); cursor:pointer; display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .sd-ac-item:hover, .sd-ac-item.active { background: rgba(124,157,248,.14); }
+    .sd-ac-item b { color: #fff; }
+    .sd-ac-item .mini { color: var(--sd-muted); font-size: 12px; }
+    .sd-ac-code { font-family: ui-monospace, monospace; font-size: 12px; color: #c8d4ff; margin-top:4px; white-space:pre-wrap; }
+    .sd-footer-actions { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-top:12px; }
+    .sd-pill { display:inline-flex; gap:6px; align-items:center; border:1px solid var(--sd-border); background: rgba(8,12,24,.65); color: #c7d2fe; border-radius:999px; padding:6px 10px; font-size:12px; font-weight:700; }
+    .sd-legend { color: var(--sd-muted); font-size:13px; }
+    @media (max-width: 900px) {
+      .sd-modal-grid { grid-template-columns: 1fr 1fr; }
+      .sd-config { grid-template-columns: 1fr; }
+      .sd-tiles { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="sd-shell">
+    <button id="sd-panel-toggle" type="button" title="Collapse / expand the controls panel to save space">▾ Hide controls</button>
+    <div class="sd-topbar">
+      <div class="sd-controls">
+        <div class="sd-brand">★ Scanner Dashboard</div>
+        <select id="sd-dashboard-select" class="sd-select"></select>
+        <input id="sd-dashboard-name" class="sd-input" type="text" placeholder="Dashboard name" />
+        <button class="sd-btn primary" id="sd-save-dashboard">💾 Save</button>
+        <button class="sd-btn" id="sd-new-dashboard">+ New</button>
+        <button class="sd-btn" id="sd-copy-dashboard">⧉ Copy</button>
+        <button class="sd-btn" id="sd-add-tile">+ Add tile</button>
+        <button class="sd-btn" id="sd-layout-pack" title="Auto-pack tiles without overlap">Auto pack</button>
+        <button class="sd-btn" id="sd-layout-2x2" title="Apply two-column tile layout">2x2</button>
+        <button class="sd-btn" id="sd-layout-3x3" title="Apply three-column tile layout">3x3</button>
+      </div>
+      <div class="sd-right">
+        <label class="sd-pill">Watchlist <select id="sd-watchlist" class="sd-select" style="min-width:160px;padding:6px 10px"></select></label>
+        <label class="sd-pill">Timeframe <select id="sd-timeframe" class="sd-select" style="min-width:96px;padding:6px 10px">
+          <option value="5m">5m</option><option value="15m">15m</option><option value="1h" selected>1H</option><option value="2h">2H</option><option value="4h">4H</option><option value="1d">1D</option><option value="1w">1W</option><option value="1m">1M</option>
+        </select></label>
+        <label class="sd-pill"><input id="sd-auto-refresh" type="checkbox" style="margin-right:6px"> Auto refresh</label>
+        <label class="sd-pill"><input id="sd-edit-layout" type="checkbox" style="margin-right:6px"> Edit layout</label>
+        <label class="sd-pill">Tile W <input id="sd-tile-width" class="sd-input sd-size-input" type="number" min="320" step="10" value="420" /></label>
+        <label class="sd-pill">Tile H <input id="sd-tile-height" class="sd-input sd-size-input" type="number" min="240" step="10" value="380" /></label>
+        <label class="sd-pill"><input id="sd-freeze-size" type="checkbox" style="margin-right:6px"> Freeze size</label>
+        <button class="sd-btn" id="sd-apply-size" title="Apply width and height to every tile">Apply size</button>
+        <button class="sd-btn" id="sd-refresh">⟳ Refresh</button>
+        <button class="sd-btn" id="sd-open-editor">✎ Editor</button>
+      </div>
+    </div>
+
+    <div class="sd-toolbar">
+      <div class="sd-summary" id="sd-summary"></div>
+      <div class="sd-note" id="sd-note">Load a dashboard to begin.</div>
+    </div>
+
+    <div class="sd-tiles" id="sd-tiles"></div>
+  </div>
+
+  <div class="sd-modal-backdrop" id="sd-modal-backdrop">
+    <div class="sd-modal">
+      <div class="sd-modal-head">
+        <div>
+          <div style="font-weight:900;font-size:18px">Tile editor</div>
+          <div class="sd-legend">Type a scanner query, choose a watchlist, and set the prior days shift.</div>
+        </div>
+        <button class="sd-ico" id="sd-modal-close" title="Close">✕</button>
+      </div>
+      <div id="sd-modal-error" style="display:none;margin-bottom:10px;padding:10px 12px;border-radius:10px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.4);color:#fecaca;font-size:13px;font-weight:600;"></div>
+      <div class="sd-modal-grid">
+        <div class="block">
+          <label>Tile name</label>
+          <input id="sd-modal-title" class="sd-input" type="text" placeholder="Tile title" />
+        </div>
+        <div class="block">
+          <label>Watchlist</label>
+          <select id="sd-modal-watchlist" class="sd-select" style="width:100%"></select>
+        </div>
+        <div class="block">
+          <label>Prior days</label>
+          <input id="sd-modal-prior-days" class="sd-input" type="number" min="0" step="1" value="0" />
+        </div>
+        <div class="block">
+          <label>Limit</label>
+          <input id="sd-modal-limit" class="sd-input" type="number" min="1" step="1" value="200" />
+        </div>
+        <div class="block">
+          <label>Width</label>
+          <input id="sd-modal-width" class="sd-input" type="number" min="320" step="10" value="420" />
+        </div>
+        <div class="block">
+          <label>Height</label>
+          <input id="sd-modal-height" class="sd-input" type="number" min="240" step="10" value="380" />
+        </div>
+      </div>
+      <div class="block" style="margin-bottom:10px">
+        <label>Result column template</label>
+        <select id="sd-modal-column-template" class="sd-select" style="width:100%"></select>
+        <div class="sd-legend" style="margin-top:4px">Templates are primitive-based result columns shared with Scanner Builder.</div>
+      </div>
+      <label style="display:block;margin-bottom:6px;font-size:12px;color:var(--sd-muted)">Scanner query</label>
+      <textarea id="sd-modal-query" class="sd-textarea" placeholder="Type a scanner query and use autocomplete…"></textarea>
+      <div id="sd-autocomplete" class="sd-autocomplete"></div>
+      <div class="sd-footer-actions">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="sd-btn good" id="sd-save-tile">Save tile</button>
+          <button class="sd-btn" id="sd-run-tile">Run now</button>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="sd-btn bad" id="sd-delete-tile">Delete tile</button>
+          <button class="sd-btn" id="sd-cancel-tile">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/scanner_dashboard.js"></script>
+  <script src="/static/panel_tools.js"></script>
+  <style>
+    #sd-panel-toggle{display:inline-flex;align-items:center;gap:6px;margin:0 0 10px;padding:6px 12px;background:var(--sd-card,#0e141b);border:1px solid var(--sd-border,#1c2836);color:var(--sd-text,#e7edf5);border-radius:8px;font:600 12.5px/1 inherit;cursor:pointer}
+    #sd-panel-toggle:hover{border-color:var(--sd-accent,#5aa2ff)}
+    .sd-shell.sd-collapsed .sd-topbar,.sd-shell.sd-collapsed .sd-toolbar{display:none!important}
+  </style>
+  <script>
+    (function(){
+      var shell=document.querySelector('.sd-shell'), btn=document.getElementById('sd-panel-toggle');
+      if(!shell||!btn) return;
+      function apply(on){ shell.classList.toggle('sd-collapsed',on); btn.textContent=(on?'\u25b8 Show controls':'\u25be Hide controls'); }
+      btn.addEventListener('click',function(){ var on=!shell.classList.contains('sd-collapsed'); apply(on); try{localStorage.setItem('sd-panel-collapsed',on?'1':'0');}catch(e){} });
+      apply(localStorage.getItem('sd-panel-collapsed')==='1');
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,1143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ICICI Auto-Trading</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root {
+      --dte-bg:#0f1424; --dte-panel:#1b2235; --dte-border:rgba(148,163,184,.16);
+      --dte-text:#e5eefc; --dte-muted:#7b8ab5; --dte-accent:#7c9df8;
+      --dte-good:#22c55e; --dte-warn:#f59e0b; --dte-bad:#ef4444;
+    }
+    html,body{height:100%;}
+    body{margin:0;background:linear-gradient(180deg,#0c1120 0%,#0f1424 100%);color:var(--dte-text);
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;}
+    *{box-sizing:border-box;}
+    .shell{min-height:100vh;padding:16px;max-width:1300px;margin:0 auto;}
+    .top{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;
+      background:rgba(28,36,56,.88);border:1px solid var(--dte-border);border-radius:14px;padding:12px 14px;margin-bottom:12px;}
+    .brand{font-weight:900;font-size:19px;}
+    .sub{color:var(--dte-muted);font-size:12.5px;margin-top:2px;}
+    .panel{background:rgba(20,26,42,.75);border:1px solid var(--dte-border);border-radius:14px;
+      padding:14px;margin-bottom:14px;}
+    .panel h3{margin:0 0 10px 0;font-size:14px;}
+    input,select{background:rgba(15,20,36,.9);color:var(--dte-text);border:1px solid var(--dte-border);
+      border-radius:8px;padding:7px 10px;font-size:13px;}
+    label{font-size:11.5px;color:var(--dte-muted);font-weight:700;display:block;margin-bottom:3px;}
+    .btn{cursor:pointer;border-radius:10px;border:1px solid var(--dte-border);
+      background:linear-gradient(180deg,rgba(124,157,248,.32),rgba(124,157,248,.16));
+      color:var(--dte-text);padding:9px 14px;font-weight:700;font-size:13px;}
+    .btn:hover{filter:brightness(1.1);}
+    .btn.danger{background:linear-gradient(180deg,rgba(239,68,68,.32),rgba(239,68,68,.16));}
+    .btn.good{background:linear-gradient(180deg,rgba(34,197,94,.32),rgba(34,197,94,.16));}
+    .row{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px;}
+    .row > div{min-width:140px;}
+    .legs-table{width:100%;border-collapse:collapse;margin:8px 0;}
+    .legs-table th{text-align:left;font-size:10.5px;color:var(--dte-muted);padding:4px 6px;}
+    .legs-table td{padding:4px 6px;}
+    .legs-table input,.legs-table select{width:100%;}
+    table.pos-table{width:100%;border-collapse:collapse;font-size:12.5px;}
+    table.pos-table th{text-align:left;padding:6px 8px;color:var(--dte-muted);font-weight:700;font-size:11px;
+      text-transform:uppercase;border-bottom:1px solid var(--dte-border);}
+    table.pos-table td{padding:6px 8px;border-bottom:1px solid rgba(148,163,184,.08);}
+    .pnl-pos{color:var(--dte-good);font-weight:700;}
+    .pnl-neg{color:var(--dte-bad);font-weight:700;}
+    .status-chip{padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:700;}
+    .status-OPEN{background:rgba(34,197,94,.18);color:var(--dte-good);}
+    .status-CLOSING{background:rgba(245,158,11,.18);color:var(--dte-warn);}
+    .status-CLOSED{background:rgba(148,163,184,.14);color:var(--dte-muted);}
+    .status-ERROR{background:rgba(239,68,68,.18);color:var(--dte-bad);}
+    .empty{color:var(--dte-muted);padding:16px;text-align:center;}
+    .session-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;}
+    .dot-active{background:var(--dte-good);}
+    .dot-inactive{background:var(--dte-bad);}
+    .warn-banner{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);border-radius:10px;
+      padding:10px 12px;font-size:12px;color:var(--dte-warn);margin-bottom:12px;}
+    .dte-tab{padding:9px 16px;border-radius:10px;border:1px solid var(--dte-border);
+      background:rgba(20,26,42,.7);cursor:pointer;font-weight:700;font-size:13px;color:var(--dte-muted);}
+    .dte-tab.active{background:linear-gradient(180deg,rgba(124,157,248,.4),rgba(124,157,248,.2));color:var(--dte-text);}
+    .tab-page{display:none;}
+    .tab-page.active{display:block;}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="top">
+    <div>
+      <div class="brand">ICICI Direct Auto-Trading</div>
+      <div class="sub">Multi-leg vertical execution with safe sequencing (LONG legs open first / SHORT legs close first) &mdash; Breeze has no native vertical order type, so legs are sent independently in the safe order.</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div id="liveTradingToggleWrap" style="display:flex;align-items:center;gap:8px;">
+        <span style="font-size:12.5px;font-weight:700;color:var(--dte-muted);">Live Trading</span>
+        <button class="btn" id="liveTradingBtn" onclick="toggleLiveTrading()" style="padding:6px 14px;">checking&hellip;</button>
+      </div>
+      <div>
+        <span class="session-dot" id="sessionDot"></span>
+        <span id="sessionStatus" style="font-size:12.5px;color:var(--dte-muted);">checking session&hellip;</span>
+      </div>
+    </div>
+  </div>
+  <div class="sub" id="liveTradingSub" style="margin-bottom:10px;"></div>
+
+  <div class="warn-banner">
+    &#9888; Live-capable by default (no dry-run gate). Double-check strikes/quantities before opening. Use the "Dry Run" checkbox below to test the sequencing/UI without sending real orders.
+  </div>
+
+  <div class="dte-tabs" id="pageTabs" style="display:flex;gap:8px;margin-bottom:14px;">
+    <div class="dte-tab" data-tab="connection" onclick="showTab('connection')">Connection</div>
+    <div class="dte-tab" data-tab="positions" onclick="showTab('positions')">Positions</div>
+    <div class="dte-tab" data-tab="newposition" onclick="showTab('newposition')">New Position</div>
+    <div class="dte-tab" data-tab="strategy" onclick="showTab('strategy')">Strategy</div>
+    <div class="dte-tab" data-tab="paper" onclick="showTab('paper')">Paper Trades</div>
+    <div class="dte-tab" data-tab="diagnostics" onclick="showTab('diagnostics')">Diagnostics</div>
+  </div>
+
+  <div data-tabgroup="connection" class="tab-page">
+  <div class="panel">
+    <h3>Breeze API Credentials</h3>
+    <div class="sub" style="margin-bottom:8px;" id="credsStatusLine">checking&hellip;</div>
+    <div class="row">
+      <div style="flex:1;min-width:220px;">
+        <label>API Key</label>
+        <input type="text" id="apiKeyInput" placeholder="Breeze API Key">
+      </div>
+      <div style="flex:1;min-width:220px;">
+        <label>API Secret</label>
+        <input type="password" id="apiSecretInput" placeholder="Breeze API Secret">
+      </div>
+      <div style="align-self:flex-end;">
+        <button class="btn" onclick="saveCredentials()">Save Credentials</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Breeze Session</h3>
+    <div class="sub" style="margin-bottom:8px;">The session token is saved to the DB when you set it, so an app restart tries to reconnect automatically (or click Connect below) instead of forcing a re-paste every time -- Breeze sessions still expire on their own schedule, so a genuinely expired token still needs a fresh paste.</div>
+    <div class="row">
+      <div style="flex:1;min-width:280px;">
+        <label>Today's Session Token (paste from Breeze login redirect)</label>
+        <input type="text" id="sessionTokenInput" placeholder="Session token" style="width:100%;">
+      </div>
+      <div style="align-self:flex-end;display:flex;gap:8px;">
+        <button class="btn" id="setSessionBtn" onclick="setSession()">Set Session</button>
+        <button class="btn" id="connectBtn" onclick="connectSession()">Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Background Monitor Status</h3>
+    <div class="sub">The P&amp;L polling job's real last-run time, straight from the scheduler -- if this is stale/blank while the app has clearly been running, the job either isn't registered (needs an app restart to pick up the code) or is disabled in Scheduler Hub.</div>
+    <div id="monitorStatusLine" style="margin-top:8px;font-size:13px;">checking&hellip;</div>
+    <div id="marketHoursLine" style="margin-top:6px;font-size:12px;color:var(--dte-muted);">checking market hours&hellip;</div>
+    <button class="btn" style="margin-top:8px;padding:6px 12px;font-size:12px;" onclick="checkMonitorStatus()">Refresh Status</button>
+  </div>
+  </div>
+
+  <div data-tabgroup="positions" class="tab-page">
+  <div class="panel">
+    <h3>Broker Positions (live from ICICI) <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="loadBrokerPositions()">Refresh</button></h3>
+    <div class="sub" style="margin-bottom:8px;">Everything currently held in the account, whether opened through this page or not. Rows already covered by a tracked position are marked; select untracked ones to adopt them for P&amp;L monitoring / auto-close.</div>
+    <div class="warn-banner" style="margin-bottom:10px;">
+      &#9888; <b>Side (LONG/SHORT) is a guess</b> from ICICI's raw quantity sign, and it's been confirmed wrong on a real vertical (a bull put spread came back with both legs marked LONG). Check each row's Side dropdown against what you actually know the position to be, and correct it before adopting -- the dropdown is editable, don't trust the default.
+    </div>
+    <div class="sub" style="margin-bottom:8px;"><b>To set target/stop-loss for a whole strategy (not per leg):</b> check every leg that belongs to that one strategy (e.g. both legs of the NIFTY vertical together), enter ONE target and ONE stop-loss below, click Adopt. That single target/stop-loss then applies to the <i>combined</i> P&amp;L across all the legs you selected -- exactly the "strategy level, not position level" behavior. Adopting BankNifty and the NIFTY vertical separately (two Adopt clicks) gives each its own independent target/stop.</div>
+    <div id="brokerPositionsWrap"><div class="empty">Click Refresh to load (requires an active session).</div></div>
+    <div id="adoptBar" style="display:none;margin-top:10px;">
+      <input id="adopt-strategy" placeholder="Strategy name for adopted position" style="width:220px;">
+      <input id="adopt-target" type="number" placeholder="Target P&L (&#8377;)" style="width:140px;">
+      <input id="adopt-stoploss" type="number" placeholder="Stop Loss P&L (&#8377;)" style="width:140px;">
+      <select id="adopt-execmode" style="width:220px;">
+        <option value="safe_sequential">Safe Sequential (close mode)</option>
+        <option value="simultaneous_market">Simultaneous Market (close mode)</option>
+      </select>
+      <button class="btn good" onclick="adoptSelected()">Adopt Selected Legs</button>
+    </div>
+  </div>
+  </div>
+
+  <div data-tabgroup="newposition" class="tab-page">
+  <div class="panel">
+    <h3>Option Chain</h3>
+    <div class="row">
+      <div><label>Stock Code</label><input id="chain-stockcode" placeholder="e.g. NIFTY" onblur="fetchExpiriesFor('chain-stockcode','chain-expiry')"></div>
+      <div><label>Expiry Date</label><select id="chain-expiry"><option value="">-- enter symbol, tab out --</option></select></div>
+      <div><label>Strikes each side of spot</label><input id="chain-strikecount" type="number" value="12" min="1" max="60" style="width:80px;"></div>
+      <div style="align-self:flex-end;"><button class="btn" onclick="loadOptionChain()">Load Chain</button></div>
+      <div id="chainSpotLine" style="align-self:flex-end;font-size:14px;font-weight:700;color:var(--dte-accent);"></div>
+    </div>
+    <div id="chainWrap"><div class="empty">Enter a symbol + expiry and click Load Chain.</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Open New Position</h3>
+    <div class="row">
+      <div><label>Strategy Name</label><input id="f-strategy" placeholder="e.g. NIFTY Bull Put Spread"></div>
+      <div><label>Stock Code</label><input id="f-stockcode" placeholder="e.g. NIFTY" onblur="fetchExpiriesFor('f-stockcode','f-expiry')"></div>
+      <div><label>Expiry Date</label><select id="f-expiry"><option value="">-- enter symbol, tab out --</option></select></div>
+      <div><label>Lot Size</label><input id="f-lotsize" type="number" value="1" min="1"></div>
+      <div><label>Order Type</label>
+        <select id="f-ordertype"><option value="market">Market</option><option value="limit">Limit</option></select>
+      </div>
+      <div style="min-width:220px;">
+        <label>Execution Mode</label>
+        <select id="f-execmode">
+          <option value="safe_sequential">Safe Sequential (wait for each fill)</option>
+          <option value="simultaneous_market">Simultaneous Market (fire all legs together)</option>
+        </select>
+      </div>
+      <div><label>Dry Run</label>
+        <select id="f-dryrun"><option value="false">No</option><option value="true">Yes</option></select>
+      </div>
+    </div>
+    <div class="sub" style="margin-bottom:10px;">
+      <b>Safe Sequential</b> (default): each leg's fill is confirmed before the next is placed &mdash; never a moment of naked short exposure, but a small delay between legs (a poll loop, up to 5s per leg) where price can move.
+      <b>Simultaneous Market</b>: every leg fires as a market order back-to-back with no wait &mdash; minimal time between legs so minimal slippage risk, but gives up the never-naked guarantee if one leg's order gets rejected after the other has already gone out. Only use Simultaneous on liquid instruments (NIFTY/BANKNIFTY weekly ATM strikes) where near-instant fill is a safe assumption.
+    </div>
+    <div class="row">
+      <div><label>Target P&L (&#8377;, close when P&L &ge; this)</label><input id="f-target" type="number" placeholder="e.g. 3000"></div>
+      <div><label>Stop Loss P&L (&#8377;, close when P&L &le; -this)</label><input id="f-stoploss" type="number" placeholder="e.g. 5000"></div>
+    </div>
+
+    <table class="legs-table" id="legsTable">
+      <thead><tr><th>Right</th><th>Strike</th><th>Side</th><th>Qty</th><th>Live Price</th><th>Limit Price (optional)</th><th></th></tr></thead>
+      <tbody id="legsBody"></tbody>
+    </table>
+    <button class="btn" onclick="addLegRow()">+ Add Leg</button>
+    <span style="font-size:11px;color:var(--dte-muted);margin-left:10px;">1 leg = straight single order. 2+ legs = sequenced automatically (LONG first on open, SHORT first on close).</span>
+
+    <div style="margin-top:14px;">
+      <button class="btn good" onclick="openPosition()">Open Position</button>
+      <span id="openStatus" style="margin-left:10px;font-size:12.5px;color:var(--dte-muted);"></span>
+    </div>
+  </div>
+  </div>
+
+  <div data-tabgroup="positions" class="tab-page">
+  <div class="panel">
+    <h3>Open Positions <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="checkPnlNow()">Check P&amp;L Now</button></h3>
+    <div class="sub" style="margin-bottom:8px;">A background job polls combined P&amp;L for every OPEN position every <b>30 seconds</b> and, if target or stop-loss is hit, fires the closing order automatically using the same safe sequencing as a manual close (SHORT legs bought back first, then LONG legs sold). "Check P&amp;L Now" above runs that same check immediately instead of waiting for the next tick.</div>
+    <div id="openPositionsWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Closed / Error Positions</h3>
+    <div id="closedPositionsWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+  </div>
+
+  <div data-tabgroup="strategy" class="tab-page">
+  <div class="panel">
+    <h3>Strategies <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="evaluateStrategiesNow()">Evaluate Now</button></h3>
+    <div class="sub" style="margin-bottom:8px;">Enabled strategies are checked automatically every minute (each strategy's own eval interval further throttles how often its condition is actually re-evaluated). When a strategy's opening condition is met, it resolves ITM/ATM/OTM legs against live spot + the chain and fires a tracked position with the target/stop-loss and execution mode defined here.</div>
+    <div id="strategiesWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>New Strategy</h3>
+    <div class="row">
+      <div><label>Strategy Name</label><input id="s-name" placeholder="e.g. NIFTY intraday bull put"></div>
+      <div><label>Stock Code</label><input id="s-stockcode" placeholder="e.g. NIFTY" onblur="fetchExpiriesFor('s-stockcode','s-expiry')"></div>
+      <div><label>Expiry Date</label><select id="s-expiry"><option value="">-- enter symbol, tab out --</option></select></div>
+      <div><label>Lot Size</label><input id="s-lotsize" type="number" value="1" min="1"></div>
+      <div><label>Execution Mode</label>
+        <select id="s-execmode">
+          <option value="safe_sequential">Safe Sequential</option>
+          <option value="simultaneous_market">Simultaneous Market</option>
+        </select>
+      </div>
+      <div><label>Enabled</label><select id="s-enabled"><option value="false">No (saved, inactive)</option><option value="true">Yes (starts evaluating)</option></select></div>
+    </div>
+
+    <table class="legs-table" id="strategyLegsTable">
+      <thead><tr><th>Right</th><th>Strike Mode</th><th>Offset (pts, 0 for ATM)</th><th>Side</th><th>Qty</th><th></th></tr></thead>
+      <tbody id="strategyLegsBody"></tbody>
+    </table>
+    <button class="btn" onclick="addStrategyLegRow()">+ Add Leg</button>
+    <span style="font-size:11px;color:var(--dte-muted);margin-left:10px;">Strikes are resolved fresh from live spot each time the strategy fires -- not fixed numbers.</span>
+
+    <div class="row" style="margin-top:14px;">
+      <div style="flex:1;min-width:260px;">
+        <label>Opening Condition</label>
+        <select id="s-open-type" onchange="toggleConditionHint('open')" style="margin-bottom:6px;">
+          <option value="price">Price (e.g. "&gt; 25000")</option>
+          <option value="scanner">Scanner query (reuses Scanner Builder)</option>
+        </select>
+        <input id="s-open-expr" placeholder="&gt; 25000" style="width:100%;">
+        <div id="s-open-hint" class="sub" style="margin-top:4px;"></div>
+      </div>
+      <div>
+        <label>Eval every (minutes)</label>
+        <input id="s-eval-interval" type="number" value="5" min="1" style="width:100px;">
+        <div class="sub" style="margin-top:4px;max-width:180px;">Intraday: 1-5. Positional: 60-1440.</div>
+      </div>
+      <div>
+        <label>Opening time window (optional)</label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="s-open-time-start" type="time" style="width:110px;">
+          <span style="color:var(--dte-muted);">to</span>
+          <input id="s-open-time-end" type="time" style="width:110px;">
+        </div>
+        <div class="sub" style="margin-top:4px;max-width:220px;">If set, the strategy can only fire when BOTH this window and the rule condition above are satisfied. Leave blank for no time gate.</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div><label>Target P&L (&#8377;)</label><input id="s-target" type="number" placeholder="e.g. 3000"></div>
+      <div><label>Stop Loss P&L (&#8377;)</label><input id="s-stoploss" type="number" placeholder="e.g. 5000"></div>
+      <div><label>Max Re-entries (intraday)</label><input id="s-max-reentries" type="number" value="0" min="0" style="width:100px;">
+        <div class="sub" style="margin-top:2px;max-width:180px;">0 = no re-entry. If stopped out, re-enters when the opening condition matches again, up to this count.</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div style="flex:1;min-width:260px;">
+        <label>Closing Condition (independent of target/stop, optional)</label>
+        <select id="s-close-type" onchange="toggleConditionHint('close')" style="margin-bottom:6px;">
+          <option value="none">None -- target/stop only</option>
+          <option value="price">Price</option>
+          <option value="scanner">Scanner query</option>
+        </select>
+        <input id="s-close-expr" placeholder="&lt; 24800" style="width:100%;">
+        <div id="s-close-hint" class="sub" style="margin-top:4px;"></div>
+      </div>
+      <div>
+        <label>Hard close time (optional)</label>
+        <input id="s-close-time" type="time" style="width:110px;">
+        <div class="sub" style="margin-top:4px;max-width:200px;">Closes at this time regardless of the rule above (e.g. intraday square-off). Either this OR the rule condition triggers the close -- not both required.</div>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <button class="btn good" onclick="createStrategy()">Create Strategy</button>
+      <span id="strategyStatus" style="margin-left:10px;font-size:12.5px;color:var(--dte-muted);"></span>
+    </div>
+  </div>
+  </div>
+
+  <div data-tabgroup="paper" class="tab-page">
+  <div class="panel">
+    <h3>Paper Trades <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="loadPositions()">Refresh</button></h3>
+    <div class="sub" style="margin-bottom:8px;">Positions opened while Live Trading was OFF -- entry prices are real, live-sourced quotes from ICICI at the moment of "opening", and P&amp;L/target/stop-loss are monitored exactly like real positions. No real orders were ever placed for these.</div>
+    <div id="paperOpenWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+  <div class="panel">
+    <h3>Paper Trades -- Closed</h3>
+    <div id="paperClosedWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+  </div>
+
+  <div data-tabgroup="diagnostics" class="tab-page">
+  <div class="panel">
+    <h3>Diagnostics</h3>
+    <div class="sub" style="margin-bottom:10px;">Tests every integration point in this build that's been marked "needs live validation" -- spot price, quote fetch, option chain, expiries, portfolio positions, the scanner-condition integration, and whether the background jobs are actually ticking. Read-only: never places an order or opens a position.</div>
+    <div class="row" style="margin-bottom:10px;">
+      <div><label>Test Symbol</label><input id="diag-stockcode" value="NIFTY" style="width:140px;"></div>
+      <div style="align-self:flex-end;"><button class="btn good" onclick="runDiagnostics()">Run All Checks</button></div>
+      <div id="diagSummary" style="align-self:flex-end;font-weight:700;"></div>
+    </div>
+    <div id="diagnosticsWrap"><div class="empty">Click "Run All Checks" to test the live integration.</div></div>
+  </div>
+  </div>
+</div>
+
+<script>
+let legCounter = 0;
+
+function addLegRow(prefill){
+  prefill = prefill || {};
+  const tbody = document.getElementById('legsBody');
+  const idx = legCounter++;
+  const tr = document.createElement('tr');
+  tr.id = 'leg-row-' + idx;
+  const right = prefill.right || 'call';
+  const side = prefill.side || 'LONG';
+  const strike = prefill.strike_price != null ? prefill.strike_price : '';
+  tr.innerHTML = `
+    <td><select data-field="right" onchange="fetchLegLivePrice(${idx})"><option value="call" ${right==='call'?'selected':''}>Call</option><option value="put" ${right==='put'?'selected':''}>Put</option></select></td>
+    <td><input data-field="strike_price" type="number" step="0.5" placeholder="strike" value="${strike}" onblur="fetchLegLivePrice(${idx})"></td>
+    <td><select data-field="side"><option value="LONG" ${side==='LONG'?'selected':''}>LONG</option><option value="SHORT" ${side==='SHORT'?'selected':''}>SHORT</option></select></td>
+    <td><input data-field="quantity" type="number" value="1" min="1"></td>
+    <td id="leg-liveprice-${idx}" style="font-size:12px;color:var(--dte-muted);">&mdash;</td>
+    <td><input data-field="limit_price" type="number" step="0.05" placeholder="blank = market"></td>
+    <td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="document.getElementById('leg-row-${idx}').remove()">Remove</button></td>
+  `;
+  tbody.appendChild(tr);
+  if (strike) fetchLegLivePrice(idx);
+}
+addLegRow(); // start with one leg (single-leg default)
+
+async function fetchLegLivePrice(idx){
+  const row = document.getElementById('leg-row-' + idx);
+  if (!row) return;
+  const cell = document.getElementById('leg-liveprice-' + idx);
+  const stockCode = document.getElementById('f-stockcode').value.trim();
+  const expiry = document.getElementById('f-expiry').value;
+  const right = row.querySelector('[data-field="right"]').value;
+  const strike = parseFloat(row.querySelector('[data-field="strike_price"]').value);
+  if (!stockCode || !expiry || !strike){ cell.textContent = '—'; return; }
+  cell.textContent = 'fetching…';
+  try{
+    const res = await fetch(`/api/icici/leg_price?stock_code=${stockCode}&expiry_date=${expiry}&right=${right}&strike_price=${strike}`);
+    const data = await res.json();
+    if (data.ok && data.ltp != null){
+      cell.innerHTML = `<span class="pnl-pos">&#8377;${data.ltp}</span>`;
+    } else {
+      cell.innerHTML = `<span class="pnl-neg" style="font-size:10.5px;">${esc(data.error||'no quote')}</span>`;
+    }
+  }catch(e){ cell.textContent = 'failed'; }
+}
+
+function collectLegs(){
+  const rows = document.querySelectorAll('#legsBody tr');
+  const legs = [];
+  let i = 0;
+  for (const row of rows){
+    const right = row.querySelector('[data-field="right"]').value;
+    const strike = parseFloat(row.querySelector('[data-field="strike_price"]').value);
+    const side = row.querySelector('[data-field="side"]').value;
+    const qty = parseInt(row.querySelector('[data-field="quantity"]').value, 10);
+    const limitPriceRaw = row.querySelector('[data-field="limit_price"]').value;
+    const limitPrice = limitPriceRaw ? parseFloat(limitPriceRaw) : null;
+    if (!strike || !qty) continue;
+    legs.push({leg_index: i++, right, strike_price: strike, side, quantity: qty, limit_price: limitPrice});
+  }
+  return legs;
+}
+
+async function saveCredentials(){
+  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  const apiSecret = document.getElementById('apiSecretInput').value.trim();
+  if (!apiKey || !apiSecret){ alert('Enter both API Key and API Secret'); return; }
+  try{
+    const res = await fetch('/api/icici/config', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({api_key: apiKey, api_secret: apiSecret})
+    });
+    const data = await res.json();
+    if (data.ok){
+      document.getElementById('apiKeyInput').value = '';
+      document.getElementById('apiSecretInput').value = '';
+      loadCredentialsStatus();
+      alert('Credentials saved. Now paste today\'s session token below.');
+    } else alert('Save failed');
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function loadCredentialsStatus(){
+  const line = document.getElementById('credsStatusLine');
+  try{
+    const res = await fetch('/api/icici/config');
+    const data = await res.json();
+    if (data.configured){
+      line.innerHTML = `<span class="session-dot dot-active"></span>API Key: ${data.api_key} &middot; Secret: ${data.api_secret||'(not set)'}`;
+    } else {
+      line.innerHTML = `<span class="session-dot dot-inactive"></span>Not configured yet -- enter your Breeze API Key and Secret below.`;
+    }
+  }catch(e){ line.textContent = 'Failed to check credential status.'; }
+}
+
+async function setSession(){
+  const token = document.getElementById('sessionTokenInput').value.trim();
+  if (!token) { alert('Enter a session token'); return; }
+  const btn = document.getElementById('setSessionBtn');
+  btn.disabled = true; btn.textContent = 'Connecting…';
+  try{
+    const res = await fetch('/api/icici/session', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({session_token: token})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('sessionTokenInput').value='';
+      alert('✅ Session token saved and connected successfully.');
+    } else {
+      alert('❌ Session failed: ' + (data.error || 'unknown error'));
+    }
+    refreshSessionStatus();
+  }catch(e){ alert('❌ Failed: ' + e); }
+  finally{ btn.disabled = false; btn.textContent = 'Set Session'; }
+}
+
+async function connectSession(){
+  const btn = document.getElementById('connectBtn');
+  btn.disabled = true; btn.textContent = 'Connecting…';
+  try{
+    const res = await fetch('/api/icici/session/connect', {method:'POST'});
+    const data = await res.json();
+    if (data.ok) alert(data.already_connected ? 'Already connected.' : '✅ Reconnected using the saved session token.');
+    else alert('❌ ' + (data.error || 'Could not reconnect -- paste a fresh session token below.'));
+    refreshSessionStatus();
+  }catch(e){ alert('❌ Failed: ' + e); }
+  finally{ btn.disabled = false; btn.textContent = 'Connect'; }
+}
+
+async function refreshSessionStatus(){
+  try{
+    const res = await fetch('/api/icici/session/status');
+    const data = await res.json();
+    const dot = document.getElementById('sessionDot');
+    const txt = document.getElementById('sessionStatus');
+    if (data.active){ dot.className='session-dot dot-active'; txt.textContent='Session active'; }
+    else { dot.className='session-dot dot-inactive'; txt.textContent = data.message || 'No active session'; }
+  }catch(e){}
+}
+
+async function openPosition(){
+  const legs = collectLegs();
+  if (!legs.length){ alert('Add at least one leg with strike + quantity'); return; }
+  const payload = {
+    strategy_name: document.getElementById('f-strategy').value,
+    stock_code: document.getElementById('f-stockcode').value,
+    expiry_date: document.getElementById('f-expiry').value,
+    lot_size: parseInt(document.getElementById('f-lotsize').value, 10) || 1,
+    order_type: document.getElementById('f-ordertype').value,
+    execution_mode: document.getElementById('f-execmode').value,
+    dry_run: document.getElementById('f-dryrun').value === 'true',
+    target_pnl_rupees: parseFloat(document.getElementById('f-target').value) || 0,
+    stop_loss_pnl_rupees: parseFloat(document.getElementById('f-stoploss').value) || 0,
+    legs,
+  };
+  const st = document.getElementById('openStatus');
+  st.textContent = 'Opening (sequencing ' + legs.length + ' leg(s))...';
+  try{
+    const res = await fetch('/api/icici/positions/open', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.ok){
+      st.textContent = '✅ Position opened (id ' + data.position_id + ')';
+      loadPositions();
+    } else {
+      st.innerHTML = '❌ ' + (data.error || 'failed') + (data.leg_results ? '<br><small>' + JSON.stringify(data.leg_results) + '</small>' : '');
+    }
+  }catch(e){ st.textContent = '❌ ' + e; }
+}
+
+async function closePosition(id){
+  if (!confirm('Close position ' + id + ' now?')) return;
+  try{
+    const res = await fetch(`/api/icici/positions/${id}/close`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({reason:'MANUAL'})});
+    const data = await res.json();
+    if (!data.ok) alert('Close failed: ' + (data.error || JSON.stringify(data.leg_results)));
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function deletePosition(id){
+  if (!confirm(`Delete tracked position ${id}? This only removes the tracking record -- it does NOT close any real legs still open at the broker.`)) return;
+  try{
+    const res = await fetch(`/api/icici/positions/${id}`, {method:'DELETE'});
+    const data = await res.json();
+    if (!data.ok) alert('Delete failed: ' + data.error);
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function retryClose(id){
+  if (!confirm(`Retry closing position ${id}? This resets it to OPEN and re-runs the close sequence on all recorded legs. If the earlier failed attempt already closed some legs, this could double-close them -- check the order log for that position first if unsure.`)) return;
+  try{
+    const res = await fetch(`/api/icici/positions/${id}/retry_close`, {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
+    const data = await res.json();
+    if (!data.ok) alert('Retry failed: ' + (data.error || JSON.stringify(data.leg_results)));
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function markClosedManual(id){
+  const note = prompt('Optional note (e.g. "closed manually in ICICI app"):', '') || '';
+  if (!confirm(`Mark position ${id} as CLOSED without placing any orders? Use this only if the legs were already closed some other way.`)) return;
+  try{
+    const res = await fetch(`/api/icici/positions/${id}/mark_closed`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({note})});
+    const data = await res.json();
+    if (!data.ok) alert('Failed: ' + data.error);
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function checkPnlNow(){
+  try{
+    const res = await fetch('/api/icici/monitor/tick', {method:'POST'});
+    const data = await res.json();
+    if (data.ok && data.results){
+      const problems = data.results.filter(r => r.status === 'quote_error');
+      if (problems.length){
+        const detail = problems.map(p => {
+          const errs = (p.detail && p.detail.leg_pnls || []).filter(l => l.error).map(l => `leg ${l.leg_index}: ${l.error}`).join('; ');
+          return `Position ${p.position_id}: ${errs || 'quote fetch failed'}`;
+        }).join('\n');
+        alert('⚠️ P&L could not be fully refreshed for ' + problems.length + ' position(s):\n\n' + detail);
+      }
+    } else if (!data.ok){
+      alert('❌ Monitor check failed: ' + (data.error || 'unknown error'));
+    }
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+function pnlClass(v){ return (v||0) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
+function fmtLegs(legs){
+  return legs.map(l => `${l.side} ${l.right.toUpperCase()} ${l.strike_price} x${l.quantity}`).join(', ');
+}
+
+function renderPaperTrades(paper){
+  const open = paper.filter(p => ['OPEN','OPENING','CLOSING'].includes(p.status));
+  const closed = paper.filter(p => ['CLOSED','ERROR'].includes(p.status));
+  const openWrap = document.getElementById('paperOpenWrap');
+  if (openWrap){
+    if (!open.length){ openWrap.innerHTML = '<div class="empty">No open paper trades.</div>'; }
+    else {
+      let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Strategy</th><th>Legs</th><th>Target</th><th>Stop</th><th>P&L</th><th>Status</th><th></th></tr></thead><tbody>';
+      for (const p of open){
+        html += `<tr><td>${p.id}</td><td>${esc(p.strategy_name||'')}<br><small style="color:var(--dte-muted)">${p.stock_code} ${p.expiry_date}</small></td>` +
+          `<td>${fmtLegs(p.legs)}</td><td>&#8377;${p.target_pnl_rupees}</td><td>&#8377;${p.stop_loss_pnl_rupees}</td>` +
+          `<td class="${pnlClass(p.current_pnl_rupees)}">&#8377;${(p.current_pnl_rupees||0).toFixed(2)}</td>` +
+          `<td><span class="status-chip status-${p.status}">${p.status}</span></td>` +
+          `<td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="closePosition(${p.id})">Close Now</button></td></tr>`;
+      }
+      html += '</tbody></table>';
+      openWrap.innerHTML = html;
+    }
+  }
+  const closedWrap = document.getElementById('paperClosedWrap');
+  if (closedWrap){
+    if (!closed.length){ closedWrap.innerHTML = '<div class="empty">No closed paper trades yet.</div>'; }
+    else {
+      let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Strategy</th><th>Legs</th><th>Final P&L</th><th>Status</th><th>Reason</th><th>Closed At</th></tr></thead><tbody>';
+      for (const p of closed){
+        html += `<tr><td>${p.id}</td><td>${esc(p.strategy_name||'')}</td><td>${fmtLegs(p.legs)}</td>` +
+          `<td class="${pnlClass(p.current_pnl_rupees)}">&#8377;${(p.current_pnl_rupees||0).toFixed(2)}</td>` +
+          `<td><span class="status-chip status-${p.status}">${p.status}</span></td><td>${esc(p.close_reason||'')}</td><td>${p.closed_at||''}</td></tr>`;
+      }
+      html += '</tbody></table>';
+      closedWrap.innerHTML = html;
+    }
+  }
+}
+
+async function refreshLiveTradingStatus(){
+  try{
+    const res = await fetch('/api/icici/live_trading/status');
+    const data = await res.json();
+    const btn = document.getElementById('liveTradingBtn');
+    const sub = document.getElementById('liveTradingSub');
+    if (data.enabled){
+      btn.textContent = 'LIVE (click to disable)';
+      btn.className = 'btn good';
+      sub.innerHTML = '';
+    } else {
+      btn.textContent = 'PAPER MODE (click to enable live)';
+      btn.className = 'btn danger';
+      sub.innerHTML = '&#9888; Live trading is OFF -- no new REAL positions will open. Strategies still fire fully-tracked <b>paper</b> positions with live entry prices (see the Paper Trades tab). Positions already open when this was switched off keep being managed normally either way.';
+    }
+  }catch(e){}
+}
+
+async function toggleLiveTrading(){
+  const btn = document.getElementById('liveTradingBtn');
+  const currentlyLive = btn.textContent.startsWith('LIVE');
+  const goingTo = currentlyLive ? 'PAPER (disable live trading)' : 'LIVE (enable real orders)';
+  if (!confirm(`Switch to ${goingTo}? This only affects NEW positions -- anything already open keeps running under its normal rules either way.`)) return;
+  try{
+    await fetch('/api/icici/live_trading/toggle', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({enabled: !currentlyLive})
+    });
+    refreshLiveTradingStatus();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function runDiagnostics(){
+  const stockCode = document.getElementById('diag-stockcode').value.trim().toUpperCase() || 'NIFTY';
+  const wrap = document.getElementById('diagnosticsWrap');
+  const summary = document.getElementById('diagSummary');
+  wrap.innerHTML = '<div class="empty">Running&hellip; (calls several live endpoints in sequence, may take a few seconds)</div>';
+  summary.textContent = '';
+  try{
+    const res = await fetch('/api/icici/diagnostics/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({test_stock_code: stockCode})
+    });
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed to run: ' + esc(data.error||'unknown') + '</div>'; return; }
+    const s = data.summary;
+    summary.innerHTML = `<span class="pnl-pos">${s.passed} passed</span> &middot; ` +
+      `${s.failed ? `<span class="pnl-neg">${s.failed} failed</span>` : '0 failed'} &middot; ` +
+      `<span style="color:var(--dte-muted);">${s.skipped} skipped</span>`;
+    let html = '<table class="pos-table"><thead><tr><th>Check</th><th>Status</th><th>Time</th><th>Detail</th></tr></thead><tbody>';
+    for (const r of data.results){
+      const statusClass = r.status === 'pass' ? 'pnl-pos' : (r.status === 'skipped' ? '' : 'pnl-neg');
+      const statusLabel = r.status.toUpperCase();
+      html += `<tr><td>${esc(r.name)}</td>` +
+        `<td class="${statusClass}" style="font-weight:700;">${statusLabel}</td>` +
+        `<td><small>${r.elapsed_sec}s</small></td>` +
+        `<td><small style="color:var(--dte-muted);white-space:pre-wrap;">${esc(JSON.stringify(r.detail))}</small></td></tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+async function loadPositions(){
+  try{
+    const res = await fetch('/api/icici/positions');
+    const data = await res.json();
+    if (!data.ok){ return; }
+    const real = data.positions.filter(p => !p.dry_run);
+    const paper = data.positions.filter(p => p.dry_run);
+    const open = real.filter(p => ['OPEN','OPENING','CLOSING'].includes(p.status));
+    const closed = real.filter(p => ['CLOSED','ERROR'].includes(p.status));
+    renderPaperTrades(paper);
+
+    const openWrap = document.getElementById('openPositionsWrap');
+    if (!open.length){ openWrap.innerHTML = '<div class="empty">No open positions.</div>'; }
+    else {
+      let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Strategy</th><th>Legs</th><th>Exec Mode</th><th>Target</th><th>Stop</th><th>P&L</th><th>Status</th><th></th></tr></thead><tbody>';
+      for (const p of open){
+        html += `<tr><td>${p.id}</td><td>${p.strategy_name||''}<br><small style="color:var(--dte-muted)">${p.stock_code} ${p.expiry_date}${p.dry_run?' (dry run)':''}</small></td>` +
+          `<td>${fmtLegs(p.legs)}</td><td><small>${p.execution_mode==='simultaneous_market'?'Simultaneous':'Safe Sequential'}</small></td>` +
+          `<td>&#8377;${p.target_pnl_rupees}</td><td>&#8377;${p.stop_loss_pnl_rupees}</td>` +
+          `<td class="${pnlClass(p.current_pnl_rupees)}">&#8377;${(p.current_pnl_rupees||0).toFixed(2)}</td>` +
+          `<td><span class="status-chip status-${p.status}">${p.status}</span></td>` +
+          `<td style="white-space:nowrap;">` +
+            `<button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="closePosition(${p.id})">Close Now</button> ` +
+            `<button class="btn" style="padding:4px 8px;font-size:11px;" onclick="deletePosition(${p.id})">Delete</button>` +
+          `</td></tr>`;
+      }
+      html += '</tbody></table>';
+      openWrap.innerHTML = html;
+    }
+
+    const closedWrap = document.getElementById('closedPositionsWrap');
+    if (!closed.length){ closedWrap.innerHTML = '<div class="empty">No closed positions yet.</div>'; }
+    else {
+      let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Strategy</th><th>Legs</th><th>Final P&L</th><th>Status</th><th>Reason</th><th>Closed At</th><th></th></tr></thead><tbody>';
+      for (const p of closed){
+        const actions = p.status === 'ERROR'
+          ? `<button class="btn good" style="padding:4px 8px;font-size:11px;" onclick="retryClose(${p.id})">Retry Close</button> ` +
+            `<button class="btn" style="padding:4px 8px;font-size:11px;" onclick="markClosedManual(${p.id})">Mark Closed</button> ` +
+            `<button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="deletePosition(${p.id})">Delete</button>`
+          : `<button class="btn" style="padding:4px 8px;font-size:11px;" onclick="deletePosition(${p.id})">Delete</button>`;
+        html += `<tr><td>${p.id}</td><td>${p.strategy_name||''}</td><td>${fmtLegs(p.legs)}</td>` +
+          `<td class="${pnlClass(p.current_pnl_rupees)}">&#8377;${(p.current_pnl_rupees||0).toFixed(2)}</td>` +
+          `<td><span class="status-chip status-${p.status}">${p.status}</span></td><td>${p.close_reason||''}</td><td>${p.closed_at||''}</td>` +
+          `<td style="white-space:nowrap;">${actions}</td></tr>`;
+      }
+      html += '</tbody></table>';
+      closedWrap.innerHTML = html;
+    }
+  }catch(e){}
+}
+
+function legPnl(side, ltp, avg, qty){
+  if (ltp == null) return null;
+  const raw = side === 'LONG' ? (ltp - avg) : (avg - ltp);
+  return raw * Math.abs(qty);
+}
+
+function updateBrokerRowPnl(idx){
+  const p = window._brokerPositions[idx];
+  const sideSel = document.getElementById('side-sel-' + idx);
+  const side = sideSel.value;
+  const pnl = legPnl(side, p.ltp, p.average_price, p.quantity);
+  const cell = document.getElementById('pnl-cell-' + idx);
+  if (pnl == null) {
+    cell.innerHTML = `<span class="pnl-neg" style="font-size:10.5px;">${p.ltp_error ? esc(p.ltp_error) : 'no quote'}</span>`;
+    return;
+  }
+  cell.innerHTML = `<span class="${pnl>=0?'pnl-pos':'pnl-neg'}">&#8377;${pnl.toFixed(2)}</span>`;
+}
+
+function esc(s){ return String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function fetchExpiriesFor(stockInputId, selectId){
+  const stockCode = document.getElementById(stockInputId).value.trim().toUpperCase();
+  const sel = document.getElementById(selectId);
+  if (!stockCode || !sel || sel.tagName !== 'SELECT') return;
+  sel.innerHTML = '<option value="">Loading expiries&hellip;</option>';
+  try{
+    const res = await fetch(`/api/icici/expiries?stock_code=${stockCode}`);
+    const data = await res.json();
+    if (data.ok && data.expiries && data.expiries.length){
+      sel.innerHTML = data.expiries.map(e => `<option value="${e}">${e}</option>`).join('');
+    } else {
+      // Couldn't fetch a real list -- fall back to a manual date input
+      // rather than block on an empty dropdown. NEEDS LIVE VALIDATION
+      // note in icici_breeze.get_available_expiries applies here too.
+      const manual = document.createElement('input');
+      manual.type = 'date'; manual.id = selectId;
+      manual.title = 'Could not auto-fetch expiries (' + (data.error || 'no data returned') + ') -- enter manually';
+      manual.style.width = '100%';
+      sel.replaceWith(manual);
+    }
+  }catch(e){
+    sel.innerHTML = `<option value="">Failed to load (${esc(String(e))})</option>`;
+  }
+}
+
+function syncExpirySelect(selectId, value){
+  const el = document.getElementById(selectId);
+  if (!el || !value) return;
+  if (el.tagName === 'SELECT'){
+    if (![...el.options].some(o => o.value === value)){
+      const opt = document.createElement('option');
+      opt.value = value; opt.textContent = value;
+      el.appendChild(opt);
+    }
+  }
+  el.value = value;
+}
+
+
+async function loadBrokerPositions(){
+  const wrap = document.getElementById('brokerPositionsWrap');
+  wrap.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try{
+    const res = await fetch('/api/icici/broker_positions');
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed: ' + (data.error||'unknown') + '</div>'; return; }
+    if (!data.positions.length){ wrap.innerHTML = '<div class="empty">No positions held at the broker right now.</div>'; document.getElementById('adoptBar').style.display='none'; return; }
+    let html = '<table class="pos-table"><thead><tr><th></th><th>Symbol</th><th>Expiry</th><th>Right</th><th>Strike</th><th>Qty</th><th>Side (editable)</th><th>Avg Price</th><th>LTP</th><th>Live P&amp;L</th><th>Status</th></tr></thead><tbody>';
+    data.positions.forEach((p, i) => {
+      html += `<tr><td>${p.already_tracked ? '' : `<input type="checkbox" class="broker-pos-cb" data-idx="${i}">`}</td>` +
+        `<td>${p.stock_code}</td><td>${p.expiry_date}</td><td>${p.right||''}</td><td>${p.strike_price||''}</td>` +
+        `<td>${p.quantity}</td>` +
+        `<td><select id="side-sel-${i}" onchange="updateBrokerRowPnl(${i})">` +
+          `<option value="LONG" ${p.side==='LONG'?'selected':''}>LONG</option>` +
+          `<option value="SHORT" ${p.side==='SHORT'?'selected':''}>SHORT</option>` +
+        `</select></td>` +
+        `<td>${p.average_price}</td><td>${p.ltp!=null?p.ltp:`<span class="pnl-neg" title="${(p.ltp_error||'').replace(/"/g,'&quot;')}">no quote</span>`}</td>` +
+        `<td id="pnl-cell-${i}"></td>` +
+        `<td>${p.already_tracked ? '<span class="status-chip status-CLOSED">tracked</span>' : '<span class="status-chip status-OPEN">untracked</span>'}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    window._brokerPositions = data.positions;
+    data.positions.forEach((p, i) => updateBrokerRowPnl(i));
+    document.getElementById('adoptBar').style.display = data.positions.some(p=>!p.already_tracked) ? 'block' : 'none';
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+async function adoptSelected(){
+  const checked = Array.from(document.querySelectorAll('.broker-pos-cb:checked'));
+  if (!checked.length){ alert('Select at least one untracked position row'); return; }
+  const selected = checked.map(cb => {
+    const idx = parseInt(cb.dataset.idx, 10);
+    const p = window._brokerPositions[idx];
+    // Use the CURRENT dropdown value, not the original guess -- this
+    // is where a corrected side (e.g. the NIFTY short leg) actually
+    // gets applied.
+    const correctedSide = document.getElementById('side-sel-' + idx).value;
+    return {...p, side: correctedSide};
+  });
+  const stockCode = selected[0].stock_code, expiry = selected[0].expiry_date;
+  if (!selected.every(p => p.stock_code === stockCode && p.expiry_date === expiry)){
+    alert('Selected legs must share the same symbol and expiry to be bundled into one tracked position');
+    return;
+  }
+  const legs = selected.map((p, i) => ({
+    leg_index: i, right: p.right, strike_price: p.strike_price,
+    side: p.side, quantity: Math.abs(p.quantity), entry_price: p.average_price,
+  }));
+  const payload = {
+    strategy_name: document.getElementById('adopt-strategy').value || 'Adopted position',
+    stock_code: stockCode, expiry_date: expiry, legs,
+    target_pnl_rupees: parseFloat(document.getElementById('adopt-target').value) || 0,
+    stop_loss_pnl_rupees: parseFloat(document.getElementById('adopt-stoploss').value) || 0,
+    execution_mode: document.getElementById('adopt-execmode').value,
+  };
+  try{
+    const res = await fetch('/api/icici/positions/adopt', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const data = await res.json();
+    if (data.ok){ alert('Adopted as tracked position ' + data.position_id); loadBrokerPositions(); loadPositions(); }
+    else alert('Adopt failed: ' + data.error);
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function loadOptionChain(){
+  const stockCode = document.getElementById('chain-stockcode').value.trim();
+  const expiry = document.getElementById('chain-expiry').value;
+  const strikeCount = Math.max(1, parseInt(document.getElementById('chain-strikecount').value, 10) || 12);
+  const wrap = document.getElementById('chainWrap');
+  const spotLine = document.getElementById('chainSpotLine');
+  if (!stockCode || !expiry){ alert('Enter symbol and pick an expiry'); return; }
+  wrap.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  spotLine.textContent = '';
+  try{
+    const res = await fetch(`/api/icici/option_chain?stock_code=${stockCode}&expiry_date=${expiry}`);
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed: ' + esc(data.error||'unknown') + '</div>'; return; }
+    if (data.spot != null){
+      spotLine.textContent = `Spot: ${data.spot}`;
+    } else if (data.spot_error){
+      spotLine.innerHTML = `<span class="pnl-neg" style="font-size:11px;font-weight:400;">Spot unavailable: ${esc(data.spot_error)}</span>`;
+    }
+    if (!data.rows.length){
+      let dbgHtml = '<div class="empty">Call succeeded but returned 0 rows.';
+      if (data.debug){
+        dbgHtml += '<br><small style="color:var(--dte-muted)">' +
+          `Sent: stock_code=${esc(data.debug.sent_stock_code)}, expiry=${esc(data.debug.sent_expiry_raw)} &rarr; converted to ${esc(data.debug.sent_expiry_converted)}<br>` +
+          `Response keys: ${esc((data.debug.response_top_level_keys||[]).join(', '))}<br>` +
+          `Response.Error field: ${esc(data.debug.response_error_field || '(none)')}<br>` +
+          `Response.Success type: ${esc(data.debug.response_success_field_type)}` +
+          '</small>';
+      }
+      dbgHtml += '</div>';
+      wrap.innerHTML = dbgHtml;
+      return;
+    }
+    const calls = {}, puts = {};
+    data.rows.forEach(r => { (r.right === 'call' ? calls : puts)[r.strike_price] = r; });
+    let strikes = Array.from(new Set(data.rows.map(r=>r.strike_price))).sort((a,b)=>a-b);
+    // Center on spot: N strikes at-or-below spot + N strikes above spot.
+    // Falls back to the middle of the full list if spot isn't available.
+    if (data.spot != null){
+      const atmIdx = strikes.reduce((best, s, i) =>
+        Math.abs(s - data.spot) < Math.abs(strikes[best] - data.spot) ? i : best, 0);
+      const lo = Math.max(0, atmIdx - strikeCount);
+      const hi = Math.min(strikes.length, atmIdx + strikeCount + 1);
+      strikes = strikes.slice(lo, hi);
+    } else {
+      const mid = Math.floor(strikes.length / 2);
+      strikes = strikes.slice(Math.max(0, mid - strikeCount), mid + strikeCount + 1);
+    }
+    let html = '';
+    if (!data.oi_change_available) html += '<div class="sub" style="margin-bottom:6px;">&Delta;OI not provided by this Breeze response for this instrument -- showing OI only.</div>';
+    html += '<table class="pos-table"><thead><tr><th colspan="5" style="text-align:center;">CALLS</th><th>Strike</th><th colspan="5" style="text-align:center;">PUTS</th></tr>' +
+      '<tr><th>OI</th><th>&Delta;OI</th><th>LTP</th><th></th><th></th><th></th><th></th><th></th><th>LTP</th><th>&Delta;OI</th><th>OI</th></tr></thead><tbody>';
+    for (const k of strikes){
+      const c = calls[k], p = puts[k];
+      const isAtm = data.spot != null && Math.abs(k - data.spot) === Math.min(...strikes.map(s=>Math.abs(s-data.spot)));
+      html += `<tr${isAtm ? ' style="background:rgba(124,157,248,.08);"' : ''}>` +
+        `<td>${c?fmtNum(c.open_interest):''}</td><td>${c&&c.oi_change!=null?c.oi_change:''}</td><td>${c?c.ltp:''}</td>` +
+        `<td>${c?`<button class="btn good" style="padding:3px 6px;font-size:10px;" onclick="addLegFromChain('call',${k},'LONG')">Buy</button>`:''}</td>` +
+        `<td>${c?`<button class="btn danger" style="padding:3px 6px;font-size:10px;" onclick="addLegFromChain('call',${k},'SHORT')">Sell</button>`:''}</td>` +
+        `<td style="text-align:center;font-weight:700;">${k}</td>` +
+        `<td>${p?`<button class="btn good" style="padding:3px 6px;font-size:10px;" onclick="addLegFromChain('put',${k},'LONG')">Buy</button>`:''}</td>` +
+        `<td>${p?`<button class="btn danger" style="padding:3px 6px;font-size:10px;" onclick="addLegFromChain('put',${k},'SHORT')">Sell</button>`:''}</td>` +
+        `<td>${p?p.ltp:''}</td><td>${p&&p.oi_change!=null?p.oi_change:''}</td><td>${p?fmtNum(p.open_interest):''}</td>` +
+        `</tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    // pre-fill the strategy form's symbol/expiry to match the loaded chain
+    document.getElementById('f-stockcode').value = stockCode;
+    // Explicit fetch (not just sync) -- setting f-stockcode's value via
+    // JS doesn't fire a native blur event, so the onblur-triggered fetch
+    // on that field never runs on its own. Await the real fetch so
+    // f-expiry gets the full dropdown, then make sure the loaded chain's
+    // expiry is selected in it.
+    await fetchExpiriesFor('f-stockcode', 'f-expiry');
+    syncExpirySelect('f-expiry', expiry);
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+function fmtNum(n){ return n==null ? '' : Number(n).toLocaleString(); }
+
+function addLegFromChain(right, strike, side){
+  addLegRow({right, strike_price: strike, side});
+  document.getElementById('legsTable').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+function showTab(name){
+  document.querySelectorAll('.tab-page').forEach(el => {
+    el.classList.toggle('active', el.dataset.tabgroup === name);
+  });
+  document.querySelectorAll('#pageTabs .dte-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === name);
+  });
+  try{ localStorage.setItem('icici_active_tab', name); }catch(e){}
+}
+
+async function checkMonitorStatus(){
+  const line = document.getElementById('monitorStatusLine');
+  try{
+    const res = await fetch('/api/icici/monitor/status');
+    const data = await res.json();
+    if (!data.ok){ line.innerHTML = '<span class="pnl-neg">Failed to check: ' + data.error + '</span>'; return; }
+    if (data.last_run_at == null){
+      line.innerHTML = '<span class="pnl-neg">Never run yet -- if the app has been up more than ~1 minute, the job likely isn\'t registered (needs an app restart on the latest code) or is disabled in Scheduler Hub.</span>';
+    } else if (data.seconds_ago > 90){
+      line.innerHTML = `<span class="pnl-neg">Last ran ${data.seconds_ago}s ago -- stale for a 30s job. Check Scheduler Hub to confirm it's enabled.</span>`;
+    } else {
+      line.innerHTML = `<span class="pnl-pos">Last ran ${data.seconds_ago}s ago -- polling normally.</span>`;
+    }
+  }catch(e){ line.textContent = 'Failed: ' + e; }
+  try{
+    const mres = await fetch('/api/icici/market_hours/status');
+    const mdata = await mres.json();
+    const mline = document.getElementById('marketHoursLine');
+    mline.innerHTML = mdata.is_market_hours
+      ? '<span class="pnl-pos">Within NSE market hours -- jobs actively checking positions/strategies.</span>'
+      : 'Outside NSE market hours (9:15 AM - 3:30 PM IST, Mon-Fri) -- background jobs skip their work until the next session, by design (reduces needless API load overnight).';
+  }catch(e){}
+}
+
+// ===================== STRATEGY TAB =====================
+let strategyLegCounter = 0;
+
+function addStrategyLegRow(){
+  const tbody = document.getElementById('strategyLegsBody');
+  const idx = strategyLegCounter++;
+  const tr = document.createElement('tr');
+  tr.id = 'strat-leg-row-' + idx;
+  tr.innerHTML = `
+    <td><select data-field="right"><option value="call">Call</option><option value="put">Put</option></select></td>
+    <td><select data-field="strike_mode"><option value="ATM">ATM</option><option value="ITM">ITM</option><option value="OTM" selected>OTM</option></select></td>
+    <td><input data-field="strike_offset" type="number" value="0" step="1"></td>
+    <td><select data-field="side"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select></td>
+    <td><input data-field="quantity" type="number" value="1" min="1"></td>
+    <td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="document.getElementById('strat-leg-row-${idx}').remove()">Remove</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+addStrategyLegRow();
+
+function collectStrategyLegs(){
+  const rows = document.querySelectorAll('#strategyLegsBody tr');
+  const legs = [];
+  let i = 0;
+  for (const row of rows){
+    const right = row.querySelector('[data-field="right"]').value;
+    const strike_mode = row.querySelector('[data-field="strike_mode"]').value;
+    const strike_offset = parseFloat(row.querySelector('[data-field="strike_offset"]').value) || 0;
+    const side = row.querySelector('[data-field="side"]').value;
+    const qty = parseInt(row.querySelector('[data-field="quantity"]').value, 10);
+    if (!qty) continue;
+    legs.push({leg_index: i++, right, strike_mode, strike_offset, side, quantity: qty});
+  }
+  return legs;
+}
+
+function toggleConditionHint(which){
+  const type = document.getElementById(`s-${which}-type`).value;
+  const hint = document.getElementById(`s-${which}-hint`);
+  const exprInput = document.getElementById(`s-${which}-expr`);
+  if (type === 'price'){
+    hint.innerHTML = 'Format: an operator + number vs live spot, e.g. "&gt; 25000" or "&lt;= 24800". <span class="pnl-pos">Fully real-time -- fetches live spot from ICICI on every check, never cached.</span>';
+    exprInput.placeholder = '> 25000';
+  } else if (type === 'scanner'){
+    hint.innerHTML = 'Any Scanner Builder query, e.g. RSIDiff90("1h") &gt; 20 AND CrossAbove(close, 25000, "5min"). Timeframe is set inside the query itself. ' +
+      '<span class="pnl-neg">&#9888; Uses Scanner Builder\'s own price history cache (refreshed periodically, not live per-check) -- built for scanning many US-equity symbols cheaply, not guaranteed fresh for NIFTY/BANKNIFTY. If real-time-critical, prefer a Price condition instead.</span>';
+    exprInput.placeholder = 'RSIDiff90("1h") > 20';
+  } else {
+    hint.textContent = '';
+    exprInput.placeholder = '';
+  }
+}
+
+async function createStrategy(){
+  const legs = collectStrategyLegs();
+  if (!legs.length){ alert('Add at least one leg'); return; }
+  const payload = {
+    name: document.getElementById('s-name').value || 'Unnamed strategy',
+    stock_code: document.getElementById('s-stockcode').value,
+    expiry_date: document.getElementById('s-expiry').value,
+    lot_size: parseInt(document.getElementById('s-lotsize').value, 10) || 1,
+    execution_mode: document.getElementById('s-execmode').value,
+    enabled: document.getElementById('s-enabled').value === 'true',
+    legs,
+    open_condition_type: document.getElementById('s-open-type').value,
+    open_condition_expr: document.getElementById('s-open-expr').value,
+    eval_interval_minutes: parseInt(document.getElementById('s-eval-interval').value, 10) || 5,
+    open_time_start: document.getElementById('s-open-time-start').value || null,
+    open_time_end: document.getElementById('s-open-time-end').value || null,
+    target_pnl_rupees: parseFloat(document.getElementById('s-target').value) || 0,
+    stop_loss_pnl_rupees: parseFloat(document.getElementById('s-stoploss').value) || 0,
+    max_reentries: parseInt(document.getElementById('s-max-reentries').value, 10) || 0,
+    close_condition_type: document.getElementById('s-close-type').value,
+    close_condition_expr: document.getElementById('s-close-expr').value,
+    close_time: document.getElementById('s-close-time').value || null,
+  };
+  const st = document.getElementById('strategyStatus');
+  st.textContent = 'Creating…';
+  try{
+    const res = await fetch('/api/icici/strategies', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const data = await res.json();
+    if (data.ok){ st.textContent = '✅ Created strategy ' + data.strategy_id; loadStrategies(); }
+    else st.innerHTML = '❌ ' + esc(data.error || 'failed');
+  }catch(e){ st.textContent = '❌ ' + e; }
+}
+
+async function loadStrategies(){
+  const wrap = document.getElementById('strategiesWrap');
+  try{
+    const res = await fetch('/api/icici/strategies');
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed: ' + esc(data.error) + '</div>'; return; }
+    if (!data.strategies.length){ wrap.innerHTML = '<div class="empty">No strategies yet -- create one below.</div>'; return; }
+    let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Name</th><th>Legs</th><th>Open Condition</th><th>Target/Stop</th><th>Re-entries</th><th>Active Pos</th><th>Last Note</th><th>Enabled</th><th></th></tr></thead><tbody>';
+    for (const s of data.strategies){
+      const legsSummary = s.legs.map(l => `${l.side} ${l.right.toUpperCase()} ${l.strike_mode}${l.strike_offset?('+'+l.strike_offset):''} x${l.quantity}`).join(', ');
+      html += `<tr><td>${s.id}</td><td>${esc(s.name)}<br><small style="color:var(--dte-muted)">${s.stock_code} ${s.expiry_date}</small></td>` +
+        `<td>${legsSummary}</td>` +
+        `<td><small>${s.open_condition_type}: ${esc(s.open_condition_expr)}<br>every ${s.eval_interval_minutes}min</small></td>` +
+        `<td>&#8377;${s.target_pnl_rupees} / &#8377;${s.stop_loss_pnl_rupees}</td>` +
+        `<td>${s.reentry_count}/${s.max_reentries} <button class="btn" style="padding:2px 6px;font-size:10px;" onclick="resetReentries(${s.id})">Reset</button></td>` +
+        `<td>${s.active_position_id ? '#'+s.active_position_id : '—'}</td>` +
+        `<td><small style="color:var(--dte-muted)">${esc(s.last_eval_note || '')}</small></td>` +
+        `<td><label class="switch"><input type="checkbox" ${s.enabled?'checked':''} onchange="toggleStrategyEnabled(${s.id}, this.checked)"></label></td>` +
+        `<td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="deleteStrategy(${s.id})">Delete</button></td></tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+async function toggleStrategyEnabled(id, enabled){
+  try{
+    await fetch(`/api/icici/strategies/${id}/${enabled ? 'enable' : 'disable'}`, {method:'POST'});
+    loadStrategies();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function resetReentries(id){
+  if (!confirm('Reset re-entry count for strategy ' + id + '?')) return;
+  try{ await fetch(`/api/icici/strategies/${id}/reset_reentries`, {method:'POST'}); loadStrategies(); }
+  catch(e){ alert('Failed: ' + e); }
+}
+
+async function deleteStrategy(id){
+  if (!confirm('Delete strategy ' + id + '? This only removes the definition, not any position it already opened.')) return;
+  try{
+    const res = await fetch(`/api/icici/strategies/${id}`, {method:'DELETE'});
+    const data = await res.json();
+    if (!data.ok) alert('Delete failed: ' + data.error);
+    loadStrategies();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function evaluateStrategiesNow(){
+  try{
+    const res = await fetch('/api/icici/strategies/evaluate_now', {method:'POST'});
+    const data = await res.json();
+    if (!data.ok) alert('Evaluate failed: ' + data.error);
+    loadStrategies();
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+toggleConditionHint('open');
+toggleConditionHint('close');
+
+// Restore last-viewed tab (defaults to Positions -- the day-to-day view)
+showTab((function(){ try{ return localStorage.getItem('icici_active_tab') || 'positions'; }catch(e){ return 'positions'; } })());
+
+refreshSessionStatus();
+loadCredentialsStatus();
+checkMonitorStatus();
+refreshLiveTradingStatus();
+loadPositions();
+loadStrategies();
+setInterval(loadPositions, 15000);
+setInterval(checkMonitorStatus, 30000);
+setInterval(loadStrategies, 20000);
+setInterval(refreshLiveTradingStatus, 30000);
+</script>
+</body>
+</html>

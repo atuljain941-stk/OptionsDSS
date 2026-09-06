@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Maya Trade Journal</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    .shell{max-width:1600px;margin:0 auto;padding:18px}
+    .head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+    .head h1{margin:0;font-size:28px}
+    .head p{margin:6px 0 0;color:var(--muted)}
+    .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px}
+    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+    .stat{padding:14px;border-radius:14px;background:rgba(255,255,255,.03);border:1px solid var(--border)}
+    .stat .v{font-size:24px;font-weight:800}
+    .stat .l{font-size:11px;color:var(--muted)}
+    .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+    .controls select,.controls button{padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)}
+    .controls button{background:#4f46e5;color:#fff;font-weight:700;cursor:pointer}
+    .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px}
+    .trade{border:1px solid var(--border);background:var(--card);border-radius:14px;padding:14px}
+    .trade.good{box-shadow:0 0 0 1px rgba(34,197,94,.1) inset}
+    .trade.bad{box-shadow:0 0 0 1px rgba(239,68,68,.1) inset}
+    .trade .top{display:flex;justify-content:space-between;gap:10px;align-items:start}
+    .ticker{font-size:20px;font-weight:800}
+    .mini{font-size:11px;color:var(--muted)}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px;font-size:12px}
+    .grid div{padding:7px 8px;background:rgba(255,255,255,.03);border-radius:8px}
+    .tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
+    .green{background:rgba(34,197,94,.12);color:#22c55e}
+    .red{background:rgba(239,68,68,.12);color:#ef4444}
+    .amber{background:rgba(245,158,11,.12);color:#f59e0b}
+    .table-wrap{max-height:560px;overflow:auto;border:1px solid var(--border);border-radius:12px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px;vertical-align:top}
+    th{text-align:left;position:sticky;top:0;background:var(--card);z-index:1}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="head">
+    <div>
+      <div class="mini">Page 2</div>
+      <h1>Maya Trade Journal</h1>
+      <p>Stock price, vertical entry, current vertical, PNR, outlook, and action logic in one view.</p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a class="btn secondary" href="/">Back to dashboard</a>
+      <a class="btn secondary" href="/maya/scanner">Vertical scanner</a>
+    </div>
+  </div>
+
+  <div class="panel controls">
+    <label style="font-size:11px;color:var(--muted)">Status</label>
+    <select id="statusSel">
+      <option value="open">Open trades</option>
+      <option value="closed">Closed trades</option>
+      <option value="all">All trades</option>
+    </select>
+    <button id="refreshBtn">Refresh journal</button>
+    <div style="margin-left:auto">
+      <div class="mini">Logic</div>
+      <div id="loadState" style="font-weight:700">Ready</div>
+    </div>
+  </div>
+
+  <div id="stats" class="stats"></div>
+  <div class="panel" style="margin-bottom:14px">
+    <div style="font-weight:800;margin-bottom:6px">How the journal works</div>
+    <div class="mini">
+      Outlook is derived from the live price versus the spread strikes. PNR is computed from the PNR method formula using long strike, DTE, and ATR. The action engine prioritizes profit-taking at 94% of max value, 50% loss orders after PNR breach, and early exits as DTE contracts.
+    </div>
+  </div>
+
+  <div id="cards" class="cards"></div>
+  <div style="height:14px"></div>
+  <div class="panel">
+    <div style="font-weight:800;margin-bottom:8px">Raw journal table</div>
+    <div class="table-wrap"><table id="tbl"><thead><tr>
+      <th>Symbol</th><th>Type</th><th>Opened</th><th>Expiry</th><th>Spot</th><th>Entry Vertical</th>
+      <th>Current Vertical</th><th>PnL</th><th>PNR</th><th>Outlook</th><th>Action</th><th>Notes</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+</div>
+
+<script>
+function fmt(v, d=2) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(d) : String(v);
+}
+function tag(txt, cls='amber'){ return `<span class="tag ${cls}">${txt}</span>`; }
+function cardClass(t){
+  const ol = (t.outlook || '').toUpperCase();
+  if (ol.includes('WINNER')) return 'good';
+  if (ol.includes('LOSER')) return 'bad';
+  return '';
+}
+function tradeCard(t) {
+  const cls = cardClass(t);
+  const pnl = t.current_pnl ?? 0;
+  const pnlCls = pnl > 0 ? 'green' : pnl < 0 ? 'red' : 'amber';
+  const outlookCls = (t.outlook || '').includes('WINNER') ? 'green' : (t.outlook || '').includes('LOSER') ? 'red' : 'amber';
+  const actionCls = (t.action || '').includes('CLOSE') ? 'red' : (t.action || '').includes('HOLD') ? 'green' : 'amber';
+  const notes = (t.suggestions || []).slice(0,3).map(s => `<div>• ${s.text}</div>`).join('');
+  return `
+    <div class="trade ${cls}">
+      <div class="top">
+        <div>
+          <div class="ticker">${t.symbol}</div>
+          <div class="mini">${t.trade_type || '—'} · Opened ${t.entry_date || '—'} · Exp ${t.expiry || '—'}</div>
+        </div>
+        <div style="text-align:right">
+          ${tag((t.status || '').toUpperCase(), outlookCls)}
+          <div class="mini" style="margin-top:6px">${t.dte ?? '—'} DTE</div>
+        </div>
+      </div>
+      <div class="grid">
+        <div><b>Stock price</b><br>${fmt(t.stock_price)}</div>
+        <div><b>Entry vertical</b><br>${fmt(t.entry_price)}${t.trade_type ? (t.trade_type.includes('C') ? ' debit' : ' credit') : ''}</div>
+        <div><b>Current vertical</b><br>${fmt(t.current_vertical_price)}</div>
+        <div><b>PnL</b><br><span class="${pnlCls}">${fmt(pnl)}</span></div>
+        <div><b>PNR</b><br>${fmt(t.pnr)}${t.pnr_upper ? ' / ' + fmt(t.pnr_upper) : ''}</div>
+        <div><b>Outlook</b><br><span class="${outlookCls}">${t.outlook || '—'}</span></div>
+        <div><b>Action</b><br><span class="${actionCls}">${t.action || '—'}</span></div>
+        <div><b>Probability</b><br>${t.probability_score ?? '—'}</div>
+      </div>
+      <div style="margin-top:10px;font-size:12px">${notes || '<span class="mini">No suggestion notes.</span>'}</div>
+      <div class="mini" style="margin-top:10px">${t.action_reason || ''}</div>
+    </div>`;
+}
+function rowHtml(t) {
+  return `<tr>
+    <td><b>${t.symbol}</b></td>
+    <td>${t.trade_type || '—'}</td>
+    <td>${t.entry_date || '—'}</td>
+    <td>${t.expiry || '—'}</td>
+    <td>${fmt(t.stock_price)}</td>
+    <td>${fmt(t.entry_price)}</td>
+    <td>${fmt(t.current_vertical_price)}</td>
+    <td>${fmt(t.current_pnl)}</td>
+    <td>${fmt(t.pnr)}${t.pnr_upper ? ' / ' + fmt(t.pnr_upper) : ''}</td>
+    <td>${t.outlook || '—'}</td>
+    <td>${t.action || '—'}</td>
+    <td>${t.notes || ''}</td>
+  </tr>`;
+}
+async function loadJournal() {
+  const state = document.getElementById('loadState');
+  const status = document.getElementById('statusSel').value;
+  state.textContent = 'Loading…';
+  try {
+    const r = await fetch('/maya/api/journal?status=' + encodeURIComponent(status));
+    const d = await r.json();
+    const s = d.summary || {};
+    document.getElementById('stats').innerHTML = [
+      ['Open trades', s.open_count],
+      ['Closed trades', s.closed_count],
+      ['Projected winners', s.projected_winners],
+      ['Projected losers', s.projected_losers],
+      ['Current PnL', s.current_pnl],
+    ].map(([l,v]) => `<div class="stat"><div class="v">${fmt(v,0)}</div><div class="l">${l}</div></div>`).join('');
+    const trades = d.trades || [];
+    document.getElementById('cards').innerHTML = trades.map(tradeCard).join('') || '<div class="panel">No trades found.</div>';
+    document.querySelector('#tbl tbody').innerHTML = trades.map(rowHtml).join('') || '';
+    state.textContent = `Loaded ${trades.length} trade(s)`;
+  } catch (e) {
+    state.textContent = 'Error';
+    document.getElementById('cards').innerHTML = `<div class="panel">${e.message}</div>`;
+  }
+}
+document.getElementById('refreshBtn').addEventListener('click', loadJournal);
+document.getElementById('statusSel').addEventListener('change', loadJournal);
+loadJournal();
+</script>
+  <script src="/static/panel_tools.js"></script>
+</body>
+</html>

@@ -1,0 +1,1477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>OI Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div id="app-shell">
+
+  <!-- ── Topbar ──────────────────────────────────────────────── -->
+  <div id="topbar">
+    <span class="brand">📊 OI Dashboard</span>
+    <div id="tab-bar">
+      <button class="active" data-tab="dashboard">Dashboard</button>
+      <button data-tab="aggregate">Aggregate</button>
+      <button data-tab="news">📰 Market News</button>
+      <button data-tab="sectors">📊 Sectors</button>
+      <button data-tab="heatmap">🔥 Heatmap</button>
+      <button data-tab="gexplan">🎯 GEX Plan</button>
+      <button data-tab="spy">🎯 SPY Strategies</button>
+      <button data-tab="oibuildup">📊 OI Buildup</button>
+      <button data-tab="regime">🧭 Regime</button>
+      <button data-tab="srbreak">🔨 S/R Breakout</button>
+      <button data-tab="earnings">📈 Earnings</button>
+      <button data-tab="scanner">Scanner</button>
+      <button data-tab="strategy">Strategy</button>
+      <button data-tab="journal">Journal</button>
+      <button data-tab="tradeanalysis">📐 Trade Analysis</button>
+      <button data-tab="uae-trade-scanner">📘 UAE Guide Scanner</button>
+      <button data-tab="scheduler">Scheduler</button>
+      <button data-tab="sql">SQL Viewer</button>
+      <button data-tab="backtest">⏮ Backtest</button>
+    </div>
+    <div id="spot-badge">Spot: <span id="spot-price">—</span></div>
+  </div>
+
+  <div id="content">
+
+    <!-- ═══════════════ DASHBOARD ═══════════════════════════ -->
+    <div id="tab-dashboard" class="section active">
+      <div class="ctrl-bar">
+        <label>Symbol</label>
+        <input type="text" id="symbol-input" value="SPY" style="width:72px"/>
+        <label>Expiry</label>
+        <select id="expiration-select" style="min-width:120px"></select>
+        <label>Strikes ±</label>
+        <input type="number" id="per-side-input" value="12" min="5" max="30" style="width:52px"/>
+        <label><input type="checkbox" id="toggle-oi" checked/> OI</label>
+        <label><input type="checkbox" id="toggle-vol" checked/> Vol</label>
+      </div>
+      <div class="row" style="margin-bottom:14px">
+        <div class="col-half card" style="padding:10px">
+          <div class="card-title">OI &amp; Volume by Strike</div>
+          <div id="options-chart" style="height:310px"></div>
+        </div>
+        <div class="col-half card" style="padding:10px">
+          <div class="card-title">ΔOI Change vs Prior Day</div>
+          <div class="chart-wrap" style="height:310px"><div id="oiChangeChart" style="height:100%;width:100%"></div></div>
+        </div>
+      </div>
+
+      <!-- OI Intelligence Panel — between charts and price -->
+      <!-- ═══ OI Buildup / Covering Analysis ═══ -->
+      <div class="card" id="oi-buildup-card" style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="card-title" style="margin:0">📊 OI Buildup / Covering Analysis</div>
+          <button class="btn btn-ghost" style="font-size:10px;padding:3px 10px" onclick="_loadOiBuildup()">🔄 Preview</button>
+        </div>
+        <div id="oi-buildup-signal" style="margin-bottom:8px"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <canvas id="oi-buildup-chart" style="width:100%;display:block" height="200"></canvas>
+          </div>
+          <div id="oi-top-movers" style="font-size:11px;max-height:200px;overflow-y:auto"></div>
+        </div>
+      </div>
+      <div class="card" style="padding:0;margin-bottom:14px;overflow:hidden" id="oi-intel-card">
+
+        <!-- Header: always visible -->
+        <div style="display:flex;justify-content:space-between;align-items:center;
+            padding:12px 16px;background:var(--card);flex-wrap:wrap;gap:8px">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <span style="font-size:14px;font-weight:800;color:var(--text)">🧠 OI Intelligence</span>
+            <span id="oi-intel-overall-badge"></span>
+            <div id="oi-intel-summary-chips"
+                 style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="oi-intel-status-inline"
+                  style="font-size:11px;color:var(--muted)">auto-runs on expiry change</span>
+            <button class="btn btn-primary" style="font-size:11px;padding:4px 12px"
+                onclick="runOIIntelligence()">▶ Analyze</button>
+            <button onclick="_toggleOIIntel()" id="oi-intel-toggle-btn"
+                style="background:transparent;border:1px solid var(--border);color:var(--muted);
+                padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-family:inherit">
+              ▼ Evidence
+            </button>
+          </div>
+        </div>
+
+        <!-- Always-visible: summary + OI walls -->
+        <div id="oi-intel-scorebars"
+             style="padding:12px 16px;border-top:1px solid var(--border);display:none"></div>
+
+        <!-- Collapsible: evidence bullets -->
+        <div id="oi-intel-body"
+             style="display:none;padding:12px 16px;border-top:1px solid var(--border)"></div>
+      </div>
+
+      <div class="card" style="padding:10px">
+        <div class="card-title">90-Day Price · EMA20 · EMA50</div>
+        <div id="history-chart" style="height:300px"></div>
+      </div>
+      
+
+    </div>
+
+    <!-- ═══════════════ AGGREGATE ═══════════════════════════ -->
+    <div id="tab-aggregate" class="section">
+      <div class="ctrl-bar">
+        <label>Symbol</label><input type="text" id="agg-symbol" value="SPY" style="width:72px"/>
+        <label>From Expiry</label><select id="agg-expiration" style="min-width:120px"></select>
+        <label>Count</label><input type="number" id="agg-count" value="3" min="1" max="10" style="width:48px"/>
+        <label>Strikes ±</label><input type="number" id="agg-strikes" value="10" min="5" max="25" style="width:48px"/>
+        <label>PCR Strike</label><input type="number" id="agg-pcr-strike" step="0.5" placeholder="ATM" title="Blank = nearest ATM; click an OI bar to select" style="width:72px"/>
+        <label><input type="checkbox" id="agg-show-oi" checked/> OI</label>
+        <label><input type="checkbox" id="agg-show-vol" checked/> Vol</label>
+        <button id="btn-refresh-aggregate" class="btn btn-primary">Refresh</button>
+      </div>
+      <div class="stat-row"><div class="stat-chip"><div class="s-label">Spot</div><div class="s-val" id="agg-spot">—</div></div></div>
+      <div class="row" style="margin-bottom:14px">
+        <div class="col-half card" style="padding:10px"><div class="card-title">Single Expiry OI / Vol</div><div id="agg-options-chart" style="height:290px"></div></div>
+        <div class="col-half card" style="padding:10px"><div class="card-title">Aggregate across N expiries</div><div id="aggregate-chart" style="height:290px"></div></div>
+      </div>
+      <div class="row" style="margin-bottom:14px">
+        <div class="col-half card" style="padding:10px">
+          <div class="card-title">Selected Strike PCR History</div>
+          <div id="agg-pcr-info" style="padding:4px 0"></div>
+          <div class="chart-wrap" style="height:220px"><canvas id="pcrStrikeHistoryChart"></canvas></div>
+        </div>
+        <div class="col-half card" style="padding:10px">
+          <div class="card-title">Current Strike PCR Across Expiries</div>
+          <div id="agg-pcr-expiry-info" style="padding:4px 0"></div>
+          <div class="chart-wrap" style="height:220px"><canvas id="pcrStrikeExpiryChart"></canvas></div>
+        </div>
+      </div>
+      <!-- ═══ Cumulative Futures OI ═══ -->
+      <div class="card" id="agg-cum-oi-card" style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="card-title" style="margin:0">📊 Cumulative OI by Strike</div>
+          <button class="btn btn-ghost" style="font-size:10px;padding:3px 10px" onclick="_loadCumulativeOi()">🔄 Load</button>
+        </div>
+        <div id="agg-cum-oi-summary" style="margin-bottom:8px"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <canvas id="agg-cum-oi-chart" style="width:100%;display:block" height="220"></canvas>
+          <div id="agg-cum-oi-table" style="font-size:11px;max-height:220px;overflow-y:auto"></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════ HEATMAP ══════════════════════════════ -->
+    <div id="tab-heatmap" class="section">
+
+      <!-- Controls -->
+      <div class="ctrl-bar">
+        <label>Screen by</label>
+        <select id="hm-mode">
+          <option value="pcr_change">📉 PCR Change</option>
+          <option value="oi_change">🔥 OI Change</option>
+          <option value="high_volume">📊 High Volume</option>
+        </select>
+        <label>Threshold %</label>
+        <input type="number" id="hm-threshold" value="10" min="1" max="200" style="width:58px"/>
+        <label>Sector</label>
+        <select id="hm-sector" style="min-width:150px" onchange="">
+          <option value="">All Sectors</option>
+          <option value="Technology">💻 Technology</option>
+          <option value="Healthcare">🏥 Healthcare</option>
+          <option value="Financials">🏦 Financials</option>
+          <option value="Energy">⚡ Energy</option>
+          <option value="Consumer Discretionary">🛍 Consumer Discretionary</option>
+          <option value="Consumer Staples">🧴 Consumer Staples</option>
+          <option value="Industrials">🏭 Industrials</option>
+          <option value="Materials">⛏ Materials</option>
+          <option value="Utilities">💡 Utilities</option>
+          <option value="Communication Services">📡 Comm Services</option>
+          <option value="Real Estate">🏠 Real Estate</option>
+        </select>
+        <button class="btn btn-primary" onclick="runHeatmapScreen()">🔍 Scan</button>
+        <div style="width:1px;height:22px;background:var(--border);margin:0 4px"></div>
+        <button class="hm-view-btn active" id="hm-btn-grid"  onclick="hmSetView('grid')">⊞ Grid</button>
+        <button class="hm-view-btn"        id="hm-btn-table" onclick="hmSetView('table')">☰ Table</button>
+      </div>
+
+      <!-- Legend -->
+      <div style="display:flex;align-items:center;gap:14px;font-size:11px;color:var(--muted);
+        margin-bottom:10px;padding:6px 12px;background:var(--card);border:1px solid var(--border);border-radius:5px;flex-wrap:wrap">
+        <span><span style="color:#ef4444">●</span> Hot ≥75</span>
+        <span><span style="color:#f59e0b">●</span> Warm ≥50</span>
+        <span><span style="color:#3b82f6">●</span> Moderate ≥25</span>
+        <span><span style="color:#64748b">●</span> Low &lt;25</span>
+        <span style="margin-left:auto">Hover tile for details · Click to open in Dashboard</span>
+      </div>
+
+      <div id="hm-status" style="color:var(--muted);font-size:11px;margin-bottom:8px">
+        Click Scan to screen all symbols in your DB
+      </div>
+      <div id="hm-stats" class="stat-row" style="margin-bottom:12px"></div>
+
+      <!-- Grid view -->
+      <div id="hm-grid-wrap">
+        <div id="hm-grid" class="hm-tiles-grid"></div>
+      </div>
+
+      <!-- Table view (hidden by default) -->
+      <div id="hm-table-wrap" style="display:none">
+        <div class="tbl-wrap" id="hm-table"></div>
+      </div>
+
+      <!-- ═══ OI Buildup/Covering Heatmap Scanner ═══ -->
+      <div class="card" style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="card-title" style="margin:0">🔥 OI Buildup / Covering Scanner</div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select id="oi-hm-filter" style="font-size:11px" onchange="_filterOiHeatmap()">
+              <option value="ALL">All Signals</option>
+              <option value="LONG_BUILDUP">Long Buildup</option>
+              <option value="SHORT_BUILDUP">Short Buildup</option>
+              <option value="SHORT_COVERING">Short Covering</option>
+              <option value="LONG_UNWINDING">Long Unwinding</option>
+            </select>
+            <button class="btn btn-primary" onclick="_loadOiHeatmap()" style="font-size:11px;padding:4px 12px">🔄 Scan</button>
+          </div>
+        </div>
+        <div id="oi-heatmap-status" style="font-size:11px;color:var(--muted);margin-bottom:6px"></div>
+        <div id="oi-heatmap-result" style="font-size:11px;max-height:500px;overflow-y:auto"></div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════ SCANNER ══════════════════════════════ -->
+    <div id="tab-scanner" class="section">
+      <div class="ctrl-bar">
+        <button class="btn btn-primary"  onclick="runScanner('large_oi')">🔥 OI Buildup</button>
+        <button class="btn btn-warning"  onclick="runScanner('pcr_change')">📉 PCR Shift</button>
+        <button class="btn btn-success"  onclick="runScanner('weekly_pin')">📌 Pin Scan</button>
+        <button class="btn btn-neutral"  onclick="showWallMap()">🧱 Wall Map</button>
+        <div style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+        <button class="btn btn-primary" style="background:linear-gradient(90deg,#7c3aed,#4f46e5);border-color:#7c3aed" onclick="runOpportunityScanner()">⚡ Opportunity Scan</button>
+        <label>Min DTE</label><input type="number" id="opp_min_dte" value="21" min="7" max="30" style="width:46px" title="Minimum DTE — avoid high gamma below 21"/>
+        <label>Max DTE</label><input type="number" id="opp_max_dte" value="60" min="14" max="90" style="width:46px"/>
+        <label>Wing $</label><input type="number" id="opp_wing" value="5" min="1" max="20" style="width:46px" step="0.5"/>
+        <div style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+        <label>Min OI Δ</label><input type="number" id="param_min_abs" value="1000" style="width:76px"/>
+        <label>Min Δ%</label><input type="number"   id="param_min_pct" value="15"   style="width:58px"/>
+        <label>Max DTE</label><input type="number"  id="param_max_dte" value="60"   style="width:58px"/>
+        <label>PCR Thr%</label><input type="number" id="param_pcr_thr" value="10"   style="width:58px"/>
+        <div style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+        <label>Sector</label>
+        <select id="scanner-sector-filter" style="min-width:130px" onchange="">
+          <option value="">All Sectors</option>
+          <option value="Technology">💻 Tech</option>
+          <option value="Healthcare">🏥 Health</option>
+          <option value="Financials">🏦 Finance</option>
+          <option value="Energy">⚡ Energy</option>
+          <option value="Consumer Discretionary">🛍 Cons Disc</option>
+          <option value="Consumer Staples">🧴 Staples</option>
+          <option value="Industrials">🏭 Industrials</option>
+          <option value="Materials">⛏ Materials</option>
+          <option value="Utilities">💡 Utilities</option>
+          <option value="Communication Services">📡 Comm</option>
+          <option value="Real Estate">🏠 RE</option>
+        </select>
+        <div style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+        <label>Symbol</label><input type="text" id="param_wall_sym" value="SPY" style="width:65px" onchange="_scannerLoadExpiries()"/>
+        <label>Expiry</label><select id="param_expiry" style="min-width:110px"><option value="">All future expiries</option></select>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;padding:6px 10px;background:var(--card);border:1px solid var(--border);border-radius:5px">
+        <b style="color:var(--text)">PCR guide:</b>
+        Fearful <span style="color:var(--red)">(PCR&gt;1.3)</span> = sell premium.
+        Complacent <span style="color:var(--green)">(PCR&lt;0.6)</span> = be selective.
+        <span style="color:var(--yellow)">PCR↑+Price↑</span> = smart money hedging → IC above resistance.
+      </div>
+      <div id="scanner-status" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
+
+      <!-- Opportunity scanner results (separate from existing scanner) -->
+      <div id="opp-results" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+          <div id="opp-status" style="font-size:12px;color:var(--muted)"></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap" id="opp-regime-chips"></div>
+          <div style="display:flex;gap:4px">
+            <select id="opp-filter-regime" style="font-size:11px" onchange="filterOpportunities()">
+              <option value="">All Regimes</option>
+              <option value="TRENDING">📈 Trending</option>
+              <option value="MEAN_REVERSION">🔄 Mean Reversion</option>
+            </select>
+            <select id="opp-filter-strategy" style="font-size:11px" onchange="filterOpportunities()">
+              <option value="">All Strategies</option>
+              <option value="Bull Put Spread">🟢 Bull Put</option>
+              <option value="Bear Call Spread">🔴 Bear Call</option>
+              <option value="Iron Condor">🦅 Iron Condor</option>
+            </select>
+            <select id="opp-filter-bias" style="font-size:11px" onchange="filterOpportunities()">
+              <option value="">All Bias</option>
+              <option value="Bullish">🟢 Bullish</option>
+              <option value="Bearish">🔴 Bearish</option>
+              <option value="Neutral">⚪ Neutral</option>
+            </select>
+            <select id="opp-sort" style="font-size:11px" onchange="filterOpportunities()">
+              <option value="grade">Sort: Grade (A→C)</option>
+              <option value="rr">Sort: R:R</option>
+              <option value="pop">Sort: PoP%</option>
+              <option value="credit">Sort: Credit $</option>
+              <option value="dte">Sort: DTE</option>
+            </select>
+          </div>
+        </div>
+        <div class="tbl-wrap" id="opp-table"></div>
+      </div>
+
+      <div id="scanner-results"></div>
+    </div>
+
+    <!-- ═══════════════ STRATEGY ══════════════════════════════ -->
+    <div id="tab-strategy" class="section">
+
+      <!-- ── Control bar ── -->
+      <div class="ctrl-bar">
+        <label>Symbol</label>
+        <input type="text" id="strat-symbol-input" placeholder="AAPL or blank=all"
+          style="width:90px" oninput="_stratSymbolChanged()"/>
+        <label>Expiry</label>
+        <select id="strat-expiry" style="min-width:120px">
+          <option value="">Auto (21-45 DTE)</option>
+        </select>
+        <label>Sector</label>
+        <select id="strat-sector" style="min-width:140px">
+          <option value="">All Sectors</option>
+          <option value="Technology">💻 Technology</option>
+          <option value="Healthcare">🏥 Healthcare</option>
+          <option value="Financials">🏦 Financials</option>
+          <option value="Energy">⚡ Energy</option>
+          <option value="Consumer Discretionary">🛍 Consumer Disc</option>
+          <option value="Consumer Staples">🧴 Staples</option>
+          <option value="Industrials">🏭 Industrials</option>
+          <option value="Materials">⛏ Materials</option>
+          <option value="Utilities">💡 Utilities</option>
+          <option value="Communication Services">📡 Comm Services</option>
+          <option value="Real Estate">🏠 Real Estate</option>
+        </select>
+        <label>Min DTE</label><input type="number" id="strat-min-dte" value="21" min="1" max="60" style="width:46px"/>
+        <label>Max DTE</label><input type="number" id="strat-max-dte" value="45" min="7" max="120" style="width:46px"/>
+        <label>Strategy</label>
+        <select id="strat-type" style="min-width:200px">
+          <option value="">🤖 Auto-Select Best</option>
+          <option value="bull_put">🟢 Bull Put Spread</option>
+          <option value="bear_call">🔴 Bear Call Spread</option>
+          <option value="condor">🦅 Iron Condor</option>
+          <option value="bull_call">📈 Bull Call Spread</option>
+          <option value="bear_put">📉 Bear Put Spread</option>
+          <option value="strangle">⟺ Short Strangle</option>
+        </select>
+        <button class="btn btn-primary" onclick="runStrategy()">▶ Analyze</button>
+      </div>
+
+      <!-- ── Info bar ── -->
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;padding:8px 12px;
+        background:var(--card);border:1px solid var(--border);border-radius:5px">
+        <b style="color:var(--text)">Symbol optional</b> — leave blank to scan all watchlist symbols.
+        <b style="color:var(--text)">Expiry optional</b> — blank auto-picks best in Min/Max DTE range.
+        Select a <b>Sector</b> to narrow to that sector only.
+        Grade: <b style="color:var(--green)">A≥65</b> · <b style="color:var(--yellow)">B≥45</b> · <b style="color:var(--red)">C&lt;45</b>
+      </div>
+
+      <div id="strat-status" style="font-size:11px;color:var(--muted);margin-bottom:10px"></div>
+      <div id="strat-results"></div>
+    </div>
+
+    <!-- ═══════════════ SPY STRATEGIES ═══════════════════════ -->
+    <div id="tab-spy" class="section">
+      <div class="ctrl-bar">
+        <label>Symbol</label>
+        <select id="spy-symbol" style="min-width:90px"></select>
+        <button class="btn btn-primary"  id="btn-spy-daily"  onclick="runSPYStrategy('daily')">☀️ Daily (0-2 DTE)</button>
+        <button class="btn btn-success"  id="btn-spy-weekly" onclick="runSPYStrategy('weekly')">📅 Weekly (5-10 DTE)</button>
+        <button class="btn btn-neutral"  id="btn-spy-both"   onclick="runSPYStrategy('both')">⚡ Both</button>
+        <div style="width:1px;height:24px;background:var(--border);margin:0 6px"></div>
+        <select id="spy-plan-symbol" style="width:80px;font-size:12px">
+          <option value="SPY">SPY</option>
+          <option value="QQQ">QQQ</option>
+          <option value="IWM">IWM</option>
+        </select>
+        <button class="btn" style="background:linear-gradient(90deg,#7c3aed,#6366f1);border:1px solid #7c3aed;color:white;font-weight:700" onclick="_loadDailyPlan()">📊 GEX Daily Plan</button>
+      </div>
+
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:5px">
+        <b style="color:var(--text)">Signal logic:</b>
+        &nbsp;<span style="color:var(--red)">RSI-14 − EMA90(RSI) ≥ +20 = OVERBOUGHT</span> → avoid long calls, prefer bear spreads or IC.
+        &nbsp;<span style="color:var(--green)">RSI-14 − EMA90(RSI) ≤ −20 = OVERSOLD</span> → avoid long puts, prefer bull spreads.
+        &nbsp;OI walls used as strike anchors. ATR sizes the wings. PoP estimated from distance-to-strike.
+      </div>
+
+      <div id="spy-status" style="font-size:11px;color:var(--muted);margin-bottom:10px"></div>
+
+      <!-- Technicals panel -->
+      <div id="spy-ta-panel" style="display:none;margin-bottom:14px">
+        <div class="card-title" style="padding:0 0 8px">📊 Technical Snapshot</div>
+        <div id="spy-ta-grid" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+      </div>
+
+      <!-- OI walls -->
+      <div id="spy-walls-panel" style="display:none;margin-bottom:14px">
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <div class="card col-half" style="padding:12px" id="spy-put-walls-card">
+            <div class="card-title">🟢 Put Walls (Support)</div>
+            <div id="spy-put-walls"></div>
+          </div>
+          <div class="card col-half" style="padding:12px" id="spy-call-walls-card">
+            <div class="card-title">🔴 Call Walls (Resistance)</div>
+            <div id="spy-call-walls"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Strategy cards -->
+      <div id="spy-strategies-daily" style="display:none">
+        <div class="card-title" style="font-size:13px;color:var(--text);padding:0 0 8px">☀️ Daily Strategies (0-2 DTE)</div>
+        <div id="spy-strat-daily-cards"></div>
+      </div>
+      <div id="spy-strategies-weekly" style="display:none;margin-top:14px">
+        <div class="card-title" style="font-size:13px;color:var(--text);padding:0 0 8px">📅 Weekly Strategies (5-10 DTE)</div>
+        <div id="spy-strat-weekly-cards"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ EARNINGS ══════════════════════════════ -->
+    <div id="tab-earnings" class="section">
+      <!-- ═══ Earnings Tab Nav Bar ═══ -->
+      <div class="card" style="padding:10px 14px;margin-bottom:10px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <!-- Panel switchers -->
+          <button class="btn btn-primary" id="earn-nav-pre"
+            onclick="_earnNav('pre')" style="font-size:12px">📅 Pre-Earnings</button>
+          <button class="btn btn-ghost" id="earn-nav-post"
+            onclick="_earnNav('post')" style="font-size:12px">📊 Post-Earnings</button>
+          <button class="btn btn-ghost" id="earn-nav-detail"
+            onclick="_earnNav('detail')" style="font-size:12px">🔍 Analyze Symbol</button>
+          <div style="width:1px;height:26px;background:var(--border)"></div>
+          <!-- Pre-Earnings controls (shown when pre panel active) -->
+          <div id="earn-ctrl-pre" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <label style="font-size:11px;color:var(--muted)">Within</label>
+            <input id="earn-days-ahead" type="number" value="30" min="1" max="90"
+              style="width:50px;font-size:12px;font-weight:700"/>
+            <label style="font-size:11px;color:var(--muted)">days</label>
+            <button class="btn btn-primary" onclick="_runPreEarningsScan(false)" id="btn-pre-earnings"
+              style="font-size:11px" title="Only fetch symbols not yet in cache">⚡ Scan New</button>
+            <button class="btn btn-neutral" onclick="_runPreEarningsScan(true)" id="btn-pre-all"
+              style="font-size:11px" title="Re-fetch all symbols">🔄 Fetch All</button>
+            <button class="btn btn-ghost" onclick="_loadPreEarningsFromDB()" style="font-size:11px">💾 Load</button>
+            <span id="pre-earn-status" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+          <!-- Post-Earnings controls (shown when post panel active) -->
+          <div id="earn-ctrl-post" style="display:none;gap:6px;align-items:center;flex-wrap:wrap">
+            <label style="font-size:11px;color:var(--muted)">Last</label>
+            <input id="post-earn-days" type="number" value="10" min="1" max="60"
+              style="width:50px;font-size:12px;font-weight:700"/>
+            <label style="font-size:11px;color:var(--muted)">days</label>
+            <button class="btn btn-primary" onclick="_runPostEarningsScan(false)" id="btn-post-earnings"
+              style="font-size:11px" title="Only fetch symbols not yet in cache">⚡ Scan New</button>
+            <button class="btn btn-neutral" onclick="_runPostEarningsScan(true)" id="btn-post-all"
+              style="font-size:11px" title="Re-fetch all symbols">🔄 Fetch All</button>
+            <button class="btn btn-ghost" onclick="_loadPostEarningsFromDB()" style="font-size:11px">💾 Load</button>
+            <span id="post-earn-status" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+          <!-- Symbol analysis controls (shown when detail panel active) -->
+          <div id="earn-ctrl-detail" style="display:none;gap:6px;align-items:center;flex-wrap:wrap">
+            <label style="font-size:11px;color:var(--muted)">Symbol</label>
+            <select id="earn-symbol" style="min-width:130px"></select>
+            <button class="btn btn-primary" onclick="runEarningsAnalysis()" style="font-size:11px">🔍 Analyze</button>
+            <span id="earn-status" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pre-Earnings Panel -->
+      <div id="earn-panel-pre" style="display:block">
+        <div id="pre-earn-result"></div>
+      </div>
+
+
+
+      <!-- Post-Earnings Panel -->
+      <div id="earn-panel-post" style="display:none">
+        <div id="post-earn-result"></div>
+      </div>
+
+      <!-- Individual Analysis Panel -->
+      <div id="earn-panel-detail" style="display:none">
+      <div id="earn-detail-section">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;padding:8px 12px;
+        background:var(--card);border:1px solid var(--border);border-radius:5px">
+        <b style="color:var(--text)">No API key required.</b>
+        All data from yfinance (free): EPS history, revenue est vs actual,
+        analyst consensus, next quarter estimates. Rule-based market outlook
+        computed from beat rate, revenue trend, analyst score + price position.
+      </div>
+
+      <div id="earn-results" style="display:none">
+
+        <!-- Company header + key metrics -->
+        <div class="card" style="padding:14px;margin-bottom:12px">
+          <div style="margin-bottom:8px">
+            <div id="earn-company-name" style="font-size:18px;font-weight:700;color:var(--text)"></div>
+            <div id="earn-meta" style="font-size:12px;margin-top:2px"></div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap" id="earn-key-metrics"></div>
+        </div>
+
+        <!-- Market Outlook -->
+        <div id="earn-outlook-card" style="margin-bottom:12px"></div>
+
+        <!-- Quality + streak chips -->
+        <div class="card" style="padding:12px;margin-bottom:12px">
+          <div class="card-title">📊 Earnings Quality &amp; Trend Metrics</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap" id="earn-quality-row"></div>
+        </div>
+
+        <!-- EPS history + Next quarter side by side -->
+        <div class="row" style="gap:12px;margin-bottom:12px">
+          <div class="card col-half" style="padding:12px">
+            <div class="card-title">📈 EPS History — Expected vs Actual (Last 8 Quarters)</div>
+            <div class="tbl-wrap" id="earn-eps-tbl"></div>
+          </div>
+          <div class="card col-half" style="padding:12px">
+            <div class="card-title">🔮 Next Quarter Estimates — EPS &amp; Revenue</div>
+            <div id="earn-next-card"></div>
+          </div>
+        </div>
+
+        <!-- Revenue actuals + Post-earnings moves side by side -->
+        <div class="row" style="gap:12px;margin-bottom:12px">
+          <div class="card col-half" style="padding:12px">
+            <div class="card-title">💰 Revenue Actuals by Quarter ($B)</div>
+            <div class="tbl-wrap" id="earn-rev-tbl"></div>
+          </div>
+          <div class="card col-half" style="padding:12px">
+            <div class="card-title">📉 Post-Earnings Price Moves (Last 6 Quarters)</div>
+            <div class="tbl-wrap" id="earn-moves-tbl"></div>
+          </div>
+        </div>
+
+        <!-- Catalysts / Risks / Options implication -->
+        <div class="card" style="padding:14px;margin-bottom:12px">
+          <div class="card-title">🤖 Rule-Based Analysis</div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap">
+            <div style="flex:1;min-width:180px">
+              <div class="card-title">🚀 Key Catalysts</div>
+              <ul id="earn-catalysts" style="font-size:12px;color:var(--text);padding-left:16px;line-height:1.9;margin:0"></ul>
+            </div>
+            <div style="flex:1;min-width:180px">
+              <div class="card-title">⚠️ Key Risks</div>
+              <ul id="earn-risks" style="font-size:12px;color:var(--text);padding-left:16px;line-height:1.9;margin:0"></ul>
+            </div>
+            <div style="flex:1;min-width:180px">
+              <div class="card-title">🎯 Options Implication</div>
+              <p id="earn-options-impl" style="font-size:12px;color:#a855f7;line-height:1.6;margin:0"></p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Analyst consensus -->
+        <div class="card" style="padding:12px;margin-bottom:12px">
+          <div class="card-title">🎯 Analyst Consensus</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap" id="earn-analyst-row"></div>
+        </div>
+
+      </div>
+    </div>
+
+      </div>
+      </div>
+    
+    <!-- ═══════════════ SCHEDULER ════════════════════════════ -->
+    <div id="tab-scheduler" class="section">
+      <div class="card">
+        <div class="card-title">Tracked Symbols (comma separated)</div>
+        <textarea id="symbols-list" rows="3" style="width:100%;margin-bottom:10px"></textarea>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" id="save-symbols">Save</button>
+          <button class="btn btn-success" id="run-now">▶ Run Now</button>
+          <div style="width:1px;height:26px;background:var(--border)"></div>
+          <button class="btn btn-neutral" onclick="_updateSectors()" id="btn-update-sectors">📊 Update Sectors</button>
+          <span id="sector-update-status" style="font-size:11px;color:var(--muted)"></span>
+        </div>
+        <div id="scheduler-status" style="margin-top:12px;font-size:12px;color:var(--muted)"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SQL VIEWER ═══════════════════════════ -->
+    <div id="tab-sql" class="section">
+      <div class="card" style="padding:10px 14px;margin-bottom:12px">
+        <div class="card-title">Saved Queries</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <select id="sql-saved-select" style="min-width:200px"></select>
+          <button class="btn btn-primary"  id="sql-load-btn">Load</button>
+          <button class="btn btn-danger"   id="sql-del-btn">Delete</button>
+          <div style="width:1px;height:24px;background:var(--border)"></div>
+          <input type="text" id="sql-save-name" placeholder="Query name…" style="width:160px"/>
+          <button class="btn btn-success" id="sql-save-btn">Save current query</button>
+        </div>
+      </div>
+      <div class="card" style="padding:10px 14px;margin-bottom:12px">
+        <div class="card-title">Quick Table View</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+          Table: <select id="sql-table"><option value="options">options</option><option value="symbols">symbols</option></select>
+          Symbol: <input id="sql-symbol" style="width:70px"/>
+          Expiry: <select id="sql-expiration"></select>
+          Limit: <input id="sql-limit" type="number" value="100" style="width:68px"/>
+          <button class="btn btn-primary" id="sql-run">Run</button>
+          <button class="btn btn-ghost"   id="sql-reset">Reset</button>
+        </div>
+        <div class="tbl-wrap" id="sql-grid"></div>
+      </div>
+      <div class="card" style="padding:10px 14px">
+        <div class="card-title">Freeform SQL</div>
+        <textarea id="sql-query" rows="5" style="width:100%;margin-bottom:8px;font-family:monospace;font-size:12px"
+          placeholder="SELECT * FROM options WHERE symbol='SPY' ORDER BY oi DESC LIMIT 20;"></textarea>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <button class="btn btn-primary" onclick="runSQL()">▶ Run</button>
+          <button class="btn btn-ghost"   onclick="clearSQL()">🧹 Clear</button>
+        </div>
+        <div id="sql-status" style="margin-bottom:8px;font-size:12px"></div>
+        <div class="tbl-wrap" id="sql-results"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ JOURNAL ══════════════════════════════ -->
+    <!-- ═══════════════ SECTORS ═══════════════════════════ -->
+    <div id="tab-sectors" class="section">
+      <div class="ctrl-bar">
+        <button class="btn btn-primary" onclick="runSectorAnalysis()">🔄 Preview Sectors</button>
+        <span id="sector-status" style="font-size:11px;color:var(--muted);margin-left:8px"></span>
+      
+        <div style="width:1px;height:22px;background:var(--border)"></div>
+        <button class="btn btn-neutral" onclick="_updateSectors()" style="font-size:11px">📊 Update Sectors</button>
+        <span id="sector-update-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <!-- 4-quadrant chart + sector cards grid -->
+      <div id="sector-quadrant" style="margin-bottom:16px"></div>
+      <div id="sector-cards" style="display:flex;flex-wrap:wrap;gap:10px"></div>
+    </div>
+
+    <!-- ═══════════════ MARKET NEWS ══════════════════════ -->
+    <div id="tab-news" class="section">
+      <div class="ctrl-bar">
+        <button class="btn btn-primary" onclick="refreshNews()">🔄 Preview News</button>
+        <button class="btn btn-success"  onclick="generateDigest()">🌅 Morning Digest</button>
+        <span id="news-status" style="font-size:11px;color:var(--muted);margin-left:8px"></span>
+      </div>
+      <!-- Morning digest panel -->
+      <div id="news-digest" style="display:none;margin-bottom:14px"></div>
+      <!-- News filters -->
+      <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <select id="news-filter-sentiment" style="font-size:11px" onchange="filterNews()">
+          <option value="">All Sentiment</option>
+          <option value="positive">🟢 Positive</option>
+          <option value="negative">🔴 Negative</option>
+          <option value="neutral">⚪ Neutral</option>
+        </select>
+        <select id="news-filter-cat" style="font-size:11px" onchange="filterNews()">
+          <option value="">All Categories</option>
+          <option value="market">📊 Market</option>
+          <option value="stock">📈 Stock</option>
+        </select>
+        <input type="text" id="news-search" placeholder="Search headlines…"
+          style="font-size:11px;width:180px" oninput="filterNews()"/>
+      </div>
+      <div id="news-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px"></div>
+    </div>
+
+        <!-- ═══════════════ REGIME SCANNER ══════════════════════════ -->
+    <div id="tab-regime" class="section">
+
+      <!-- Control bar -->
+      <div class="ctrl-bar" style="flex-wrap:wrap;gap:8px">
+        <button class="btn btn-primary" onclick="runRegimeScan()">▶ Run Scan Now</button>
+        <button class="btn btn-ghost"   onclick="loadRegimeResults()">🔄 Load Latest</button>
+        <label>Regime</label>
+        <select id="regime-filter" style="min-width:160px" onchange="loadRegimeResults()">
+          <option value="ALL">All Regimes</option>
+          <option value="TRENDING_UP">📈 Trending Up</option>
+          <option value="TRENDING_DOWN">📉 Trending Down</option>
+          <option value="MEAN_REV_BULL">🔄 Mean Rev Bull (Oversold)</option>
+          <option value="MEAN_REV_BEAR">🔄 Mean Rev Bear (Overbought)</option>
+          <option value="MILD_BULLISH">↗ Mild Bullish</option>
+          <option value="MILD_BEARISH">↘ Mild Bearish</option>
+          <option value="SIDEWAYS">↔ Sideways</option>
+        </select>
+        <label>Bias</label>
+        <select id="regime-bias-filter" style="min-width:110px" onchange="loadRegimeResults()">
+          <option value="ALL">All</option>
+          <option value="Bullish">🟢 Bullish</option>
+          <option value="Bearish">🔴 Bearish</option>
+          <option value="Neutral">⚪ Neutral</option>
+        </select>
+        <label>Sector</label>
+        <select id="regime-sector-filter" style="min-width:140px" onchange="loadRegimeResults()">
+          <option value="">All Sectors</option>
+          <option value="Technology">💻 Technology</option>
+          <option value="Healthcare">🏥 Healthcare</option>
+          <option value="Financials">🏦 Financials</option>
+          <option value="Energy">⚡ Energy</option>
+          <option value="Consumer Discretionary">🛍 Consumer Disc</option>
+          <option value="Industrials">🏭 Industrials</option>
+          <option value="Materials">⛏ Materials</option>
+          <option value="Utilities">💡 Utilities</option>
+          <option value="Communication Services">📡 Comm</option>
+        </select>
+        <input type="text" id="regime-search" placeholder="Search symbol…"
+          style="width:110px;font-size:11px" oninput="filterRegimeTable()"/>
+        <span id="regime-status" style="font-size:11px;color:var(--muted);margin-left:4px"></span>
+      </div>
+
+      <!-- Summary chips -->
+      <div id="regime-summary" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"></div>
+
+      <!-- Table -->
+      <div id="regime-table" style="overflow-x:auto"></div>
+    </div>
+
+        <!-- ═══════════════ SR BREAKOUT SCANNER ══════════════════ -->
+    <div id="tab-srbreak" class="section">
+      <!-- S/R Tab Nav -->
+      <div class="card" style="padding:10px 14px;margin-bottom:10px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-primary" id="sr-nav-breakout" onclick="_srNav('breakout')">📈 Breakout Scanner</button>
+          <button class="btn btn-ghost"   id="sr-nav-proximity" onclick="_srNav('proximity')">🎯 S/R Proximity</button>
+          <div style="width:1px;height:26px;background:var(--border)"></div>
+          <!-- Breakout controls -->
+          <div id="sr-ctrl-breakout" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <label style="font-size:11px;color:var(--muted)">Min Strength</label>
+            <input type="number" id="sr-min-strength" value="40" min="10" max="200" style="width:55px"/>
+            <label style="display:flex;align-items:center;gap:4px;font-size:11px">
+              <input type="checkbox" id="sr-require-momentum" checked/> Momentum Only
+            </label>
+            <label style="font-size:11px;color:var(--muted)">Sector</label>
+            <select id="sr-sector" style="min-width:120px;font-size:11px">
+              <option value="">All Sectors</option>
+              <option value="Technology">💻 Technology</option>
+              <option value="Healthcare">🏥 Healthcare</option>
+              <option value="Financials">🏦 Financials</option>
+              <option value="Energy">⚡ Energy</option>
+              <option value="Consumer Cyclical">🛍 Consumer</option>
+              <option value="Communication Services">📡 Comm.</option>
+              <option value="Industrials">🏭 Industrials</option>
+              <option value="Basic Materials">⛏ Materials</option>
+              <option value="Utilities">💡 Utilities</option>
+              <option value="Real Estate">🏢 Real Estate</option>
+            </select>
+            <button class="btn btn-primary" onclick="runSRBreakout()" id="btn-sr-scan" style="font-size:11px">📊 Scan</button>
+            <span id="sr-status" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+          <!-- Proximity controls -->
+          <div id="sr-ctrl-proximity" style="display:none;gap:6px;align-items:center;flex-wrap:wrap">
+            <label style="font-size:11px;color:var(--muted)">Within</label>
+            <input type="number" id="sr-prox-pct" value="3" min="0.5" max="10" step="0.5"
+              style="width:50px;font-size:12px;font-weight:700"/>
+            <label style="font-size:11px;color:var(--muted)">% of S/R</label>
+            <select id="sr-prox-rsi" style="font-size:11px;min-width:120px">
+              <option value="all">All Stocks</option>
+              <option value="overbought">Overbought (RSI≥65)</option>
+              <option value="oversold">Oversold (RSI≤35)</option>
+              <option value="neutral">Neutral RSI</option>
+            </select>
+            <label style="font-size:11px;color:var(--muted)">Sector</label>
+            <select id="sr-prox-sector" style="min-width:120px;font-size:11px">
+              <option value="">All Sectors</option>
+              <option value="Technology">💻 Technology</option>
+              <option value="Healthcare">🏥 Healthcare</option>
+              <option value="Financials">🏦 Financials</option>
+              <option value="Energy">⚡ Energy</option>
+              <option value="Consumer Cyclical">🛍 Consumer</option>
+              <option value="Communication Services">📡 Comm.</option>
+              <option value="Industrials">🏭 Industrials</option>
+              <option value="Basic Materials">⛏ Materials</option>
+            </select>
+            <button class="btn btn-primary" onclick="_runSRProximity()" id="btn-prox-scan" style="font-size:11px">🎯 Scan</button>
+            <button class="btn btn-ghost" onclick="_loadSRProximityFromDB()" style="font-size:11px">💾 Load</button>
+            <span id="sr-prox-status" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+        </div>
+      </div>
+      <!-- Panels -->
+      <div id="sr-panel-breakout">
+        <div id="sr-results"></div>
+      </div>
+      <div id="sr-panel-proximity" style="display:none">
+        <div id="sr-prox-result"></div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);padding:8px 12px;background:var(--card);
+          border:1px solid var(--border);border-radius:5px;margin-bottom:10px">
+        <b style="color:var(--text)">Logic:</b>
+        Pivot-based S/R channels (10-bar pivot, 5% channel width, 290-bar lookback).
+        Breach confirmed when: price closes through level <b>AND</b> |%change| &gt; EMA₆₀(|%change|) × 2.
+        Positive change = resistance break (bullish). Negative = support break (bearish).
+        Daily + Weekly timeframes both checked.
+      </div>
+    </div>
+
+        <div id="tab-journal" class="section">
+      <!-- Sub-tabs: Open Trades / Analytics / Add Trade -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;border-bottom:1px solid var(--border);padding-bottom:8px">
+        <button class="btn btn-primary" id="jrn-tab-open"     onclick="jrnTab('open')">📋 Open Trades</button>
+        <button class="btn btn-ghost"   id="jrn-tab-closed"   onclick="jrnTab('closed')">✅ Closed Trades</button>
+        <button class="btn btn-ghost"   id="jrn-tab-analytics" onclick="jrnTab('analytics')">📊 Analytics</button>
+        <button class="btn btn-success" id="jrn-tab-add"      onclick="jrnTab('add')">➕ Add Trade</button>
+        <button class="btn btn-warning" style="margin-left:auto" onclick="jrnRefreshAll()">🔄 Preview Live Prices</button>
+      
+        <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+          <span style="font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px">Sector</span>
+          <select id="jrn-sector-filter" style="font-size:12px;padding:4px 8px;min-width:130px"
+            onchange="_jrnSectorFilter=this.value;jrnLoadOpen()">
+            <option value="">All Sectors</option>
+            <option value="Technology">💻 Technology</option>
+            <option value="Healthcare">🏥 Healthcare</option>
+            <option value="Financials">🏦 Financials</option>
+            <option value="Energy">⚡ Energy</option>
+            <option value="Consumer Cyclical">🛍 Consumer</option>
+            <option value="Communication Services">📡 Comm.</option>
+            <option value="Industrials">🏭 Industrials</option>
+            <option value="Basic Materials">⛏ Materials</option>
+            <option value="Utilities">💡 Utilities</option>
+            <option value="Real Estate">🏢 Real Estate</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Portfolio stats header (always visible) -->
+      <!-- Portfolio alignment panel -->
+      
+      <div id="jrn-edit-banner" style="display:none;background:#422006;border:1px solid #854d0e;border-radius:5px;padding:8px 12px;margin-bottom:8px"></div>
+      <div id="jrn-alignment-panel" style="display:none"></div>
+
+      <div id="jrn-portfolio-header" style="margin-bottom:10px;display:none">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:6px;padding:10px 12px;
+            background:var(--card);border:1px solid var(--border);border-radius:6px">
+          <!-- Row 1: P/L -->
+          <div style="background:#1a2744;border:1px solid #22c55e44;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted);letter-spacing:.08em">CURRENT P/L</div>
+            <div id="ph-current-pnl" style="font-size:14px;font-weight:800;color:#22c55e">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #22c55e44;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">OVERALL P/L</div>
+            <div id="ph-overall-pnl" style="font-size:14px;font-weight:800;color:#22c55e">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #22c55e44;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">WINNERS</div>
+            <div id="ph-winners" style="font-size:14px;font-weight:800;color:#22c55e">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #ef444444;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">LOSERS</div>
+            <div id="ph-losers" style="font-size:14px;font-weight:800;color:#ef4444">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #3b82f644;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">WIN %</div>
+            <div id="ph-win-rate" style="font-size:14px;font-weight:800;color:#3b82f6">—</div>
+          </div>
+          <!-- Row 2: Risk/Reward -->
+          <div style="background:#1a2744;border:1px solid #22c55e33;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">BULL RISK</div>
+            <div id="ph-bull-risk" style="font-size:13px;font-weight:700;color:#22c55e">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #22c55e33;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">BULL REW</div>
+            <div id="ph-bull-rew" style="font-size:13px;font-weight:700;color:#4ade80">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #ef444433;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">BEAR RISK</div>
+            <div id="ph-bear-risk" style="font-size:13px;font-weight:700;color:#ef4444">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #ef444433;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">BEAR REW</div>
+            <div id="ph-bear-rew" style="font-size:13px;font-weight:700;color:#f87171">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #f59e0b44;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">TOTAL R:R</div>
+            <div id="ph-total-rr" style="font-size:14px;font-weight:800;color:#f59e0b">—</div>
+          </div>
+          <!-- Row 3: Deployment -->
+          <div style="background:#1a2744;border:1px solid #a855f744;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">CAPITAL %</div>
+            <div id="ph-capital-pct" style="font-size:14px;font-weight:800;color:#a855f7">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #64748b44;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">OPEN TRADES</div>
+            <div id="ph-open-count" style="font-size:14px;font-weight:800;color:var(--text)">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #22c55e33;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">PROJ WIN</div>
+            <div id="ph-proj-win" style="font-size:14px;font-weight:800;color:#22c55e">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #ef444433;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">PROJ LOSE</div>
+            <div id="ph-proj-lose" style="font-size:14px;font-weight:800;color:#ef4444">—</div>
+          </div>
+          <div style="background:#1a2744;border:1px solid #64748b44;border-radius:4px;padding:6px 8px">
+            <div style="font-size:9px;color:var(--muted)">ITM / OTM</div>
+            <div id="ph-itm-otm" style="font-size:13px;font-weight:700;color:var(--text)">— / —</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Open trades panel -->
+      <div id="jrn-open" class="jrn-panel">
+        <div id="jrn-status" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
+        <div id="jrn-open-grid"></div>
+      </div>
+
+      <!-- Closed trades panel -->
+      <div id="jrn-closed" class="jrn-panel" style="display:none">
+        <div id="jrn-closed-grid"></div>
+      </div>
+
+      <!-- Analytics panel -->
+      <div id="jrn-analytics" class="jrn-panel" style="display:none">
+        <div id="jrn-analytics-content"></div>
+      </div>
+
+      <!-- Add trade panel -->
+      <div id="jrn-add" class="jrn-panel" style="display:none">
+        <div class="card" style="padding:16px;max-width:680px">
+          <div class="card-title">➕ Log New Trade</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+            <div style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:14px">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+    <div><label style="font-size:11px;color:var(--muted)">Symbol</label>
+      <input id="jrn-add-symbol" type="text" placeholder="e.g. SPY" style="width:100%;text-transform:uppercase" value="SPY"/></div>
+    <div><label style="font-size:11px;color:var(--muted)">Strategy Type</label>
+      <select id="jrn-add-type" style="width:100%" onchange="_jrnTypeChanged()">
+        <option value="Stock">🏦 Stock Buy/Sell</option>
+        <option value="PS">🟢 PS — Bull Put Spread</option>
+        <option value="CS">🔴 CS — Bear Call Spread</option>
+        <option value="IC" selected>🟣 IC — Iron Condor</option>
+        <option value="PB">↗ PB — Bull Call Debit</option>
+        <option value="CB">↘ CB — Bear Put Debit</option>
+        <option value="CC">📋 CC — Covered Call</option>
+        <option value="CP">📋 CP — Covered Put</option>
+        <option value="Straddle">⚡ Straddle</option>
+        <option value="Strangle">⚡ Strangle</option>
+        <option value="Calendar">📅 Calendar Spread</option>
+        <option value="Butterfly">🦋 Butterfly</option>
+        <option value="Custom">🔧 Custom (N legs)</option>
+      </select></div>
+    <div><label style="font-size:11px;color:var(--muted)">Entry Date</label>
+      <input id="jrn-add-entry-date" type="date" style="width:100%"/></div>
+    <div><label style="font-size:11px;color:var(--muted)">Net Premium (+ credit / − debit)</label>
+      <input id="jrn-add-price" type="number" step="0.01" placeholder="e.g. 1.63" style="width:100%"/></div>
+  </div>
+
+  <!-- STOCK section -->
+  <div id="jrn-stock-section" style="display:none;background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.2);border-radius:5px;padding:10px;margin-bottom:8px">
+    <div style="font-size:11px;font-weight:700;color:#3b82f6;margin-bottom:6px">📈 Stock Trade</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
+      <div><label style="font-size:10px;color:var(--muted)">Action</label>
+        <select id="jrn-stock-side" style="width:100%">
+          <option value="buy">BUY (Long)</option>
+          <option value="sell">SELL Short)</option>
+        </select></div>
+      <div><label style="font-size:10px;color:var(--muted)">Shares</label>
+        <input id="jrn-stock-qty" type="number" value="100" style="width:100%"/></div>
+      <div><label style="font-size:10px;color:var(--muted)">Entry Price</label>
+        <input id="jrn-stock-price" type="number" step="0.01" placeholder="e.g. 455.00" style="width:100%"/></div>
+      <div><label style="font-size:10px;color:var(--muted)">Stop Loss</label>
+        <input id="jrn-stock-stop" type="number" step="0.01" placeholder="optional" style="width:100%"/></div>
+    </div>
+  </div>
+
+  <!-- MULTI-LEG section (hidden for stock) -->
+  <div id="jrn-legs-section">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <span style="font-size:11px;font-weight:700;color:var(--muted)">LEGS <span id="jrn-legs-count" style="color:var(--accent)">0</span></span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-ghost" style="font-size:10px;padding:2px 8px" onclick="_jrnAddLeg()">+ Add Leg</button>
+        <button class="btn btn-ghost" style="font-size:10px;padding:2px 8px" onclick="_jrnClearLegs()">✕ Clear</button>
+      </div>
+    </div>
+    <!-- Leg template row header -->
+    <div style="display:grid;grid-template-columns:80px 70px 80px 100px 50px 70px 60px 28px;gap:4px;margin-bottom:3px">
+      <span style="font-size:9px;color:var(--muted)">Side</span>
+      <span style="font-size:9px;color:var(--muted)">Type</span>
+      <span style="font-size:9px;color:var(--muted)">Strike</span>
+      <span style="font-size:9px;color:var(--muted)">Expiry</span>
+      <span style="font-size:9px;color:var(--muted)">Qty</span>
+      <span style="font-size:9px;color:var(--muted)">Price</span>
+      <span style="font-size:9px;color:var(--muted)">Leg P&L</span>
+      <span></span>
+    </div>
+    <div id="jrn-legs-container"></div>
+    <!-- Net premium auto-calc -->
+    <div style="margin-top:6px;font-size:11px;color:var(--muted)">
+      Net: <span id="jrn-net-premium-display" style="font-weight:700;color:var(--accent)">$0.00</span>
+      <span style="font-size:10px;margin-left:6px">(positive = credit received, negative = debit paid)</span>
+    </div>
+  </div>
+
+  <!-- OI / IV context for strike selection. Expiry remains row-level for calendars. -->
+  <div id="jrn-oi-iv-panel" style="display:none;background:rgba(15,23,42,.72);border:1px solid var(--border);border-radius:8px;padding:10px;margin:10px 0">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+      <div>
+        <div style="font-size:11px;font-weight:800;color:var(--text)">📊 OI + IV by Expiry <span style="font-size:9px;color:var(--muted);font-weight:500">(no volume)</span></div>
+        <div id="jrn-oi-iv-status" style="font-size:10px;color:var(--muted);margin-top:2px">Enter symbol and expiry to load chart.</div>
+      </div>
+      <div style="display:flex;align-items:end;gap:6px;flex-wrap:wrap">
+        <div>
+          <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:1px">Chart expiry</label>
+          <select id="jrn-oi-expiry-select" style="min-width:140px;font-size:11px;padding:3px" onchange="_jrnRefreshOptionContext(true)"></select>
+        </div>
+        <button class="btn btn-ghost" style="font-size:10px;padding:4px 9px" onclick="_jrnRefreshOptionContext(true)">Refresh OI/IV</button>
+      </div>
+    </div>
+    <div id="jrn-oi-iv-chart" style="height:285px;width:100%"></div>
+  </div>
+
+  <!-- Quick templates for common strategies -->
+  <div id="jrn-quick-templates" style="margin:8px 0;display:none">
+    <span style="font-size:10px;color:var(--muted)">Quick fill: </span>
+    <button class="btn btn-ghost" style="font-size:9px;padding:1px 6px" onclick="_jrnTemplate('PS')">Bull Put</button>
+    <button class="btn btn-ghost" style="font-size:9px;padding:1px 6px" onclick="_jrnTemplate('CS')">Bear Call</button>
+    <button class="btn btn-ghost" style="font-size:9px;padding:1px 6px" onclick="_jrnTemplate('IC')">Iron Condor</button>
+    <button class="btn btn-ghost" style="font-size:9px;padding:1px 6px" onclick="_jrnTemplate('Straddle')">Straddle</button>
+    <button class="btn btn-ghost" style="font-size:9px;padding:1px 6px" onclick="_jrnTemplate('CC')">Covered Call</button>
+  </div>
+
+  <!-- Reason -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+    <div><label style="font-size:11px;color:var(--muted)">Entry Reason</label>
+      <select id="jrn-add-reason-type" style="width:100%">
+        <option value="MEAN_REVERSION">Mean Reversion (oversold/overbought)</option>
+        <option value="TRENDING">Trending — momentum entry</option>
+        <option value="EARNINGS_PLAY">Earnings Play</option>
+        <option value="BREAKOUT">S/R Breakout</option>
+        <option value="HEDGE">Hedge / Portfolio Protection</option>
+        <option value="INCOME">Income / Premium Selling</option>
+        <option value="OTHER">Other</option>
+      </select></div>
+    <div><label style="font-size:11px;color:var(--muted)">Notes</label>
+      <input id="jrn-add-reason" type="text" placeholder="e.g. RSI-EMA diff +22, overbought at BB upper" style="width:100%"/></div>
+  </div>
+
+  <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+    <button class="btn btn-success" style="padding:8px 20px;font-size:13px;font-weight:700" onclick="jrnAddTrade()">💾 Save Trade</button>
+    <span id="jrn-add-status" style="font-size:11px"></span>
+  </div>
+</div>
+        </div>
+      </div>
+
+      
+
+      
+    </div>
+    </div><!-- close tab-journal -->
+
+    <!-- ═══════════════ TRADE ANALYSIS ═══════════════ -->
+    <div id="tab-tradeanalysis" class="section">
+      <div style="display:flex;flex-direction:column;gap:10px">
+
+        <!-- INPUT ROW -->
+        <div class="card" style="padding:12px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+            <div><label style="font-size:10px;color:var(--muted);display:block">Symbol</label>
+              <input id="ta-sym" value="SPY" onblur="_taSymbolChange()" onkeydown="if(event.key==='Enter')_taSymbolChange()" style="width:65px;font-size:13px;font-weight:700;text-transform:uppercase"/></div>
+            <div><label style="font-size:10px;color:var(--muted);display:block">Spot $</label>
+              <input id="ta-spot" type="text" inputmode="decimal" placeholder="live" style="width:80px;font-size:12px"/></div>
+            <div><label style="font-size:10px;color:var(--muted);display:block">IV %</label>
+              <input id="ta-iv" type="text" inputmode="decimal" value="20" style="width:60px;font-size:12px"/></div>
+            <div><label style="font-size:10px;color:var(--muted);display:block">DTE</label>
+              <input id="ta-dte" type="text" inputmode="numeric" value="28" style="width:50px;font-size:12px"/></div>
+            <button onclick="_taAnalyze()" class="btn btn-primary" style="padding:6px 16px;font-size:12px;font-weight:700">▶ Draw Payoff</button>
+            <button onclick="_taFetchIV()" class="btn btn-ghost" style="padding:6px 12px;font-size:11px">📡 Fetch IV</button>
+            <span id="ta-msg" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+          <!-- Templates -->
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">
+            <span style="font-size:10px;color:var(--muted);align-self:center">Template:</span>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Bull Put Spread')">Bull Put</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Bear Call Spread')">Bear Call</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Iron Condor')">Iron Condor</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Long Call')">Long Call</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Long Put')">Long Put</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Straddle')">Straddle</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Strangle')">Strangle</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Covered Call')">Covered Call</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 7px" onclick="_taTemplate('Calendar Spread')">Calendar</button>
+          </div>
+          <!-- Leg table -->
+          <div style="overflow-x:auto">
+            <table style="font-size:11px;border-collapse:collapse;width:100%">
+              <thead><tr style="color:var(--muted)">
+                <th style="padding:3px 6px;text-align:left;font-weight:600">Side</th>
+                <th style="padding:3px 6px;font-weight:600">Type</th>
+                <th style="padding:3px 6px;font-weight:600">Strike</th>
+                <th style="padding:3px 6px;font-weight:600">Expiry</th>
+                <th style="padding:3px 6px;font-weight:600">Entry $</th>
+                <th style="padding:3px 6px;font-weight:600">Qty</th>
+                <th style="padding:3px 6px;font-weight:600">Leg P&L</th>
+                <th style="padding:3px 4px;font-weight:600">Delta</th>
+                <th style="padding:3px 4px;font-weight:600">IV%</th>
+                <th></th>
+              </tr></thead>
+              <tbody id="ta-legs"></tbody>
+            </table>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
+            <button onclick="_taAddLeg()" class="btn btn-ghost" style="font-size:10px;padding:2px 8px">＋ Add Leg</button>
+            <span style="font-size:11px;color:var(--muted)">Net:</span>
+            <span id="ta-net" style="font-weight:800;font-size:13px"></span>
+          </div>
+        </div>
+
+        <!-- STOCK INFO + CHART -->
+        <div class="card" style="padding:12px">
+          <!-- Stock info bar -->
+          <div id="ta-stock-info" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:8px 12px;margin-bottom:8px">
+          </div>
+          <!-- Greeks bar -->
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:8px">
+            <div id="ta-greeks-bar" style="display:flex;gap:10px;flex-wrap:wrap"></div>
+            <div style="font-size:12px">P&L @ spot: <span id="ta-pnl-spot" style="font-weight:800">—</span></div>
+          </div>
+          <!-- Sigma labels -->
+          <div style="display:flex;justify-content:space-between;padding:0 56px 2px;font-size:9px;color:var(--muted)">
+            <span>-2σ</span><span>-1σ</span><span style="color:var(--text);font-weight:700">SPOT</span><span>+1σ</span><span>+2σ</span>
+          </div>
+          <!-- IV Rank Panel (above chart) -->
+          <div id="ta-iv-panel" style="display:none;padding:8px 0 6px"></div>
+
+          <!-- Canvas -->
+          <div style="position:relative;border-radius:4px;overflow:hidden;background:#0d1117">
+            <canvas id="ta-canvas" style="width:100%;display:block;cursor:crosshair" height="340"></canvas>
+            <div id="ta-empty" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+              color:var(--muted);font-size:13px;text-align:center;pointer-events:none">
+              Configure legs above and click ▶ Draw Payoff
+            </div>
+            <div id="ta-tip" style="position:absolute;display:none;background:#1e293b;border:1px solid #334155;
+              border-radius:4px;padding:5px 9px;font-size:11px;pointer-events:none;z-index:5;min-width:80px"></div>
+          </div>
+          <!-- Key levels + strike info -->
+          <div id="ta-levels" style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;font-size:11px"></div>
+          <!-- Strikes visual bar -->
+          <div id="ta-strikes-bar" style="margin-top:6px;display:none"></div>
+        </div>
+
+        <!-- SLIDERS -->
+        <div class="card" style="padding:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:12px;letter-spacing:.05em">SCENARIO ANALYSIS</div>
+          <!-- Spot % -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+            <span style="font-size:11px;font-weight:700;color:#60a5fa;min-width:75px">Spot (%)</span>
+            <div style="flex:1;position:relative;height:20px">
+              <div style="position:absolute;top:6px;left:0;right:0;height:6px;background:var(--border);border-radius:3px"></div>
+              <div id="ta-s-fill" style="position:absolute;top:6px;height:6px;background:#60a5fa;border-radius:3px;pointer-events:none"></div>
+              <input type="range" id="ta-s" min="-20" max="20" value="0" step="0.5"
+                style="position:absolute;top:0;left:0;width:100%;height:20px;opacity:0;cursor:pointer;margin:0"
+                oninput="_taSlide()"/>
+              <div id="ta-s-pin" style="position:absolute;top:-8px;background:#3b82f6;color:#fff;
+                font-size:9px;font-weight:700;padding:2px 5px;border-radius:8px;pointer-events:none;transform:translateX(-50%);
+                white-space:nowrap">0%</div>
+            </div>
+            <span id="ta-s-pnl" style="font-size:11px;min-width:70px;text-align:right;font-weight:700"></span>
+          </div>
+          <!-- IV % -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+            <span style="font-size:11px;font-weight:700;color:#a78bfa;min-width:75px">IV (%)</span>
+            <div style="flex:1;position:relative;height:20px">
+              <div style="position:absolute;top:6px;left:0;right:0;height:6px;background:var(--border);border-radius:3px"></div>
+              <div id="ta-v-fill" style="position:absolute;top:6px;height:6px;background:#a78bfa;border-radius:3px;pointer-events:none"></div>
+              <input type="range" id="ta-v" min="-50" max="50" value="0" step="1"
+                style="position:absolute;top:0;left:0;width:100%;height:20px;opacity:0;cursor:pointer;margin:0"
+                oninput="_taSlide()"/>
+              <div id="ta-v-pin" style="position:absolute;top:-8px;background:#7c3aed;color:#fff;
+                font-size:9px;font-weight:700;padding:2px 5px;border-radius:8px;pointer-events:none;transform:translateX(-50%);
+                white-space:nowrap">0%</div>
+            </div>
+            <span id="ta-v-pnl" style="font-size:11px;min-width:70px;text-align:right;font-weight:700"></span>
+          </div>
+          <!-- Days Fwd -->
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:11px;font-weight:700;color:#94a3b8;min-width:75px">Days Fwd</span>
+            <div style="flex:1;position:relative;height:20px">
+              <div style="position:absolute;top:6px;left:0;right:0;height:6px;background:var(--border);border-radius:3px"></div>
+              <div id="ta-d-fill" style="position:absolute;top:6px;left:0;height:6px;background:#94a3b8;border-radius:3px;pointer-events:none"></div>
+              <input type="range" id="ta-d" min="0" max="60" value="0" step="1"
+                style="position:absolute;top:0;left:0;width:100%;height:20px;opacity:0;cursor:pointer;margin:0"
+                oninput="_taSlide()"/>
+              <div id="ta-d-pin" style="position:absolute;top:-8px;left:0;background:#475569;color:#fff;
+                font-size:9px;font-weight:700;padding:2px 5px;border-radius:8px;pointer-events:none;transform:translateX(-50%);
+                white-space:nowrap">0d</div>
+            </div>
+            <span id="ta-d-pnl" style="font-size:11px;min-width:70px;text-align:right;font-weight:700"></span>
+          </div>
+        </div>
+
+        <!-- GREEKS CHART -->
+        <div class="card" style="padding:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:12px;font-weight:700">Greeks vs Time to Expiry</span>
+            <div style="display:flex;gap:4px">
+              <button class="btn btn-ghost" id="ta-gb-delta" style="font-size:9px;padding:2px 8px" onclick="_taShowGreek('delta')">DELTA</button>
+              <button class="btn btn-ghost" id="ta-gb-gamma" style="font-size:9px;padding:2px 8px" onclick="_taShowGreek('gamma')">GAMMA</button>
+              <button class="btn btn-ghost" id="ta-gb-theta" style="font-size:9px;padding:2px 8px" onclick="_taShowGreek('theta')">THETA</button>
+              <button class="btn btn-ghost" id="ta-gb-vega"  style="font-size:9px;padding:2px 8px" onclick="_taShowGreek('vega')">VEGA</button>
+            </div>
+          </div>
+          <canvas id="ta-gcanvas" style="width:100%;display:block" height="120"></canvas>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ═══════════════ BACKTEST ════════════════════ -->
+    <div id="tab-backtest" class="section">
+      <div id="backtest-root"></div>
+    </div>
+
+
+    <!-- ═══════════════ OI BUILDUP SCREENER ═════════════════ -->
+    <div id="tab-oibuildup" class="section">
+      <div style="max-width:1200px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="font-size:16px;font-weight:800">📊 OI Buildup Screener</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="oib-sector-filter" style="font-size:11px" onchange="_oibRender()">
+              <option value="">All Sectors</option>
+              <option value="Technology">💻 Technology</option>
+              <option value="Healthcare">🏥 Healthcare</option>
+              <option value="Financials">🏦 Financials</option>
+              <option value="Energy">⚡ Energy</option>
+              <option value="Consumer Cyclical">🛍 Consumer</option>
+              <option value="Communication Services">📡 Comm.</option>
+              <option value="Industrials">🏭 Industrials</option>
+              <option value="Basic Materials">⛏ Materials</option>
+              <option value="Utilities">💡 Utilities</option>
+              <option value="Real Estate">🏢 Real Estate</option>
+            </select>
+            <span id="oib-status" style="font-size:11px;color:var(--muted)"></span>
+            <button class="btn btn-primary" onclick="_loadOibScreener()" style="font-size:11px;padding:5px 14px">🔄 Scan</button>
+          </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="card" style="padding:10px;margin-bottom:10px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+            <span style="font-size:11px;color:var(--muted)">Signal:</span>
+            <button class="oib-filter active" data-filter="ALL" onclick="_oibFilter(this)" style="font-size:10px;padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid var(--border);background:var(--accent);color:white;font-weight:700">All</button>
+            <button class="oib-filter" data-filter="Long Buildup" onclick="_oibFilter(this)" style="font-size:10px;padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid #22c55e;background:transparent;color:#22c55e;font-weight:700">🟢 Long Buildup</button>
+            <button class="oib-filter" data-filter="Short Buildup" onclick="_oibFilter(this)" style="font-size:10px;padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid #ef4444;background:transparent;color:#ef4444;font-weight:700">🔴 Short Buildup</button>
+            <button class="oib-filter" data-filter="Short Covering" onclick="_oibFilter(this)" style="font-size:10px;padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid #3b82f6;background:transparent;color:#3b82f6;font-weight:700">🔵 Short Covering</button>
+            <button class="oib-filter" data-filter="Long Unwinding" onclick="_oibFilter(this)" style="font-size:10px;padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid #f59e0b;background:transparent;color:#f59e0b;font-weight:700">🟠 Long Unwinding</button>
+          </div>
+          <div style="display:flex;gap:12px;align-items:center">
+            <label style="font-size:11px;display:flex;align-items:center;gap:4px">
+              <input type="radio" name="oib-timeframe" value="ST" checked onchange="_oibRender()"/> ST Outlook (1D)
+            </label>
+            <label style="font-size:11px;display:flex;align-items:center;gap:4px">
+              <input type="radio" name="oib-timeframe" value="MT" onchange="_oibRender()"/> MT Outlook (5D)
+            </label>
+            <label style="font-size:11px;display:flex;align-items:center;gap:4px">
+              <input type="radio" name="oib-timeframe" value="BOTH" onchange="_oibRender()"/> Both
+            </label>
+            <div style="flex:1"></div>
+            <input id="oib-search" type="text" placeholder="Search ticker…" style="width:160px;font-size:12px;padding:5px 10px" oninput="_oibRender()"/>
+          </div>
+        </div>
+
+        <!-- Results table -->
+        <div id="oib-table" style="overflow-x:hidden;max-width:100%"></div>
+      </div>
+    </div>
+
+
+    <!-- ════════ GEX DAILY PLAN ════════ -->
+    <div id="tab-gexplan" class="section">
+      <div class="ctrl-bar">
+        <label>Symbol</label>
+        <select id="gex-plan-symbol" style="min-width:80px;font-weight:700"
+          onchange="_gexLoadExpiries()">
+          <option value="SPY">SPY</option>
+          <option value="QQQ">QQQ</option>
+          <option value="IWM">IWM</option>
+          <option value="NVDA">NVDA</option>
+          <option value="AAPL">AAPL</option>
+          <option value="TSLA">TSLA</option>
+          <option value="MSFT">MSFT</option>
+        </select>
+        <label>Expiry</label>
+        <select id="gex-plan-expiry" style="min-width:110px;font-family:monospace">
+          <option value="">Loading…</option>
+        </select>
+        <button id="gex-plan-run-btn" class="btn btn-primary" onclick="_loadDailyPlan(false)" style="font-weight:700">📊 Generate Plan</button>
+        <button class="btn" onclick="_loadDailyPlan(true)" style="font-weight:700;background:linear-gradient(90deg,#7c3aed,#2563eb);border-color:#7c3aed;color:white">💾 Run On Demand & Save</button>
+        <button class="btn" onclick="_gexLoadSnapshotTable()" style="font-weight:700">↻ Saved Runs</button>
+        <span id="gex-plan-status" style="font-size:11px;color:var(--muted)"></span>
+      
+        <div style="width:1px;height:22px;background:var(--border)"></div>
+        <label>Sector</label>
+        <select id="jrn-sector-filter" style="min-width:130px" onchange="_jrnSectorFilter=this.value;jrnLoadOpen()">
+          <option value="">All Sectors</option>
+          <option value="Technology">💻 Technology</option>
+          <option value="Healthcare">🏥 Healthcare</option>
+          <option value="Financials">🏦 Financials</option>
+          <option value="Energy">⚡ Energy</option>
+          <option value="Consumer Cyclical">🛍 Consumer</option>
+          <option value="Communication Services">📡 Comm.</option>
+          <option value="Industrials">🏭 Industrials</option>
+          <option value="Basic Materials">⛏ Materials</option>
+          <option value="Utilities">💡 Utilities</option>
+          <option value="Real Estate">🏢 Real Estate</option>
+        </select>
+      </div>
+      <div id="gex-snapshot-table"></div>
+      <div id="gex-plan-result">
+        <div style="padding:48px;text-align:center;color:var(--muted)">
+          <div style="font-size:36px;margin-bottom:12px;opacity:.35">🎯</div>
+          <div style="font-size:14px;font-weight:600">Select symbol → Generate Plan</div>
+          <div style="font-size:12px;margin-top:8px;opacity:.7">
+            Computes GEX regime, gamma flip, VIX/DTE composite score,<br>
+            1σ daily range, and full trade setup with entry / stop / targets
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- #content -->
+</div><!-- #app-shell -->
+
+<script>
+  (function(){
+    const qs=new URLSearchParams(location.search);
+    const s=qs.get('symbol'), e=qs.get('expiry');
+    const si=document.getElementById('symbol-input');
+    const se=document.getElementById('expiration-select');
+    if(s&&si) si.value=s.toUpperCase();
+    if(e&&se) se.dataset.preselect=e.trim();
+  })();
+</script>
+<script src="/static/app.js"></script>
+<script src="/static/spy_earnings.js"></script>
+
+  <!-- Modals (outside sections for z-index/fixed positioning) -->
+  
+  <!-- Roll trade modal -->
+  <div id="jrn-roll-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;
+      background:rgba(0,0,0,.72);z-index:99999;align-items:center;justify-content:center;overflow:auto;padding:18px">
+    <div class="card" style="padding:18px;max-width:980px;width:96%;margin:auto;max-height:94vh;overflow:auto">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px">
+        <div>
+          <div class="card-title">Roll / Split Trade #<span id="jrn-roll-id"></span>
+            <span id="jrn-roll-sym" style="color:var(--accent);margin-left:8px"></span>
+          </div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.4">Roll the tested side to a new expiry/structure while keeping the untested side open. Works for IC put-side/call-side rolls and full-rolls.</div>
+        </div>
+        <button class="btn btn-ghost" onclick="document.getElementById('jrn-roll-modal').style.display='none'">✕</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">Roll side
+          <select id="jrn-roll-side" onchange="_jrnRollSideChanged()">
+            <option value="put">Put side</option>
+            <option value="call">Call side</option>
+            <option value="all">Entire position</option>
+            <option value="custom">Custom selected legs</option>
+          </select>
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">Roll quantity
+          <input id="jrn-roll-qty" type="number" min="1" step="1" oninput="_jrnRollPreview()" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">Close selected side at net price
+          <input id="jrn-roll-close-price" type="number" step="0.01" placeholder="debit/credit paid to close" oninput="_jrnRollPreview()" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">New expiry
+          <input id="jrn-roll-new-expiry" type="date" />
+        </label>
+      </div>
+      <div id="jrn-roll-old-legs" style="margin-bottom:10px"></div>
+      <div style="background:rgba(59,130,246,.07);border:1px solid rgba(59,130,246,.25);border-radius:8px;padding:10px;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:800;color:#93c5fd;margin-bottom:8px">New rolled side</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:8px">
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">New short strike
+            <input id="jrn-roll-new-short" type="number" step="0.5" placeholder="e.g. 105" />
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">New long strike
+            <input id="jrn-roll-new-long" type="number" step="0.5" placeholder="e.g. 100" />
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">Short leg premium
+            <input id="jrn-roll-new-short-price" type="number" step="0.01" placeholder="optional" oninput="_jrnRollUpdateNetFromLegs()" />
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">Long leg premium
+            <input id="jrn-roll-new-long-price" type="number" step="0.01" placeholder="optional" oninput="_jrnRollUpdateNetFromLegs()" />
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">Net roll credit/debit
+            <input id="jrn-roll-new-price" type="number" step="0.01" placeholder="overall roll overall +credit / -debit" oninput="_jrnRollPreview()" />
+          </label>
+        </div>
+        <div id="jrn-roll-preview" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>
+      </div>
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Roll Reason</label>
+      <textarea id="jrn-roll-reason" rows="2" style="width:100%;margin-bottom:12px" placeholder="Why rolling — e.g. tested put side broke PNR; rolling down/out for more room"></textarea>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-warning" onclick="jrnRollTrade()" style="flex:1;min-width:180px">🔄 Execute Roll / Split</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('jrn-roll-modal').style.display='none'" style="flex:1;min-width:150px">Cancel</button>
+      </div>
+    </div>
+  </div>
+<!-- Close trade modal (outside sections for z-index) -->
+  <div id="jrn-close-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;
+      background:rgba(0,0,0,.7);z-index:99999;align-items:center;justify-content:center">
+    <div class="card" style="padding:20px;max-width:520px;width:95%;margin:auto">
+      <div class="card-title">Close Trade #<span id="jrn-close-id"></span>
+        <span id="jrn-close-sym" style="color:var(--accent);margin-left:8px"></span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:8px 0 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px">
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">Close quantity
+          <input id="jrn-close-qty" type="number" min="1" step="1" oninput="_jrnClosePreview()" />
+        </label>
+        <div style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">Quick leg selection
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-ghost" type="button" onclick="_jrnCloseSelect('all')">All</button>
+            <button class="btn btn-ghost" type="button" onclick="_jrnCloseSelect('put')">Put side</button>
+            <button class="btn btn-ghost" type="button" onclick="_jrnCloseSelect('call')">Call side</button>
+          </div>
+        </div>
+      </div>
+      <div id="jrn-close-legs" style="margin-bottom:10px"></div>
+      <div id="jrn-close-simple">
+        <label style="font-size:11px;color:var(--muted)">Exit Price</label>
+        <input id="jrn-close-price" type="text" inputmode="decimal" style="width:100%;margin-bottom:8px"/>
+      </div>
+      <div id="jrn-close-pnl-preview" style="background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:8px 12px;margin-bottom:10px;font-size:12px;display:none"></div>
+      <label style="font-size:11px;color:var(--muted)">Close Reason</label>
+      <select id="jrn-close-reason" style="width:100%;margin-bottom:8px">
+        <option value="50pct_profit">50% profit target</option>
+        <option value="stop_loss">Stop loss</option>
+        <option value="expiry">Expiry</option>
+        <option value="partial_close">Partial close</option>
+        <option value="rolled">Rolled</option>
+        <option value="manual">Manual</option>
+      </select>
+      <label style="font-size:11px;color:var(--muted)">Comments</label>
+      <textarea id="jrn-close-comments" rows="2" style="width:100%;margin-bottom:12px"></textarea>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-danger" onclick="jrnCloseTrade()" style="flex:1">Close Trade</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('jrn-close-modal').style.display='none'" style="flex:1">Cancel</button>
+      </div>
+    </div>
+  </div>
+  <script src="/static/panel_tools.js"></script>
+</body>
+</html>
+      </div><!-- /earn-panel-detail -->
+
+
+    <!-- ═══════════════ UAE GUIDE TRADE SCANNER ════════════════ -->
+    <div id="tab-uae-trade-scanner" class="section">
+      <div class="card" style="padding:12px">
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <div>📘 UAE Guide Trade Scanner</div>
+          <div class="muted" style="font-size:12px">DTE-aware trend/vol scanner with checklist, RR, strike OI and OI-change</div>
+        </div>
+        <iframe src="/uae-trade-scanner" title="UAE Guide Trade Scanner" style="width:100%;height:85vh;border:0;border-radius:12px;background:#0b1020"></iframe>
+      </div>
+    </div>

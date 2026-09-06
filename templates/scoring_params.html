@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Scoring Parameters</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1300px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:900px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:16px}
+    .card h2{margin:0 0 10px;font-size:15px;font-weight:900}
+    .group-title{font-size:12px;font-weight:800;color:#818cf8;text-transform:uppercase;letter-spacing:.03em;margin:14px 0 8px;border-bottom:1px solid rgba(255,255,255,.06);padding-bottom:4px}
+    .group-title:first-child{margin-top:0}
+    .param-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px 14px}
+    .param-row{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;padding:3px 0}
+    .param-row label{color:var(--muted,var(--muted2));flex:1;cursor:help}
+    .param-row input{width:80px;padding:4px 6px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:5px;font-size:12px;text-align:right}
+    .param-row input.changed{border-color:#f59e0b;background:rgba(245,158,11,.08)}
+    .btn{padding:8px 16px;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:12px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-ghost{background:rgba(255,255,255,.05);color:var(--text,var(--text2));border:1px solid var(--border,var(--border2))}
+    .btn-danger{background:transparent;color:#f87171;border:1px solid #f87171}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .row-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px}
+    input[type=text]{padding:8px 10px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:8px;font-size:12px}
+    #save-note{flex:1;min-width:200px}
+    .status-msg{font-size:12px;margin-left:8px}
+    .status-ok{color:#4ade80}.status-err{color:#f87171}
+    table.hist-table{width:100%;border-collapse:collapse;font-size:12px}
+    table.hist-table th,table.hist-table td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left;vertical-align:top}
+    table.hist-table th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase}
+    .diff-pill{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;margin:1px 3px 1px 0;background:rgba(255,255,255,.05)}
+    .diff-up{color:#4ade80}.diff-down{color:#f87171}
+    .sim-table{width:100%;border-collapse:collapse;font-size:12px}
+    .sim-table th,.sim-table td{padding:7px 9px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left}
+    .sim-table th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase}
+    .delta-pos{color:#4ade80;font-weight:800}.delta-neg{color:#f87171;font-weight:800}.delta-zero{color:var(--muted,var(--muted2))}
+    .disclaimer{font-size:11px;color:#fbbf24;margin-top:10px;line-height:1.5}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>⚙️ Scoring Parameters</h1>
+    <p>Every weight in the Trade Opportunity Scanner's entry-quality scorer, editable here instead of requiring a code change. Every save creates a new version — nothing is ever overwritten, full history below. Changes take effect immediately for all future scans/alerts.</p>
+  </div>
+
+  <div class="card">
+    <h2>Current Parameters</h2>
+    <div id="param-form"><div class="spinner"></div> Loading...</div>
+    <div class="row-actions">
+      <input type="text" id="save-note" placeholder="Note (e.g. 'reduce PCR weight per calibration suggestion')"/>
+      <button class="btn btn-primary" onclick="saveParams()">💾 Save New Version</button>
+      <button class="btn btn-ghost" onclick="loadParams()">↺ Discard Changes</button>
+      <button class="btn btn-danger" onclick="resetDefaults()">Reset to Defaults</button>
+      <span id="save-status" class="status-msg"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Simulate — Live Re-scan Comparison</h2>
+    <p class="disclaimer" style="margin-top:0">⚠️ This runs today's real market data through the scanner twice — once with the currently-SAVED parameters, once with whatever you've edited above but haven't saved yet — and shows both scores side by side. It does <b>not</b> replay historical alerts; the raw inputs that fed past scores were never stored, only the final score/grade and text. This tells you how a change would affect today's scan, not whether it would have fixed past calibration gaps.</p>
+    <div class="row-actions" style="margin-top:0">
+      <input type="text" id="sim-symbols" placeholder="Symbols, comma-separated (e.g. AAPL,MSFT,TSLA)" style="flex:1;min-width:260px"/>
+      <button class="btn btn-primary" onclick="runSimulation()">▶ Run Simulation</button>
+      <span id="sim-status" class="status-msg"></span>
+    </div>
+    <div id="sim-results" style="margin-top:12px"></div>
+  </div>
+
+  <div class="card">
+    <h2>History</h2>
+    <div id="history-body"><div class="spinner"></div> Loading...</div>
+  </div>
+</div>
+
+<script>
+let currentParams = {};
+let defaultParams = {};
+
+// Groups just for display organization -- matches the sections in
+// _entry_score(). Any param not listed here still renders, just in an
+// "Other" catch-all group, so a newly-added param can never silently
+// disappear from the UI.
+const GROUPS = {
+  "Base / Grading": ["base_score", "score_floor", "score_ceiling", "grade_thresholds"],
+  "Regime": ["regime_points", "regime_flat_fallback_bull", "regime_flat_fallback_bear", "rsi_trend_against_penalty"],
+  "Confluence": ["confluence_agree", "confluence_weekly_shock_against", "confluence_disagree",
+                 "confluence_weekly_sideways_directional", "confluence_weekly_sideways_ic", "confluence_ic_directional_regime"],
+  "RS vs SPY": ["rs_bull_strong", "rs_bull_strong_threshold", "rs_bull_mild", "rs_bull_mild_threshold",
+                "rs_bull_weak_neg", "rs_bull_weak_neg_threshold", "rs_bull_strong_neg", "rs_bull_strong_neg_threshold",
+                "rs_ic_neutral", "rs_ic_neutral_threshold", "rs_ic_trending_penalty", "rs_ic_trending_threshold",
+                "rs_momentum_conflict_zero_threshold", "rs_momentum_conflict_damp_factor",
+                "rs_regime_redundancy_damp_factor", "rs_regime_redundancy_min_regime_pts"],
+  "RSIdiff90": ["rsi_diff_strong_threshold", "rsi_diff_strong_bonus", "rsi_diff_mild_bonus",
+                "rsi_diff_strong_penalty", "rsi_diff_mild_penalty"],
+  "IV Rank": ["iv_rank_credit_high", "iv_rank_credit_high_threshold", "iv_rank_credit_good", "iv_rank_credit_good_threshold",
+              "iv_rank_credit_low", "iv_rank_credit_low_threshold", "iv_rank_credit_thin", "iv_rank_credit_thin_threshold",
+              "iv_rank_debit_cheap", "iv_rank_debit_cheap_threshold", "iv_rank_debit_reasonable", "iv_rank_debit_reasonable_threshold",
+              "iv_rank_debit_expensive", "iv_rank_debit_expensive_threshold"],
+  "PCR": ["pcr_strong", "pcr_strong_threshold", "pcr_mild", "pcr_mild_threshold",
+          "pcr_strong_against", "pcr_strong_against_threshold", "pcr_mild_against", "pcr_mild_against_threshold",
+          "pcr_ic_balanced", "pcr_ic_low", "pcr_ic_high"],
+  "Max Pain": ["max_pain_bonus", "max_pain_penalty", "max_pain_favor_threshold_pct", "max_pain_against_threshold_pct"],
+  "Walls": ["wall_strong", "wall_strong_threshold_pct", "wall_mild", "wall_mild_threshold_pct", "wall_far_penalty",
+            "wall_ic_pinched", "wall_ic_pinched_threshold_pct", "wall_ic_risk_penalty", "wall_ic_risk_threshold_pct"],
+  "Gamma Flip": ["gamma_flip_base_points", "gamma_flip_near_penalty", "gamma_flip_near_threshold_pct",
+                 "gamma_flip_dte_scale_full", "gamma_flip_dte_scale_half", "gamma_flip_dte_scale_quarter"],
+  "POP/RR Balance": ["width_capped_penalty", "pop_rr_strong_edge_pts", "pop_rr_strong_edge_bonus",
+                      "pop_rr_mild_edge_pts", "pop_rr_mild_edge_bonus", "pop_rr_edge_threshold_pts",
+                      "pop_rr_penalty", "pop_rr_thin_margin_penalty"],
+};
+
+function fieldId(key, subkey) { return subkey ? `p-${key}-${subkey}` : `p-${key}`; }
+
+function renderParamField(key, value) {
+  if (typeof value === "object" && value !== null) {
+    // nested dict (regime_points, grade_thresholds) -- one input per subkey
+    return Object.entries(value).map(([sk, sv]) => `
+      <div class="param-row" title="${key}.${sk}">
+        <label>${key}.${sk}</label>
+        <input type="number" step="any" id="${fieldId(key, sk)}" value="${sv}" data-key="${key}" data-subkey="${sk}"
+          onchange="markChanged(this)"/>
+      </div>`).join("");
+  }
+  return `
+    <div class="param-row" title="${key}">
+      <label>${key}</label>
+      <input type="number" step="any" id="${fieldId(key)}" value="${value}" data-key="${key}"
+        onchange="markChanged(this)"/>
+    </div>`;
+}
+
+function markChanged(el) {
+  const key = el.dataset.key;
+  const subkey = el.dataset.subkey;
+  const orig = subkey ? (currentParams[key] || {})[subkey] : currentParams[key];
+  el.classList.toggle("changed", String(orig) !== el.value);
+}
+
+function renderParamForm() {
+  const grouped = new Set();
+  Object.values(GROUPS).forEach(keys => keys.forEach(k => grouped.add(k)));
+  const ungrouped = Object.keys(currentParams).filter(k => !grouped.has(k));
+
+  let html = "";
+  for (const [group, keys] of Object.entries(GROUPS)) {
+    const present = keys.filter(k => k in currentParams);
+    if (!present.length) continue;
+    html += `<div class="group-title">${group}</div><div class="param-grid">`;
+    html += present.map(k => renderParamField(k, currentParams[k])).join("");
+    html += `</div>`;
+  }
+  if (ungrouped.length) {
+    html += `<div class="group-title">Other</div><div class="param-grid">`;
+    html += ungrouped.map(k => renderParamField(k, currentParams[k])).join("");
+    html += `</div>`;
+  }
+  document.getElementById("param-form").innerHTML = html;
+}
+
+function collectFormParams() {
+  const out = {};
+  document.querySelectorAll("#param-form input[data-key]").forEach(el => {
+    const key = el.dataset.key;
+    const subkey = el.dataset.subkey;
+    const val = parseFloat(el.value);
+    if (Number.isNaN(val)) return;
+    if (subkey) {
+      out[key] = out[key] || {...(currentParams[key] || {})};
+      out[key][subkey] = val;
+    } else {
+      out[key] = val;
+    }
+  });
+  return out;
+}
+
+async function loadParams() {
+  document.getElementById("param-form").innerHTML = '<div class="spinner"></div> Loading...';
+  try {
+    const resp = await fetch("/scoring-params/api/current");
+    const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "Failed to load");
+    currentParams = d.params;
+    defaultParams = d.defaults;
+    renderParamForm();
+    applyUrlSuggestions();
+  } catch (e) {
+    document.getElementById("param-form").innerHTML = `<div class="status-err">Error: ${e.message}</div>`;
+  }
+}
+
+function applyUrlSuggestions() {
+  // Pre-fills and highlights fields from a deep link like
+  // /scoring-params?wall_strong=17.5&pcr_strong=9.6 (from the Backtest
+  // page's "Suggested parameter changes" section) -- doesn't save
+  // anything by itself, just puts the suggested value in the form so
+  // it's one click to review and save, or discard.
+  const params = new URLSearchParams(window.location.search);
+  if (![...params.keys()].length) return;
+  let applied = 0;
+  for (const [key, rawVal] of params.entries()) {
+    let val;
+    try { val = JSON.parse(rawVal); } catch { val = parseFloat(rawVal); }
+    if (typeof val === "object" && val !== null) {
+      for (const [sk, sv] of Object.entries(val)) {
+        const el = document.getElementById(fieldId(key, sk));
+        if (el) { el.value = sv; markChanged(el); applied++; }
+      }
+    } else {
+      const el = document.getElementById(fieldId(key));
+      if (el) { el.value = val; markChanged(el); applied++; }
+    }
+  }
+  if (applied) {
+    document.getElementById("save-note").value = "Applied suggestion from Backtest calibration";
+    document.getElementById("save-status").innerHTML = `<span class="status-ok">${applied} field(s) pre-filled from link — review below, then Save or Discard.</span>`;
+  }
+}
+
+async function saveParams() {
+  const status = document.getElementById("save-status");
+  const note = document.getElementById("save-note").value.trim();
+  const edited = collectFormParams();
+  status.textContent = "Saving...";
+  status.className = "status-msg";
+  try {
+    const resp = await fetch("/scoring-params/api/save", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({params: edited, note}),
+    });
+    const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "Save failed");
+    status.textContent = "✓ Saved as new version";
+    status.className = "status-msg status-ok";
+    document.getElementById("save-note").value = "";
+    await loadParams();
+    await loadHistory();
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+    status.className = "status-msg status-err";
+  }
+}
+
+async function resetDefaults() {
+  if (!confirm("Reset ALL scoring parameters to their original defaults? This creates a new history entry, it doesn't delete anything.")) return;
+  const status = document.getElementById("save-status");
+  status.textContent = "Resetting...";
+  try {
+    const resp = await fetch("/scoring-params/api/reset", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({}),
+    });
+    const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "Reset failed");
+    status.textContent = "✓ Reset to defaults";
+    status.className = "status-msg status-ok";
+    await loadParams();
+    await loadHistory();
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+    status.className = "status-msg status-err";
+  }
+}
+
+function renderHistoryChanges(changes) {
+  if (!changes || !changes.length) return '<span class="muted">Initial version</span>';
+  return changes.map(c => {
+    const dir = (typeof c.to === "number" && typeof c.from === "number") ? (c.to > c.from ? "diff-up" : c.to < c.from ? "diff-down" : "") : "";
+    return `<span class="diff-pill ${dir}">${c.key}: ${c.from ?? "—"} → ${c.to}</span>`;
+  }).join(" ");
+}
+
+async function loadHistory() {
+  document.getElementById("history-body").innerHTML = '<div class="spinner"></div> Loading...';
+  try {
+    const resp = await fetch("/scoring-params/api/history");
+    const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "Failed to load history");
+    const rows = d.history || [];
+    if (!rows.length) {
+      document.getElementById("history-body").innerHTML = '<div class="muted" style="font-size:12px">No saved versions yet — still on defaults.</div>';
+      return;
+    }
+    document.getElementById("history-body").innerHTML = `
+      <table class="hist-table">
+        <thead><tr><th>When</th><th>Note</th><th>Changes</th></tr></thead>
+        <tbody>${rows.map(r => `
+          <tr>
+            <td style="white-space:nowrap">${(r.created_at || "").replace("T", " ").slice(0, 19)}</td>
+            <td>${r.note || '<span class="muted">—</span>'}</td>
+            <td>${renderHistoryChanges(r.changes)}</td>
+          </tr>`).join("")}</tbody>
+      </table>`;
+  } catch (e) {
+    document.getElementById("history-body").innerHTML = `<div class="status-err">Error: ${e.message}</div>`;
+  }
+}
+
+async function runSimulation() {
+  const status = document.getElementById("sim-status");
+  const symbols = document.getElementById("sim-symbols").value.trim();
+  const out = document.getElementById("sim-results");
+  if (!symbols) { status.textContent = "Enter at least one symbol"; status.className = "status-msg status-err"; return; }
+  const proposed = collectFormParams();
+  const changedOnly = {};
+  document.querySelectorAll("#param-form input.changed").forEach(el => {
+    const key = el.dataset.key, subkey = el.dataset.subkey;
+    if (subkey) { changedOnly[key] = proposed[key]; } else { changedOnly[key] = proposed[key]; }
+  });
+  if (!Object.keys(changedOnly).length) {
+    status.textContent = "No parameters changed — edit a value above first, then simulate.";
+    status.className = "status-msg status-err";
+    return;
+  }
+  status.innerHTML = '<span class="spinner"></span> Running (this re-scans each symbol twice)...';
+  status.className = "status-msg";
+  out.innerHTML = "";
+  try {
+    const resp = await fetch("/scoring-params/api/simulate", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({symbols, proposed_params: changedOnly}),
+    });
+    const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "Simulation failed");
+    status.textContent = "✓ Done";
+    status.className = "status-msg status-ok";
+    const rows = (d.results || []).map(r => {
+      const cur = r.current, prop = r.proposed;
+      const delta = r.score_delta;
+      const deltaClass = delta > 0 ? "delta-pos" : delta < 0 ? "delta-neg" : "delta-zero";
+      const deltaText = delta == null ? "—" : (delta > 0 ? "+" : "") + delta;
+      return `<tr>
+        <td><b>${r.symbol}</b></td>
+        <td>${cur ? (cur.error || `${cur.score ?? "—"} (${cur.grade ?? "—"}) ${cur.trade_type ?? ""}`) : "No trade found"}</td>
+        <td>${prop ? (prop.error || `${prop.score ?? "—"} (${prop.grade ?? "—"}) ${prop.trade_type ?? ""}`) : "No trade found"}</td>
+        <td class="${deltaClass}">${deltaText}</td>
+      </tr>`;
+    }).join("");
+    out.innerHTML = `
+      <table class="sim-table">
+        <thead><tr><th>Symbol</th><th>Current (saved)</th><th>Proposed (unsaved)</th><th>Score Δ</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="disclaimer">⚠️ ${d.disclaimer}</div>`;
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+    status.className = "status-msg status-err";
+  }
+}
+
+loadParams();
+loadHistory();
+</script>
+</body>
+</html>

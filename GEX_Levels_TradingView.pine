@@ -1,0 +1,454 @@
+//@version=5
+indicator("GEX Levels & Gamma Value Table", "GEX Levels", overlay=true, max_lines_count=500, max_labels_count=200)
+
+// HOW TO USE:
+// 1. Open  http://localhost:5050/gex/live?symbol=SPY  in browser
+// 2. Click "Copy Pine String"  3. Paste below -> OK  (5 seconds total)
+//
+// v2 changes:
+//  - Breakout / Breakdown added (CSV fields 20/21 -- see gex_pine_export.py)
+//  - Show Call Walls / Show Put Walls toggles (lines AND table rows)
+//  - Removed the SPY-only gate: this now draws on QQQ / SPX / IWM / DIA
+//    charts too. The old `isSPY` check silently drew nothing at all on
+//    any symbol other than SPY -- worth knowing since that's why it
+//    looked "broken" on other tickers, it just never ran.
+
+// ================================================================
+// AUTO-FILL
+// ================================================================
+gex_str  = input.string("", "Paste GEX string (from /gex/live)", group="Auto-fill", tooltip="Copy from http://localhost:5050/gex/live?symbol=SPY and paste here. Now 22 comma-separated values (added Breakout/Breakdown at the end).")
+
+// ================================================================
+// MANUAL OVERRIDE
+// ================================================================
+gamma_flip  = input.float(-1, "Gamma Flip  (-1 = off)",     group="Manual Override")
+breakout    = input.float(-1, "Breakout  (-1 = off)",       group="Manual Override")
+pin_strike  = input.float(-1, "GEX Pin  (-1 = off)",        group="Manual Override")
+max_pain    = input.float(-1, "Max Pain  (-1 = off)",        group="Manual Override")
+breakdown   = input.float(-1, "Breakdown  (-1 = off)",      group="Manual Override")
+sigma_high  = input.float(-1, "1-Sigma High  (-1 = off)",   group="Manual Override")
+sigma_low   = input.float(-1, "1-Sigma Low  (-1 = off)",    group="Manual Override")
+spot_ref    = input.float(-1, "Spot Snapshot  (-1 = off)",  group="Manual Override")
+put_wall_1  = input.float(-1, "Put Wall 1  (-1 = off)",     group="Manual Override")
+put_wall_2  = input.float(-1, "Put Wall 2  (-1 = off)",     group="Manual Override")
+put_wall_3  = input.float(-1, "Put Wall 3  (-1 = off)",     group="Manual Override")
+call_wall_1 = input.float(-1, "Call Wall 1  (-1 = off)",    group="Manual Override")
+call_wall_2 = input.float(-1, "Call Wall 2  (-1 = off)",    group="Manual Override")
+call_wall_3 = input.float(-1, "Call Wall 3  (-1 = off)",    group="Manual Override")
+total_gex   = input.float(0,  "Total GEX",                  group="Manual Override")
+gross_gex   = input.float(0,  "Gross GEX",                  group="Manual Override")
+gex_ratio   = input.float(0,  "GEX Ratio",                  group="Manual Override")
+pcr         = input.float(1,  "PCR",                        group="Manual Override")
+iv_atm      = input.float(20, "IV ATM %",                   group="Manual Override")
+dte_days    = input.int(7,    "DTE",                         group="Manual Override")
+score_val   = input.int(0,    "Score (-10 to +10)",          group="Manual Override", minval=-10, maxval=10)
+confidence  = input.int(50,   "Confidence %",                group="Manual Override", minval=0, maxval=100)
+
+// ================================================================
+// STYLE
+// ================================================================
+show_table      = input.bool(true,  "Show table",                       group="Style")
+table_toggle    = input.string("Full", "Table content",                  group="Style", options=["Full", "Levels Only", "GEX Only", "Hidden"])
+show_labels     = input.bool(true,  "Show labels on lines",             group="Style")
+show_call_walls = input.bool(true,  "Show Call Walls (lines + table)",  group="Style")
+show_put_walls  = input.bool(true,  "Show Put Walls (lines + table)",   group="Style")
+show_bg         = input.bool(true,  "Gamma regime background tint",     group="Style")
+lbl_size_sel = input.string("Normal", "Label text size",             group="Style", options=["Tiny", "Small", "Normal", "Large"])
+tbl_size_sel = input.string("Normal", "Table text size",             group="Style", options=["Tiny", "Small", "Normal", "Large"])
+lbl_offset   = input.int(8,      "Label offset (bars right)",        group="Style", minval=1, maxval=100)
+lw_main      = input.int(2,      "Main line width (Flip/Pin/Pain)",  group="Style", minval=1, maxval=4)
+lw_wall      = input.int(2,      "Wall line width",                  group="Style", minval=1, maxval=4)
+tbl_corner   = input.string("Top Right", "Table position",           group="Style", options=["Top Right","Top Left","Bottom Right","Bottom Left"])
+restrict_symbols = input.bool(true, "Restrict to SPY / QQQ only", group="Style", tooltip="When on, this indicator draws nothing at all on any chart other than SPY or QQQ. Turn off to allow it on any symbol.")
+
+// ================================================================
+// COLOURS
+// ================================================================
+C_FLIP     = color.new(#c084fc, 0)
+C_FLIPBG   = color.new(#c084fc, 82)
+C_BREAKOUT = color.new(#eab308, 0)
+C_PIN      = color.new(#fbbf24, 0)
+C_PAIN     = color.new(#fb923c, 0)
+C_BREAKDOWN= color.new(#fb7185, 0)
+C_SIGMA    = color.new(#2dd4bf, 0)
+C_P1     = color.new(#22c55e, 0)
+C_P2     = color.new(#22c55e, 35)
+C_P3     = color.new(#22c55e, 60)
+C_C1     = color.new(#f87171, 0)
+C_C2     = color.new(#f87171, 35)
+C_C3     = color.new(#f87171, 60)
+C_SPOT   = color.new(#94a3b8, 55)
+C_POSBG  = color.new(#22c55e, 95)
+C_NEGBG  = color.new(#ef4444, 95)
+C_TBGD   = color.new(#0d1117, 15)
+C_THDR   = color.new(#1e293b, 10)
+C_TEXT   = color.new(#f1f5f9, 0)
+C_MUTED  = color.new(#94a3b8, 0)
+C_PURPLE = color.new(#c084fc, 0)
+C_ACCENT = color.new(#818cf8, 0)
+C_PAIN2  = color.new(#fb923c, 0)
+C_WHITE  = color.white
+C_BLACK  = color.black
+
+// ================================================================
+// TOP-LEVEL FUNCTIONS (must all be at top level in Pine v5)
+// ================================================================
+is_set(v) => v > 0
+
+tbl_pos() =>
+    if tbl_corner == "Top Right"
+        position.top_right
+    else if tbl_corner == "Top Left"
+        position.top_left
+    else if tbl_corner == "Bottom Right"
+        position.bottom_right
+    else
+        position.bottom_left
+
+lbl_sz() =>
+    if lbl_size_sel == "Tiny"
+        size.tiny
+    else if lbl_size_sel == "Small"
+        size.small
+    else if lbl_size_sel == "Large"
+        size.large
+    else
+        size.normal
+
+tbl_sz() =>
+    if tbl_size_sel == "Tiny"
+        size.tiny
+    else if tbl_size_sel == "Small"
+        size.small
+    else if tbl_size_sel == "Large"
+        size.large
+    else
+        size.normal
+
+dist_pts(level, ref) =>
+    is_set(level) and is_set(ref) ? str.tostring(math.abs(ref - level), "#.##") + " pts" : ""
+
+above_below(level, ref) =>
+    is_set(level) and is_set(ref) ? (ref > level ? "above" : "below") : ""
+
+fmt_gex(v) =>
+    av = math.abs(v)
+    sign = v >= 0 ? "+" : "-"
+    if av >= 1000000000
+        sign + str.tostring(av / 1000000000, "#.##") + "B"
+    else if av >= 1000000
+        sign + str.tostring(av / 1000000, "#.##") + "M"
+    else if av >= 1000
+        sign + str.tostring(av / 1000, "#.#") + "K"
+    else
+        str.tostring(v, "#.##")
+
+fmt_price(v) => is_set(v) ? "$" + str.tostring(v, "#.##") : "n/a"
+
+// Shows "hidden" in muted grey when a wall group's Style toggle is
+// off, instead of a price -- so table rows stay in place (fixed row
+// count) but clearly communicate the group is turned off.
+fmt_price_gated(v, on) => on ? fmt_price(v) : "hidden"
+dist_pts_gated(level, ref, on) => on ? dist_pts(level, ref) : ""
+
+ratio_bar(ratio) =>
+    n = math.round(math.abs(ratio) * 10)
+    (n>=1?"#":".") + (n>=2?"#":".") + (n>=3?"#":".") + (n>=4?"#":".") + (n>=5?"#":".") + (n>=6?"#":".") + (n>=7?"#":".") + (n>=8?"#":".") + (n>=9?"#":".") + (n>=10?"#":".")
+
+csv_val(s, idx) =>
+    var float result = -1.0
+    result := -1.0
+    if str.length(s) > 0
+        count = 0
+        start = 0
+        found = false
+        i = 0
+        while i <= str.length(s) and not found
+            ch = i < str.length(s) ? str.substring(s, i, i + 1) : ","
+            if ch == ","
+                if count == idx
+                    token = str.substring(s, start, i)
+                    result := str.tonumber(token)
+                    found := true
+                count := count + 1
+                start := i + 1
+            i := i + 1
+    result
+
+// ================================================================
+// PARSE CSV OR USE MANUAL INPUTS
+// CSV order (see oiapp/scanners/gex_pine_export.py "/gex/pine"):
+//   0=spot 1=gamma_flip 2=pin 3=max_pain 4=sigma_high 5=sigma_low
+//   6-8=call_walls(1-3) 9-11=put_walls(1-3) 12=total_gex 13=gross_gex
+//   14=gex_ratio 15=pcr 16=iv_atm 17=dte 18=score 19=confidence
+//   20=breakout 21=breakdown   [NEW]
+// ================================================================
+has_str = str.length(gex_str) > 10
+
+// Symbol gate (v3) -- SPY/QQQ only when restrict_symbols is on. Uses
+// syminfo.ticker (plain "SPY"/"QQQ", no exchange prefix) so it matches
+// regardless of which exchange feed the chart is on.
+is_allowed_symbol = not restrict_symbols or syminfo.ticker == "SPY" or syminfo.ticker == "QQQ"
+
+v_spot  = has_str ? csv_val(gex_str, 0)  : spot_ref
+v_flip  = has_str ? csv_val(gex_str, 1)  : gamma_flip
+v_pin   = has_str ? csv_val(gex_str, 2)  : pin_strike
+v_pain  = has_str ? csv_val(gex_str, 3)  : max_pain
+v_sh    = has_str ? csv_val(gex_str, 4)  : sigma_high
+v_sl    = has_str ? csv_val(gex_str, 5)  : sigma_low
+v_cw1   = has_str ? csv_val(gex_str, 6)  : call_wall_1
+v_cw2   = has_str ? csv_val(gex_str, 7)  : call_wall_2
+v_cw3   = has_str ? csv_val(gex_str, 8)  : call_wall_3
+v_pw1   = has_str ? csv_val(gex_str, 9)  : put_wall_1
+v_pw2   = has_str ? csv_val(gex_str, 10) : put_wall_2
+v_pw3   = has_str ? csv_val(gex_str, 11) : put_wall_3
+v_tgex  = has_str ? csv_val(gex_str, 12) : total_gex
+v_ggex  = has_str ? csv_val(gex_str, 13) : gross_gex
+v_ratio = has_str ? csv_val(gex_str, 14) : gex_ratio
+v_pcr   = has_str ? csv_val(gex_str, 15) : pcr
+v_iv    = has_str ? csv_val(gex_str, 16) : iv_atm
+v_dte   = has_str ? math.round(csv_val(gex_str, 17)) : dte_days
+v_score = has_str ? math.round(csv_val(gex_str, 18)) : score_val
+v_conf  = has_str ? math.round(csv_val(gex_str, 19)) : confidence
+v_breakout  = has_str ? csv_val(gex_str, 20) : breakout    // [NEW]
+v_breakdown = has_str ? csv_val(gex_str, 21) : breakdown   // [NEW]
+
+// ================================================================
+// BACKGROUND TINT
+// ================================================================
+bgcolor((show_bg and is_allowed_symbol) ? (v_tgex >= 0 ? C_POSBG : C_NEGBG) : na, title="Gamma Regime Tint")
+
+// ================================================================
+// LINES  (drawn on last bar, extend 300 bars left)
+// Runs on ANY symbol now -- the old `isSPY` gate has been removed so
+// this also draws on QQQ / SPX / IWM / DIA charts.
+// ================================================================
+if barstate.islast and is_allowed_symbol
+
+    // Gamma Flip -- dashed purple, thickest, most important
+    if is_set(v_flip)
+        line.new(bar_index - 300, v_flip, bar_index + 60, v_flip, color=C_FLIP, width=lw_main + 1, style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + lbl_offset, v_flip, "  GAMMA FLIP  " + str.tostring(v_flip, "#.##"), style=label.style_label_left, color=C_FLIP, textcolor=C_WHITE, size=lbl_sz(), tooltip="Zero-gamma level. Above = dealers cushion moves. Below = dealers amplify moves.")
+
+    // Breakout -- dashed amber                                          [NEW]
+    if is_set(v_breakout)
+        line.new(bar_index - 300, v_breakout, bar_index + 60, v_breakout, color=C_BREAKOUT, width=lw_main, style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + lbl_offset, v_breakout, "  BREAKOUT  " + str.tostring(v_breakout, "#.##"), style=label.style_label_left, color=C_BREAKOUT, textcolor=C_BLACK, size=lbl_sz(), tooltip="Spot + 0.4x 1-sigma daily move. Resistance zone -- confirmed close above suggests a bullish structural break.")
+
+    // GEX Pin -- solid gold
+    if is_set(v_pin)
+        line.new(bar_index - 300, v_pin, bar_index + 60, v_pin, color=C_PIN, width=lw_main, style=line.style_solid)
+        if show_labels
+            label.new(bar_index + lbl_offset, v_pin, "  GEX PIN  " + str.tostring(v_pin, "#.##"), style=label.style_label_left, color=C_PIN, textcolor=C_BLACK, size=lbl_sz(), tooltip="Strike with highest absolute GEX. Magnetic into expiry.")
+
+    // Max Pain -- dotted orange
+    if is_set(v_pain)
+        line.new(bar_index - 300, v_pain, bar_index + 60, v_pain, color=C_PAIN, width=lw_main, style=line.style_dotted)
+        if show_labels
+            label.new(bar_index + lbl_offset, v_pain, "  MAX PAIN  " + str.tostring(v_pain, "#.##"), style=label.style_label_left, color=C_PAIN, textcolor=C_WHITE, size=lbl_sz(), tooltip="Strike minimising aggregate option payout at expiry.")
+
+    // Breakdown -- dashed rose                                          [NEW]
+    if is_set(v_breakdown)
+        line.new(bar_index - 300, v_breakdown, bar_index + 60, v_breakdown, color=C_BREAKDOWN, width=lw_main, style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + lbl_offset, v_breakdown, "  BREAKDOWN  " + str.tostring(v_breakdown, "#.##"), style=label.style_label_left, color=C_BREAKDOWN, textcolor=C_BLACK, size=lbl_sz(), tooltip="Spot - 0.5x 1-sigma daily move. Key support -- confirmed close below suggests a bearish structural break.")
+
+    // 1-Sigma range -- dashed teal
+    if is_set(v_sh)
+        line.new(bar_index - 300, v_sh, bar_index + 60, v_sh, color=C_SIGMA, width=1, style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + lbl_offset, v_sh, "  1s HIGH  " + str.tostring(v_sh, "#.##"), style=label.style_label_left, color=C_SIGMA, textcolor=C_BLACK, size=lbl_sz())
+
+    if is_set(v_sl)
+        line.new(bar_index - 300, v_sl, bar_index + 60, v_sl, color=C_SIGMA, width=1, style=line.style_dashed)
+        if show_labels
+            label.new(bar_index + lbl_offset, v_sl, "  1s LOW  " + str.tostring(v_sl, "#.##"), style=label.style_label_left, color=C_SIGMA, textcolor=C_BLACK, size=lbl_sz())
+
+    // Put Walls -- green, Wall 1 thicker. Toggle hides lines+labels entirely.
+    if show_put_walls
+        if is_set(v_pw1)
+            line.new(bar_index - 300, v_pw1, bar_index + 60, v_pw1, color=C_P1, width=lw_wall + 1, style=line.style_solid)
+            if show_labels
+                label.new(bar_index + lbl_offset, v_pw1, "  PUT WALL 1  " + str.tostring(v_pw1, "#.##"), style=label.style_label_left, color=C_P1, textcolor=C_WHITE, size=lbl_sz())
+
+        if is_set(v_pw2)
+            line.new(bar_index - 300, v_pw2, bar_index + 60, v_pw2, color=C_P2, width=lw_wall, style=line.style_dashed)
+            if show_labels
+                label.new(bar_index + lbl_offset, v_pw2, "  PUT WALL 2  " + str.tostring(v_pw2, "#.##"), style=label.style_label_left, color=C_P2, textcolor=C_WHITE, size=lbl_sz())
+
+        if is_set(v_pw3)
+            line.new(bar_index - 300, v_pw3, bar_index + 60, v_pw3, color=C_P3, width=lw_wall, style=line.style_dashed)
+            if show_labels
+                label.new(bar_index + lbl_offset, v_pw3, "  PUT WALL 3  " + str.tostring(v_pw3, "#.##"), style=label.style_label_left, color=C_P3, textcolor=C_WHITE, size=lbl_sz())
+
+    // Call Walls -- red, Wall 1 thicker. Toggle hides lines+labels entirely.
+    if show_call_walls
+        if is_set(v_cw1)
+            line.new(bar_index - 300, v_cw1, bar_index + 60, v_cw1, color=C_C1, width=lw_wall + 1, style=line.style_solid)
+            if show_labels
+                label.new(bar_index + lbl_offset, v_cw1, "  CALL WALL 1  " + str.tostring(v_cw1, "#.##"), style=label.style_label_left, color=C_C1, textcolor=C_WHITE, size=lbl_sz())
+
+        if is_set(v_cw2)
+            line.new(bar_index - 300, v_cw2, bar_index + 60, v_cw2, color=C_C2, width=lw_wall, style=line.style_dashed)
+            if show_labels
+                label.new(bar_index + lbl_offset, v_cw2, "  CALL WALL 2  " + str.tostring(v_cw2, "#.##"), style=label.style_label_left, color=C_C2, textcolor=C_WHITE, size=lbl_sz())
+
+        if is_set(v_cw3)
+            line.new(bar_index - 300, v_cw3, bar_index + 60, v_cw3, color=C_C3, width=lw_wall, style=line.style_dashed)
+            if show_labels
+                label.new(bar_index + lbl_offset, v_cw3, "  CALL WALL 3  " + str.tostring(v_cw3, "#.##"), style=label.style_label_left, color=C_C3, textcolor=C_WHITE, size=lbl_sz())
+
+    // Spot reference -- thin dotted grey
+    if is_set(v_spot)
+        line.new(bar_index - 300, v_spot, bar_index + 60, v_spot, color=C_SPOT, width=1, style=line.style_dotted)
+
+    // Live flip annotation on rightmost candle
+//    if is_set(v_flip)
+//        dp = (close - v_flip) / v_flip * 100
+//        flip_txt = dp >= 0 ? "ABOVE FLIP  +" + str.tostring(dp, "#.##") + "%" : "BELOW FLIP  " + str.tostring(dp, "#.##") + "%"
+//        flip_col2 = dp >= 0 ? C_P1 : C_C1
+//        label.new(bar_index, close, flip_txt, style=label.style_label_lower_right, color=C_FLIPBG, textcolor=flip_col2, size=lbl_sz())
+
+// ================================================================
+// TABLE  -- toggled via table_toggle dropdown
+// Options: "Full" | "Levels Only" | "GEX Only" | "Hidden"
+// Row layout changed (v2): Breakout inserted after Gamma Flip,
+// Breakdown inserted after Max Pain -- every row below is +2 vs v1.
+// ================================================================
+show_full   = show_table and table_toggle == "Full"
+show_levels = show_table and (table_toggle == "Full" or table_toggle == "Levels Only")
+show_gex    = show_table and (table_toggle == "Full" or table_toggle == "GEX Only")
+
+if (show_full or show_levels or show_gex) and barstate.islast and is_allowed_symbol
+
+    n_rows = show_full ? 28 : show_levels ? 19 : 11
+    TS = tbl_sz()
+
+    t = table.new(tbl_pos(), 3, n_rows, bgcolor=C_TBGD, border_color=color.new(#334155, 40), border_width=1, frame_color=C_ACCENT, frame_width=2)
+
+    regime_pos  = v_tgex >= 0
+    regime_str  = regime_pos ? "POSITIVE GAMMA" : "NEGATIVE GAMMA"
+    regime_col  = regime_pos ? C_P1 : C_C1
+    regime_note = regime_pos ? "Dealers CUSHION" : "Dealers AMPLIFY"
+    src_lbl = has_str ? "AUTO" : "MANUAL"
+    src_col = has_str ? C_P1 : color.new(#f59e0b, 0)
+    bias_col  = v_score > 3 ? C_P1 : v_score > 0 ? color.new(#4ade80, 0) : v_score < -3 ? C_C1 : v_score < 0 ? C_PAIN2 : C_MUTED
+    score_col = bias_col
+    pcr_col   = v_pcr > 1.3 ? C_C1 : v_pcr < 0.7 ? C_P1 : C_TEXT
+    bias_lbl  = v_score > 3 ? "BULLISH" : v_score > 0 ? "MILD BULL" : v_score < -3 ? "BEARISH" : v_score < 0 ? "MILD BEAR" : "NEUTRAL"
+    score_str = (v_score >= 0 ? "+" : "") + str.tostring(v_score) + " / 10"
+    flip_live  = is_set(v_flip)
+    flip_above = flip_live and close >= v_flip
+    flip_l_str = flip_live ? (flip_above ? "ABOVE" : "BELOW") : "n/a"
+    flip_l_col = flip_live ? (flip_above ? C_P1 : C_C1) : C_MUTED
+    flip_l_dist = flip_live ? str.tostring(math.abs(close - v_flip), "#.##") + " pts" : ""
+
+    // Row 0 -- title banner
+    table.cell(t, 0, 0, " GEX LEVELS ", text_color=C_PURPLE, bgcolor=color.new(#1e1b4b, 10), text_size=TS, text_halign=text.align_left)
+    table.cell(t, 1, 0, syminfo.ticker, text_color=C_ACCENT, bgcolor=color.new(#1e1b4b, 10), text_size=TS, text_halign=text.align_right)
+    table.cell(t, 2, 0, str.tostring(v_dte) + "d  " + src_lbl, text_color=src_col, bgcolor=color.new(#1e1b4b, 10), text_size=TS, text_halign=text.align_right)
+
+    // Row 1 -- regime bar
+    table.cell(t, 0, 1, regime_str,  text_color=regime_col, bgcolor=color.new(#0f172a, 30), text_size=TS, text_halign=text.align_left)
+    table.cell(t, 1, 1, regime_note, text_color=C_MUTED,    bgcolor=color.new(#0f172a, 30), text_size=TS, text_halign=text.align_right)
+    table.cell(t, 2, 1, "",          text_color=C_MUTED,    bgcolor=color.new(#0f172a, 30), text_size=TS)
+
+    // LEVELS section
+    if show_levels
+        table.cell(t, 0, 2, " KEY LEVELS", text_color=C_MUTED, bgcolor=C_THDR, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 2, "",            text_color=C_MUTED, bgcolor=C_THDR, text_size=TS)
+        table.cell(t, 2, 2, "DIST",        text_color=C_MUTED, bgcolor=C_THDR, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 3, "Gamma Flip",          text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 3, fmt_price(v_flip),      text_color=C_FLIP,  text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 3, above_below(v_flip, v_spot), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 4, "Breakout",             text_color=C_MUTED,     text_size=TS, text_halign=text.align_left)          // [NEW]
+        table.cell(t, 1, 4, fmt_price(v_breakout),   text_color=C_BREAKOUT,  text_size=TS, text_halign=text.align_right)         // [NEW]
+        table.cell(t, 2, 4, dist_pts(v_breakout, v_spot), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)        // [NEW]
+        table.cell(t, 0, 5, "GEX Pin",              text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 5, fmt_price(v_pin),        text_color=C_PIN,   text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 5, dist_pts(v_pin, v_spot), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 6, "Max Pain",              text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 6, fmt_price(v_pain),       text_color=C_PAIN,  text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 6, dist_pts(v_pain, v_spot),text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 7, "Breakdown",            text_color=C_MUTED,      text_size=TS, text_halign=text.align_left)         // [NEW]
+        table.cell(t, 1, 7, fmt_price(v_breakdown),  text_color=C_BREAKDOWN,  text_size=TS, text_halign=text.align_right)        // [NEW]
+        table.cell(t, 2, 7, dist_pts(v_breakdown, v_spot), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)       // [NEW]
+        table.cell(t, 0, 8, "1s High",               text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 8, fmt_price(v_sh),         text_color=C_SIGMA, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 8, dist_pts(v_sh, v_spot),  text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 9, "1s Low",                text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 9, fmt_price(v_sl),         text_color=C_SIGMA, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 9, dist_pts(v_sl, v_spot),  text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 10, " OI WALLS",  text_color=C_MUTED, bgcolor=C_THDR, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 10, "",           text_color=C_MUTED, bgcolor=C_THDR, text_size=TS)
+        table.cell(t, 2, 10, "DIST",       text_color=C_MUTED, bgcolor=C_THDR, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 11, "Call Wall 1",             text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 11, fmt_price_gated(v_cw1, show_call_walls), text_color=show_call_walls ? C_C1 : C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 11, dist_pts_gated(v_cw1, v_spot, show_call_walls), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 12, "Call Wall 2",             text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 12, fmt_price_gated(v_cw2, show_call_walls), text_color=show_call_walls ? C_C2 : C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 12, dist_pts_gated(v_cw2, v_spot, show_call_walls), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 13, "Call Wall 3",             text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 13, fmt_price_gated(v_cw3, show_call_walls), text_color=show_call_walls ? C_C3 : C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 13, dist_pts_gated(v_cw3, v_spot, show_call_walls), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 14, "Put Wall 1",              text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 14, fmt_price_gated(v_pw1, show_put_walls), text_color=show_put_walls ? C_P1 : C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 14, dist_pts_gated(v_pw1, v_spot, show_put_walls), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 15, "Put Wall 2",              text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 15, fmt_price_gated(v_pw2, show_put_walls), text_color=show_put_walls ? C_P2 : C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 15, dist_pts_gated(v_pw2, v_spot, show_put_walls), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 16, "Put Wall 3",              text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 16, fmt_price_gated(v_pw3, show_put_walls), text_color=show_put_walls ? C_P3 : C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 16, dist_pts_gated(v_pw3, v_spot, show_put_walls), text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, 17, "Spot Ref",                text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 17, fmt_price(v_spot),          text_color=C_SPOT,  text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 17, "",                         text_color=C_MUTED, text_size=TS)
+        // Live vs flip row (row 18 in Levels Only mode)
+        if not show_full
+            table.cell(t, 0, 18, "Live vs Flip",         text_color=C_MUTED,    text_size=TS, text_halign=text.align_left)
+            table.cell(t, 1, 18, flip_l_str,             text_color=flip_l_col, text_size=TS, text_halign=text.align_right)
+            table.cell(t, 2, 18, flip_l_dist,            text_color=C_MUTED,    text_size=TS, text_halign=text.align_right)
+
+    // GEX section
+    if show_gex
+        r0 = show_levels ? 18 : 2
+        table.cell(t, 0, r0,     " GEX  ($ per 1%)",    text_color=C_MUTED, bgcolor=C_THDR, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, r0,     "",                     text_color=C_MUTED, bgcolor=C_THDR, text_size=TS)
+        table.cell(t, 2, r0,     "",                     text_color=C_MUTED, bgcolor=C_THDR, text_size=TS)
+        table.cell(t, 0, r0 + 1, "Total GEX",           text_color=C_MUTED,    text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, r0 + 1, fmt_gex(v_tgex),       text_color=regime_col, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, r0 + 1, "",                     text_color=C_MUTED,    text_size=TS)
+        table.cell(t, 0, r0 + 2, "Gross GEX",           text_color=C_MUTED, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, r0 + 2, fmt_gex(v_ggex),       text_color=C_TEXT,  text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, r0 + 2, "",                     text_color=C_MUTED, text_size=TS)
+        table.cell(t, 0, r0 + 3, "GEX Ratio",           text_color=C_MUTED,    text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, r0 + 3, str.tostring(v_ratio, "#.###"), text_color=regime_col, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, r0 + 3, ratio_bar(v_ratio),    text_color=regime_col, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, r0 + 4, " BIAS & OPTIONS",     text_color=C_MUTED, bgcolor=C_THDR, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, r0 + 4, "",                     text_color=C_MUTED, bgcolor=C_THDR, text_size=TS)
+        table.cell(t, 2, r0 + 4, "",                     text_color=C_MUTED, bgcolor=C_THDR, text_size=TS)
+        table.cell(t, 0, r0 + 5, "Bias",                text_color=C_MUTED,  text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, r0 + 5, bias_lbl,              text_color=bias_col, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, r0 + 5, str.tostring(v_conf) + "% conf", text_color=C_MUTED, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 0, r0 + 6, "Score",               text_color=C_MUTED,   text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, r0 + 6, score_str,             text_color=score_col, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, r0 + 6, "",                     text_color=C_MUTED,   text_size=TS)
+        table.cell(t, 0, r0 + 7, "PCR",                 text_color=C_MUTED,  text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, r0 + 7, str.tostring(v_pcr, "#.##"), text_color=pcr_col, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, r0 + 7, "IV " + str.tostring(v_iv, "#.#") + "%", text_color=C_PURPLE, text_size=TS, text_halign=text.align_right)
+        // GEX-only mode live vs flip footer
+        if not show_levels
+            table.cell(t, 0, r0 + 8, "Live vs Flip",    text_color=C_MUTED,    text_size=TS, text_halign=text.align_left)
+            table.cell(t, 1, r0 + 8, flip_l_str,        text_color=flip_l_col, text_size=TS, text_halign=text.align_right)
+            table.cell(t, 2, r0 + 8, flip_l_dist,       text_color=C_MUTED,    text_size=TS, text_halign=text.align_right)
+
+    // Full mode: live vs flip footer at very bottom (r0=18 -> footer at 26/27)
+    if show_full
+        table.cell(t, 0, 26, " LIVE vs FLIP", text_color=C_MUTED, bgcolor=C_THDR, text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 26, "",              text_color=C_MUTED, bgcolor=C_THDR, text_size=TS)
+        table.cell(t, 2, 26, "",              text_color=C_MUTED, bgcolor=C_THDR, text_size=TS)
+        table.cell(t, 0, 27, "Current close", text_color=C_MUTED,    text_size=TS, text_halign=text.align_left)
+        table.cell(t, 1, 27, flip_l_str,      text_color=flip_l_col, text_size=TS, text_halign=text.align_right)
+        table.cell(t, 2, 27, flip_l_dist,     text_color=C_MUTED,    text_size=TS, text_halign=text.align_right)

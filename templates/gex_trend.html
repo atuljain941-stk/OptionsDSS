@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>GEX Trend Tracker</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1300px;margin:0 auto;padding:18px}
+    .hero{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0;color:var(--muted,var(--muted2));font-size:13px;line-height:1.45;max-width:920px}
+    .badge{display:inline-block;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:900;border:1px solid transparent;text-transform:uppercase;letter-spacing:.03em}
+    .badge-purple{background:#a78bfa22;color:#c084fc;border-color:#a78bfa44}
+    .btn{padding:9px 18px;border:none;border-radius:8px;font-weight:900;cursor:pointer;font-size:13px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .tabs{display:flex;gap:8px;margin-bottom:14px}
+    .tab-btn{padding:8px 16px;border-radius:8px;border:1px solid var(--border,var(--border2));background:rgba(255,255,255,.03);color:var(--text,var(--text2));cursor:pointer;font-weight:800;font-size:13px}
+    .tab-btn.active{background:#4f46e5;border-color:#4f46e5}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:14px}
+    .row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px}
+    .row .lbl{color:var(--muted,var(--muted2))}.row .val{font-weight:800}
+    .pos{color:#4ade80}.neg{color:#f87171}.muted{color:var(--muted,var(--muted2))}
+    .regime-pill{display:inline-block;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:800}
+    .regime-POSITIVE_GAMMA{background:#22c55e22;color:#4ade80}
+    .regime-NEGATIVE_GAMMA{background:#f8717122;color:#f87171}
+    .levels-table{width:100%;border-collapse:collapse;font-size:13px}
+    .levels-table th,.levels-table td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);text-align:right}
+    .levels-table th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase;text-align:right}
+    .levels-table td:first-child,.levels-table th:first-child{text-align:left}
+    .levels-table .lvl-name{font-weight:800}
+    .lvl-flagged{background:rgba(251,191,36,.08)}
+    .change-pill{display:inline-block;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:800;margin-left:6px}
+    .change-up{background:#22c55e22;color:#4ade80}
+    .change-down{background:#f8717122;color:#f87171}
+    .change-pct-pos{color:#4ade80}
+    .change-pct-neg{color:#f87171}
+    .guidance-box{background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.6;margin-top:10px}
+    table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+    th,td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left}
+    th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase}
+    .foot-note{margin-top:10px;font-size:11px;color:var(--muted,var(--muted2));line-height:1.6}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <div>
+      <div class="tiny muted" style="margin-bottom:4px;font-size:11px">v2.0 · reuses the exact GEX Plan pipeline (_compute_gex → _walls → _five_factor_score → _build_trade_plan) so every level here matches GEX Plan precisely</div>
+      <h1>📈 GEX Trend Tracker</h1>
+      <p>Same Key Levels as GEX Plan (call/put wall, breakout/breakdown, gamma flip, balance/pin, max pain), shown two ways: the frozen start-of-day snapshot next to the live current read, with anything that moved meaningfully or got crossed by spot flagged — plus a plain-English 0DTE read built from GEX Plan's own trade-plan logic. OI itself still only refreshes once a day, same as everywhere else in this app; what moves here is spot and time-to-expiry against that fixed OI.</p>
+    </div>
+    <span class="badge badge-purple">GEX Trend</span>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+
+  <div class="card" style="padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+    <label class="tiny muted" style="font-size:11px">Background refresh every</label>
+    <select id="interval-select" onchange="updateInterval()">
+      <option value="1">1 min</option>
+      <option value="2">2 min</option>
+      <option value="5" selected>5 min</option>
+      <option value="10">10 min</option>
+      <option value="15">15 min</option>
+      <option value="30">30 min</option>
+    </select>
+    <span id="interval-status" class="muted tiny" style="font-size:11px"></span>
+  </div>
+
+  <div id="content"><div class="card"><div class="spinner"></div> Loading...</div></div>
+
+  <div class="foot-note">
+    Auto-refreshes on tab switch. Background snapshots are logged via the scheduler (see /scheduler-hub, job key "gex_trend_tracker") whether or not this page is open — interval is controlled by the dropdown above.
+  </div>
+</div>
+
+<script>
+const SYMBOLS = ["QQQ", "SPY", "IWM"];
+let active = "SPY";
+
+function fmtNum(v, d=2) {
+  if (v === null || v === undefined) return "—";
+  return Number(v).toFixed(d);
+}
+
+function renderTabs() {
+  document.getElementById("tabs").innerHTML = SYMBOLS.map(s =>
+    `<button class="tab-btn ${s === active ? 'active' : ''}" onclick="selectTab('${s}')">${s}</button>`
+  ).join("");
+}
+
+async function selectTab(sym) {
+  active = sym;
+  renderTabs();
+  await loadTick(sym);
+}
+
+async function loadTick(sym) {
+  document.getElementById("content").innerHTML = `<div class="card"><div class="spinner"></div> Loading ${sym}...</div>`;
+  try {
+    const resp = await fetch(`/gex-trend/api/tick?symbol=${sym}`);
+    const d = await resp.json();
+    if (d.error) {
+      document.getElementById("content").innerHTML = `<div class="card muted">${d.error}</div>`;
+      return;
+    }
+    const regimeClass = "regime-" + (d.current?.regime_label || "").replace(/[^A-Z_]/g, "");
+    const buildsRows = (d.top_oi_builds || []).map(b =>
+      `<tr><td>${b.strike}</td><td>${b.type}</td><td class="${b.oi_change > 0 ? 'pos' : b.oi_change < 0 ? 'neg' : ''}">${b.oi_change > 0 ? '+' : ''}${b.oi_change}</td></tr>`
+    ).join("");
+    const volRows = (d.high_volume_strikes || []).map(v =>
+      `<tr class="${v.far_otm ? 'lvl-flagged' : ''}">
+        <td>${v.strike}${v.far_otm ? ' ⚡' : ''}</td>
+        <td>${v.type}</td>
+        <td>${v.volume.toLocaleString()}</td>
+        <td>${v.oi.toLocaleString()}</td>
+        <td>${v.vol_oi_ratio}x</td>
+        <td class="${v.pct_from_spot > 0 ? 'pos' : v.pct_from_spot < 0 ? 'neg' : ''}">${v.pct_from_spot > 0 ? '+' : ''}${v.pct_from_spot}%</td>
+      </tr>`
+    ).join("");
+
+    // Two-column levels table: frozen start-of-day (left) vs live current
+    // (right), matched by label. Rows the backend flagged as moved
+    // meaningfully or crossed by spot get highlighted.
+    const changesByLabel = {};
+    (d.changes || []).forEach(c => { changesByLabel[c.label] = c; });
+    const baseLevels = d.baseline?.levels || [];
+    const curLevels = d.current?.levels || [];
+    const baseByLabel = {}; baseLevels.forEach(l => { baseByLabel[l.label] = l.price; });
+    const levelsRows = curLevels.map(lv => {
+      const basePrice = baseByLabel[lv.label];
+      const chg = changesByLabel[lv.label];
+      const flagged = !!chg;
+      const crossBadge = chg?.crossed ? `<span class="change-pill change-${chg.crossed}">${chg.crossed === 'up' ? '▲ crossed up' : '▼ crossed down'}</span>` : '';
+      const pctBadge = chg && !chg.crossed ? `<span class="tiny ${chg.pct_change > 0 ? 'change-pct-pos' : 'change-pct-neg'}" style="font-size:11px;margin-left:6px">(${chg.pct_change > 0 ? '+' : ''}${chg.pct_change}%)</span>` : '';
+      return `<tr class="${flagged ? 'lvl-flagged' : ''}">
+        <td class="lvl-name">${lv.label}</td>
+        <td>${basePrice != null ? fmtNum(basePrice) : '—'}</td>
+        <td>${fmtNum(lv.price)}${crossBadge}${pctBadge}</td>
+        <td class="muted tiny" style="font-size:11px;text-align:left">${lv.note || ''}</td>
+      </tr>`;
+    }).join("");
+
+    // Skew (25-delta risk reversal): negative = put bias (bearish
+    // institutional hedging demand), positive = call bias.
+    const skew = d.current?.skew_rr;
+    const skewLabel = skew == null ? "—" : skew < -1 ? "Put skew (bearish hedging demand)" :
+                       skew > 1 ? "Call skew (bullish demand)" : "Roughly flat";
+    const skewClass = skew == null ? "" : skew < -1 ? "neg" : skew > 1 ? "pos" : "";
+
+    const dealerRows = (d.current?.dealer_positioning || []).map(p => `
+      <tr>
+        <td>${p.strike}</td>
+        <td class="${p.pct_from_spot > 0 ? 'pos' : p.pct_from_spot < 0 ? 'neg' : ''}">${p.pct_from_spot > 0 ? '+' : ''}${p.pct_from_spot}%</td>
+        <td class="${p.effect === 'stabilizing' ? 'pos' : 'neg'}">${p.effect === 'stabilizing' ? '🟢 Stabilizing' : '🔴 Amplifying'}</td>
+        <td>${Math.round(p.gex).toLocaleString()}</td>
+      </tr>`).join("");
+
+    document.getElementById("content").innerHTML = `
+      <div class="card">
+        <div class="row"><span class="lbl">Symbol / Expiry</span><span class="val">${d.symbol} · ${d.expiry} (${d.dte}d)</span></div>
+        <div class="row"><span class="lbl">Score / Confidence</span><span class="val">${fmtNum(d.current?.score, 1)} · ${fmtNum(d.current?.confidence, 0)}%</span></div>
+        <div class="row"><span class="lbl">Regime</span><span class="regime-pill ${regimeClass}">${d.current?.regime_label || "—"}</span></div>
+        <div class="row" style="border-bottom:none"><span class="lbl">Skew (25Δ risk reversal)</span><span class="val ${skewClass}">${fmtNum(skew, 2)} — ${skewLabel}</span></div>
+        <div class="muted tiny" style="margin-top:8px;font-size:11px">Start-of-day baseline captured ${d.baseline_captured_at || "—"}</div>
+      </div>
+      ${d.first_two_hours ? `
+      <div class="card" style="border-color:#f59e0b;background:rgba(245,158,11,.07)">
+        <b style="font-size:14px">⏱️ First-Two-Hours Read — how ${sym} is shaping up</b>
+        <div style="font-size:13px;line-height:1.65;margin-top:8px">${d.first_two_hours.text}</div>
+      </div>` : ''}
+      <div class="card">
+        <b class="tiny" style="font-size:12px">Today's session so far</b>
+        <div class="guidance-box">${d.session?.available ? d.session.commentary : (d.session?.note || "Not available")}</div>
+      </div>
+      <div class="card">
+        <b class="tiny" style="font-size:12px">Key Levels — Start of Day (frozen) vs Current (live)</b>
+        <table class="levels-table">
+          <thead><tr><th>Level</th><th>Start of Day</th><th>Current</th><th>Note</th></tr></thead>
+          <tbody>${levelsRows || '<tr><td colspan=4 class="muted">No levels available</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="card">
+        <b class="tiny" style="font-size:12px">Market maker positioning by strike</b>
+        <div class="muted tiny" style="font-size:11px;margin:4px 0 6px">Where dealer gamma exposure concentrates. Stabilizing = dealers short calls there, buy dips/sell rips (dampens moves through that strike). Amplifying = dealers long puts there, their hedge reinforces the move instead of dampening it.</div>
+        <table><thead><tr><th>Strike</th><th>% From Spot</th><th>Dealer Effect</th><th>GEX ($/1% move)</th></tr></thead>
+          <tbody>${dealerRows || '<tr><td colspan=4 class="muted">No data</td></tr>'}</tbody>
+        </table>
+      </div>
+      ${d.gex_profile?.available ? `
+      <div class="card">
+        <b class="tiny" style="font-size:12px">Gamma Profile — total dealer GEX by hypothetical spot level</b>
+        <div class="muted tiny" style="font-size:11px;margin:4px 0 6px">Different from the table above -- that's GEX concentrated AT specific strikes right now; this recomputes TOTAL portfolio GEX as if spot were at each price level shown, same underlying OI. Green = positive (dealers net stabilizing at that level), red = negative (net amplifying). The zero-crossing is the gamma flip price.</div>
+        <div id="gex-profile-chart" style="height:520px"></div>
+      </div>
+      ${d.gex_playbook?.available ? `
+      <div class="card" style="border-color:${d.gex_playbook.call === 'no_trade' ? '#64748b' : d.gex_playbook.direction === 'call' ? '#4ade80' : '#f87171'};background:${d.gex_playbook.call === 'no_trade' ? 'rgba(100,116,139,.08)' : d.gex_playbook.direction === 'call' ? 'rgba(74,222,128,.07)' : 'rgba(248,113,113,.07)'}">
+        <b style="font-size:14px">${d.gex_playbook.call === 'no_trade' ? '⏸️ No Trade' : d.gex_playbook.call === 'credit_vertical' ? `💰 Credit ${d.gex_playbook.direction === 'call' ? 'Call' : 'Put'} Spread` : `🎯 Naked Long ${d.gex_playbook.direction === 'call' ? 'Call' : 'Put'}`}${d.gex_playbook.confidence === 'lower' ? ' <span class="muted tiny">(lower conviction)</span>' : ''}</b>
+        <div style="font-size:13px;line-height:1.65;margin-top:8px">${d.gex_playbook.reason}</div>
+        ${d.gex_playbook.dte_conviction ? `
+        <div style="margin-top:8px;padding:8px 10px;border-radius:6px;background:${d.gex_playbook.dte_conviction.level === 'high' ? 'rgba(74,222,128,.1)' : d.gex_playbook.dte_conviction.level === 'medium' ? 'rgba(251,191,36,.1)' : 'rgba(148,163,184,.1)'}">
+          <b style="font-size:11.5px">${d.gex_playbook.dte_conviction.level === 'high' ? '🟢' : d.gex_playbook.dte_conviction.level === 'medium' ? '🟡' : '⚪'} DTE-scaled conviction: ${d.gex_playbook.dte_conviction.level}</b>
+          <div style="font-size:12px;line-height:1.55;margin-top:4px">${d.gex_playbook.dte_conviction.text}</div>
+        </div>` : ''}
+        ${d.gex_playbook.alternative ? `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.1)">
+          <b style="font-size:12.5px">↔ If you'd rather run a credit ${d.gex_playbook.alternative.direction === 'call' ? 'call' : 'put'} spread instead:</b>
+          <div style="font-size:12.5px;line-height:1.6;margin-top:5px">${d.gex_playbook.alternative.reason}</div>
+        </div>` : ''}
+        ${d.gex_playbook.iron_condor_note ? `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.1)">
+          <b style="font-size:12.5px">⇄ If you'd rather run an iron condor:</b>
+          <div style="font-size:12.5px;line-height:1.6;margin-top:5px">${d.gex_playbook.iron_condor_note}</div>
+        </div>` : ''}
+        ${d.gex_playbook.debit_vertical_note ? `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.1)">
+          <b style="font-size:12.5px">🛡️ Risk-defined version of this idea (debit vertical):</b>
+          <div style="font-size:12.5px;line-height:1.6;margin-top:5px">${d.gex_playbook.debit_vertical_note}</div>
+        </div>` : ''}
+        <div class="muted tiny" style="font-size:10.5px;margin-top:8px">Derived from the gamma profile shape above -- structural read, not a full trade plan. Still your call on strikes, sizing, and stop.</div>
+      </div>` : ''}` : ''}
+      ${d.current?.peak_gamma_zone ? `
+      <div class="card" style="border-color:#a855f7;background:rgba(168,85,247,.06)">
+        <b class="tiny" style="font-size:12px">⚡ Peak Gamma Zone — spot is AT a large pre-existing ${d.current.peak_gamma_zone.side} strike</b>
+        <div style="font-size:12.5px;line-height:1.6;margin-top:6px">${d.current.peak_gamma_zone.note}</div>
+      </div>` : ''}
+      <div class="card">
+        <b class="tiny" style="font-size:12px">How to trade 0DTE from here</b>
+        <div class="guidance-box">${d.guidance || "—"}</div>
+      </div>
+      <div class="card">
+        <b class="tiny" style="font-size:12px">Top OI builds (yesterday's realized change, NOT live today)</b>
+        <table><thead><tr><th>Strike</th><th>Type</th><th>OI Δ</th></tr></thead><tbody>${buildsRows || '<tr><td colspan=3 class="muted">No data</td></tr>'}</tbody></table>
+      </div>
+      <div class="card">
+        <b class="tiny" style="font-size:12px">Highest volume strikes (far-OTM flagged)</b>
+        <div class="muted tiny" style="font-size:11px;margin:4px 0 6px">Same daily-snapshot data as everything else here — how much traded on the last snapshot day, not live intraday. Far-OTM volume (⚡, ≥3% from spot) is more likely a directional bet or tail hedge than routine ATM trading.</div>
+        <table><thead><tr><th>Strike</th><th>Type</th><th>Volume</th><th>OI</th><th>Vol/OI</th><th>% From Spot</th></tr></thead>
+          <tbody>${volRows || '<tr><td colspan=6 class="muted">No data</td></tr>'}</tbody>
+        </table>
+      </div>`;
+    if (d.gex_profile?.available) renderGexProfileChart(d.gex_profile, d.spot);
+  } catch (e) {
+    document.getElementById("content").innerHTML = `<div class="card muted">Error: ${e.message}</div>`;
+  }
+}
+
+function renderGexProfileChart(profile, spot) {
+  const el = document.getElementById("gex-profile-chart");
+  if (!el) return;
+  const curve = profile.curve || [];
+  // GEXBOT-style: horizontal bars, y = hypothetical spot level, x = total
+  // GEX at that level, green above zero (net stabilizing) / red below
+  // (net amplifying) -- split into two traces so each half gets its own
+  // color rather than one trace with a color array (simpler and matches
+  // their exact visual: solid green bars one side, solid red the other).
+  const posLevels = curve.filter(c => c.total_gex >= 0);
+  const negLevels = curve.filter(c => c.total_gex < 0);
+  const traces = [
+    {x: posLevels.map(c => c.total_gex), y: posLevels.map(c => c.spot), type: "bar", orientation: "h",
+      name: "Positive (stabilizing)", marker: {color: "#4ade80"}},
+    {x: negLevels.map(c => c.total_gex), y: negLevels.map(c => c.spot), type: "bar", orientation: "h",
+      name: "Negative (amplifying)", marker: {color: "#f87171"}},
+  ];
+  const shapes = [
+    {type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: {color: "#666", width: 1, dash: "dot"}},
+  ];
+  const annotations = [];
+  if (spot) {
+    shapes.push({type: "line", xref: "paper", x0: 0, x1: 1, y0: spot, y1: spot,
+      line: {color: "#fbbf24", width: 2, dash: "dash"}});
+    annotations.push({xref: "paper", x: 1, y: spot, xanchor: "left", yanchor: "middle",
+      text: `spot ${spot.toFixed(2)}`, showarrow: false, font: {color: "#fbbf24", size: 11}});
+  }
+  if (profile.zero_gamma) {
+    shapes.push({type: "line", xref: "paper", x0: 0, x1: 1, y0: profile.zero_gamma, y1: profile.zero_gamma,
+      line: {color: "#e2e8f0", width: 1.5, dash: "dot"}});
+    annotations.push({xref: "paper", x: 1, y: profile.zero_gamma, xanchor: "left", yanchor: "middle",
+      text: `zero gamma ${profile.zero_gamma.toFixed(2)}`, showarrow: false, font: {color: "#e2e8f0", size: 10.5}});
+  }
+  if (profile.major_positive) {
+    annotations.push({xref: "paper", x: -0.02, y: profile.major_positive, xanchor: "right", yanchor: "middle",
+      text: `major+ ${profile.major_positive.toFixed(2)}`, showarrow: false, font: {color: "#4ade80", size: 10.5},
+      bgcolor: "rgba(11,16,32,0.85)", borderpad: 2});
+  }
+  if (profile.major_negative) {
+    annotations.push({xref: "paper", x: -0.02, y: profile.major_negative, xanchor: "right", yanchor: "middle",
+      text: `major− ${profile.major_negative.toFixed(2)}`, showarrow: false, font: {color: "#f87171", size: 10.5},
+      bgcolor: "rgba(11,16,32,0.85)", borderpad: 2});
+  }
+  Plotly.newPlot("gex-profile-chart", traces, {
+    paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+    font: {color: "#e2e8f0", size: 12},
+    margin: {t: 20, l: 130, r: 110, b: 40},
+    barmode: "overlay",
+    xaxis: {title: "Total GEX at that spot level", gridcolor: "#2a2f42", zerolinecolor: "#666"},
+    yaxis: {title: "Hypothetical spot", gridcolor: "#2a2f42"},
+    shapes, annotations,
+    showlegend: true, legend: {orientation: "h", y: -0.08},
+  }, {responsive: true, displayModeBar: false});
+}
+
+renderTabs();
+loadTick(active);
+
+async function loadInterval() {
+  try {
+    const resp = await fetch(`/gex-trend/api/interval`);
+    const d = await resp.json();
+    if (d.interval_min) {
+      const sel = document.getElementById("interval-select");
+      const val = String(Math.round(d.interval_min));
+      if ([...sel.options].some(o => o.value === val)) sel.value = val;
+    }
+  } catch (e) { /* keep default selection */ }
+}
+
+async function updateInterval() {
+  const minutes = document.getElementById("interval-select").value;
+  const status = document.getElementById("interval-status");
+  status.textContent = "Saving...";
+  try {
+    await fetch(`/gex-trend/api/interval`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({minutes: Number(minutes)}),
+    });
+    status.textContent = `Background snapshots now every ${minutes} min`;
+    _restartAutoRefresh(Number(minutes));
+  } catch (e) {
+    status.textContent = "Error saving interval: " + e.message;
+  }
+}
+
+// Neither this page nor Live Chain Tracker had any client-side auto-
+// refresh at all -- the background scheduler job captures fresh data on
+// its own cadence regardless of whether this tab is open, but an
+// already-open tab had no way to ever show it without a manual reload.
+// This closes that gap: re-fetch the active symbol's tick on the SAME
+// interval configured above, so the two stay in sync automatically
+// rather than needing a second, separate "refresh rate" the person has
+// to keep in their head.
+let _autoRefreshTimer = null;
+function _restartAutoRefresh(minutes) {
+  if (_autoRefreshTimer) clearInterval(_autoRefreshTimer);
+  const ms = Math.max(1, minutes) * 60000;
+  _autoRefreshTimer = setInterval(() => { if (active) loadTick(active); }, ms);
+}
+
+loadInterval().then(() => {
+  const sel = document.getElementById("interval-select");
+  _restartAutoRefresh(Number(sel.value) || 5);
+});
+</script>
+</body>
+</html>

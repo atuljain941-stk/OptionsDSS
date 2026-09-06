@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Corporate Events Query</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1500px;margin:0 auto;padding:18px}
+    .hero{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}.hero p{margin:0;color:var(--muted,var(--muted2));font-size:13px;line-height:1.45;max-width:900px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:14px;margin-bottom:12px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+    label{display:block;margin-bottom:4px;font-size:11px;color:var(--muted,var(--muted2));font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+    select,input{padding:8px 10px;border:1px solid var(--border,var(--border2));background:var(--bg,#0b1020);color:var(--text,var(--text2));border-radius:8px;font-size:13px}
+    input[type=number]{width:120px}
+    .symbol-input{width:140px;text-transform:uppercase}
+    .btn{padding:9px 18px;border:none;border-radius:8px;font-weight:900;cursor:pointer;font-size:13px}
+    .btn:hover{opacity:.88}.btn:disabled{opacity:.5;cursor:not-allowed}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-ghost{background:rgba(255,255,255,.06);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2))}
+    .muted{color:var(--muted,var(--muted2))}.tiny{font-size:11px}.small{font-size:12px}
+    .filter-card{border:1px solid var(--border,var(--border2));border-radius:10px;padding:12px;margin-bottom:10px;background:rgba(255,255,255,.02)}
+    .filter-head{font-size:13px;font-weight:900;margin-bottom:10px}
+    .filter-params{display:flex;gap:16px;flex-wrap:wrap}
+    .param{display:flex;flex-direction:column;gap:2px}
+    .param .plabel{font-size:10px;color:var(--muted,var(--muted2));text-transform:uppercase;letter-spacing:.03em;max-width:160px}
+    .badge{display:inline-block;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:900;border:1px solid transparent;text-transform:uppercase;letter-spacing:.03em}
+    .badge-purple{background:#a78bfa22;color:#c084fc;border-color:#a78bfa44}
+    #summary-bar{display:none;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+    .sum-chip{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:9px;padding:9px 14px;min-width:90px;text-align:center}
+    .sum-chip .val{font-size:20px;font-weight:950;line-height:1}
+    .sum-chip .lbl{font-size:10px;color:var(--muted,var(--muted2));margin-top:2px;text-transform:uppercase;letter-spacing:.05em}
+    .table-wrap{margin-top:12px;overflow:auto}
+    .table-wrap table{width:100%;border-collapse:collapse;font-size:12px}
+    .table-wrap th,.table-wrap td{padding:8px;border-bottom:1px solid var(--border,var(--border2));text-align:left;vertical-align:top;white-space:nowrap}
+    .table-wrap th{font-size:10px;color:var(--muted,var(--muted2));text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;background:var(--card,var(--bg2))}
+    .table-wrap td.pos{color:#4ade80}.table-wrap td.neg{color:#f87171}
+    .empty{padding:28px;text-align:center;color:var(--muted,var(--muted2))}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .status-line{margin-top:8px;color:var(--muted,var(--muted2));font-size:11px}
+    .err{color:#f87171}.ok{color:#22c55e}
+    .query-box{margin-top:10px;padding:9px;border-left:3px solid var(--border,var(--border2));background:rgba(255,255,255,.025);border-radius:6px;font-size:11px;line-height:1.5;color:#cbd5e1;font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+    @media(max-width:720px){.filter-params{padding-left:0}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <div>
+      <div class="tiny muted" style="margin-bottom:4px">v1.0 · US equities only -- real $ figures from SEC Form 4/XBRL, not news/headlines</div>
+      <h1>📋 Corporate Events Query</h1>
+      <p>Filters against real quantitative data collected by the watchlist scheduler's Corporate Events step: actual insider transaction dollars/shares (SEC Form 4), actual debt $ and % change (SEC XBRL), volume vs 20-day average, and material 8-K event counts. A symbol with no data yet (Corporate Events schedule not set for its watchlist, or not a US SEC filer at all) is correctly excluded rather than shown as a false zero.</p>
+    </div>
+    <span class="badge badge-purple">Corporate Events</span>
+  </div>
+
+  <div class="card controls">
+    <div class="row">
+      <div>
+        <label>Watchlist</label>
+        <select id="wl" style="min-width:230px"><option value="">All symbols</option></select>
+      </div>
+      <div>
+        <label>Optional Symbol Override (CSV)</label>
+        <input id="symbol" class="symbol-input" placeholder="AAPL,NVDA,MSFT"/>
+      </div>
+      <div><label>Max Results</label><input id="limit" type="number" value="100" min="1" max="250"/></div>
+      <div style="display:flex;gap:8px;align-items:flex-end">
+        <button class="btn btn-primary" id="run-btn" onclick="runScan()">🔍 Run Query</button>
+        <button class="btn btn-ghost" onclick="clearResults()">Clear</button>
+      </div>
+    </div>
+    <div id="status" class="status-line">Set at least one filter below, then run. Leave symbol blank to query the selected watchlist.</div>
+  </div>
+
+  <div class="card filter-card">
+    <div class="filter-head">Filters -- every one is optional, but at least one must be set</div>
+    <div class="filter-params">
+      <div class="param"><span class="plabel">Min insider net $ (90d)</span><input type="number" id="f-min_insider_net" placeholder="e.g. 1000000"/></div>
+      <div class="param"><span class="plabel">Max insider net $ (90d)</span><input type="number" id="f-max_insider_net" placeholder="e.g. -1000000"/></div>
+      <div class="param"><span class="plabel">Min debt change %</span><input type="number" id="f-min_debt_change_pct" placeholder="e.g. 5"/></div>
+      <div class="param"><span class="plabel">Max debt change %</span><input type="number" id="f-max_debt_change_pct" placeholder="e.g. -5"/></div>
+      <div class="param"><span class="plabel">Min volume, % of 20d avg</span><input type="number" id="f-min_volume_pct" placeholder="e.g. 200"/></div>
+      <div class="param">
+        <span class="plabel">Material events</span>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;text-transform:none;letter-spacing:0">
+          <input type="checkbox" id="f-require_material_event" style="width:14px;height:14px"/> Require an 8-K in the last 30d
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div id="summary-bar">
+    <div class="sum-chip"><div class="val" id="sum-returned">0</div><div class="lbl">Matches</div></div>
+    <div class="sum-chip"><div class="val" id="sum-scanned">0</div><div class="lbl">Scanned</div></div>
+    <div class="sum-chip"><div class="val" id="sum-time">—</div><div class="lbl">Seconds</div></div>
+  </div>
+
+  <div class="card" id="results-card">
+    <div class="table-wrap" id="table-wrap">
+      <div class="empty">No results yet. Set a filter above and click Run Query.</div>
+    </div>
+    <div class="query-box" id="query-box" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+const FILTER_IDS = [
+  "min_insider_net", "max_insider_net",
+  "min_debt_change_pct", "max_debt_change_pct",
+  "min_volume_pct",
+];
+
+async function loadWatchlists() {
+  try {
+    const resp = await fetch("/scanner-builder/api/watchlists");
+    const data = await resp.json();
+    const sel = document.getElementById("wl");
+    (data.watchlists || []).forEach(w => {
+      const opt = document.createElement("option");
+      opt.value = w.id;
+      opt.textContent = w.name || ("Watchlist " + w.id);
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    console.warn("Could not load watchlists", e);
+  }
+}
+
+function collectFilters() {
+  const filters = {};
+  FILTER_IDS.forEach(id => {
+    const raw = document.getElementById("f-" + id).value;
+    if (raw !== "") filters[id] = Number(raw);
+  });
+  if (document.getElementById("f-require_material_event").checked) {
+    filters.require_material_event = true;
+  }
+  return filters;
+}
+
+function clearResults() {
+  document.getElementById("table-wrap").innerHTML = '<div class="empty">No results yet. Set a filter above and click Run Query.</div>';
+  document.getElementById("summary-bar").style.display = "none";
+  document.getElementById("query-box").style.display = "none";
+  document.getElementById("status").innerHTML = "Set at least one filter below, then run.";
+  document.getElementById("status").className = "status-line";
+}
+
+async function runScan() {
+  const btn = document.getElementById("run-btn");
+  const status = document.getElementById("status");
+  btn.disabled = true;
+  status.innerHTML = '<span class="spinner"></span> Running query...';
+  status.className = "status-line";
+
+  const filters = collectFilters();
+  if (!Object.keys(filters).length) {
+    status.innerHTML = "Set at least one filter.";
+    status.className = "status-line err";
+    btn.disabled = false;
+    return;
+  }
+
+  const wl = document.getElementById("wl").value;
+  const symbol = document.getElementById("symbol").value.trim();
+  const limit = Number(document.getElementById("limit").value || 100);
+
+  const body = { filters, limit };
+  if (wl) body.watchlist_id = wl;
+  if (symbol) body.symbol = symbol;
+
+  const t0 = performance.now();
+  try {
+    const resp = await fetch("/corporate-events/api/run", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+    if (data.error) {
+      status.innerHTML = "Error: " + data.error;
+      status.className = "status-line err";
+      btn.disabled = false;
+      return;
+    }
+
+    renderResults(data);
+    document.getElementById("sum-returned").textContent = data.count ?? (data.results || []).length;
+    document.getElementById("sum-scanned").textContent = (data.summary && data.summary.scanned) || "—";
+    document.getElementById("sum-time").textContent = elapsed;
+    document.getElementById("summary-bar").style.display = "flex";
+
+    const qbox = document.getElementById("query-box");
+    qbox.style.display = "block";
+    qbox.textContent = data.query_text || "";
+
+    status.innerHTML = `Done in ${elapsed}s -- ${data.count ?? (data.results||[]).length} match(es).`;
+    status.className = "status-line ok";
+  } catch (e) {
+    status.innerHTML = "Request failed: " + e.message;
+    status.className = "status-line err";
+  }
+  btn.disabled = false;
+}
+
+// Columns whose value should be colored green/red by sign -- makes a
+// scan of insider $ / debt % results scannable at a glance rather than
+// needing to read every number.
+const SIGNED_COLUMNS = new Set(["Insider Net $", "Debt Change %", "Debt Change $"]);
+
+function renderResults(data) {
+  const rows = data.results || [];
+  const wrap = document.getElementById("table-wrap");
+  if (!rows.length) {
+    wrap.innerHTML = '<div class="empty">No matches for the current filters.</div>';
+    return;
+  }
+  const cols = (data.result_columns && data.result_columns.length)
+    ? data.result_columns
+    : [{label: "Symbol", expr: "symbol"}, {label: "Price", expr: "close[1d]"}];
+
+  let html = "<table><thead><tr>";
+  cols.forEach(c => html += `<th>${c.label}</th>`);
+  html += "</tr></thead><tbody>";
+  rows.forEach(r => {
+    const rc = r._result_columns || {};
+    html += "<tr>";
+    cols.forEach(c => {
+      let v = rc[c.label];
+      if (v === undefined || v === null) v = (c.expr === "symbol" ? (r.symbol || "") : "—");
+      let cls = "";
+      if (SIGNED_COLUMNS.has(c.label) && typeof v === "number") {
+        cls = v > 0 ? "pos" : (v < 0 ? "neg" : "");
+      }
+      html += `<td class="${cls}">${v}</td>`;
+    });
+    html += "</tr>";
+  });
+  html += "</tbody></table>";
+  wrap.innerHTML = html;
+}
+
+loadWatchlists();
+</script>
+</body>
+</html>

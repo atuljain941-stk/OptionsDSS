@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Minervini SEPA Scanner</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1500px;margin:0 auto;padding:18px}
+    .hero{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}.hero p{margin:0;color:var(--muted,var(--muted2));font-size:13px;line-height:1.45;max-width:900px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:14px;margin-bottom:12px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+    label{display:block;margin-bottom:4px;font-size:11px;color:var(--muted,var(--muted2));font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+    select,input{padding:8px 10px;border:1px solid var(--border,var(--border2));background:var(--bg,#0b1020);color:var(--text,var(--text2));border-radius:8px;font-size:13px}
+    input[type=number]{width:90px}
+    .symbol-input{width:140px;text-transform:uppercase}
+    .btn{padding:9px 18px;border:none;border-radius:8px;font-weight:900;cursor:pointer;font-size:13px}
+    .btn:hover{opacity:.88}.btn:disabled{opacity:.5;cursor:not-allowed}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-ghost{background:rgba(255,255,255,.06);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2))}
+    .muted{color:var(--muted,var(--muted2))}.tiny{font-size:11px}.small{font-size:12px}
+    .step-card{border:1px solid var(--border,var(--border2));border-radius:10px;padding:12px;margin-bottom:10px;background:rgba(255,255,255,.02)}
+    .step-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+    .step-head input[type=checkbox]{width:16px;height:16px}
+    .step-head .title{font-size:14px;font-weight:900}
+    .step-head .desc{font-size:11px;color:var(--muted,var(--muted2));margin-left:auto}
+    .step-params{display:flex;gap:14px;flex-wrap:wrap;padding-left:26px}
+    .param{display:flex;flex-direction:column;gap:2px}
+    .param .plabel{font-size:10px;color:var(--muted,var(--muted2));text-transform:uppercase;letter-spacing:.03em}
+    .step-disabled .step-params{opacity:.35;pointer-events:none}
+    .badge{display:inline-block;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:900;border:1px solid transparent;text-transform:uppercase;letter-spacing:.03em}
+    .badge-purple{background:#a78bfa22;color:#c084fc;border-color:#a78bfa44}
+    .badge-amber{background:#f59e0b22;color:#fbbf24;border-color:#f59e0b55}
+    #summary-bar{display:none;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+    .sum-chip{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:9px;padding:9px 14px;min-width:90px;text-align:center}
+    .sum-chip .val{font-size:20px;font-weight:950;line-height:1}
+    .sum-chip .lbl{font-size:10px;color:var(--muted,var(--muted2));margin-top:2px;text-transform:uppercase;letter-spacing:.05em}
+    .table-wrap{margin-top:12px;overflow:auto}
+    .table-wrap table{width:100%;border-collapse:collapse;font-size:12px}
+    .table-wrap th,.table-wrap td{padding:8px;border-bottom:1px solid var(--border,var(--border2));text-align:left;vertical-align:top;white-space:nowrap}
+    .table-wrap th{font-size:10px;color:var(--muted,var(--muted2));text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;background:var(--card,var(--bg2))}
+    .empty{padding:28px;text-align:center;color:var(--muted,var(--muted2))}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .status-line{margin-top:8px;color:var(--muted,var(--muted2));font-size:11px}
+    .err{color:#f87171}.ok{color:#22c55e}
+    .query-box{margin-top:10px;padding:9px;border-left:3px solid var(--border,var(--border2));background:rgba(255,255,255,.025);border-radius:6px;font-size:11px;line-height:1.5;color:#cbd5e1;font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+    @media(max-width:720px){.step-params{padding-left:0}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <div>
+      <div class="tiny muted" style="margin-bottom:4px">v1.0 · Stocks only -- equity structure + fundamentals, not for MGC/GC futures</div>
+      <h1>🏆 Minervini SEPA Scanner</h1>
+      <p>Minervini's Trend Template + VCP + fundamentals + breakout trigger, as four independently toggleable steps. Turn a step off to use this as a plain screener for just that step, or run all four for the full SEPA pipeline.</p>
+    </div>
+    <span class="badge badge-purple">Stocks / SEPA</span>
+  </div>
+
+  <div class="card controls">
+    <div class="row">
+      <div>
+        <label>Watchlist</label>
+        <select id="wl" style="min-width:230px"><option value="">All symbols</option></select>
+      </div>
+      <div>
+        <label>Optional Symbol Override (CSV)</label>
+        <input id="symbol" class="symbol-input" placeholder="AAPL,NVDA,MSFT"/>
+      </div>
+      <div><label>Max Results</label><input id="limit" type="number" value="100" min="1" max="250"/></div>
+      <div style="display:flex;gap:8px;align-items:flex-end">
+        <button class="btn btn-primary" id="run-btn" onclick="runScan()">🔍 Run Scan</button>
+        <button class="btn btn-ghost" onclick="clearResults()">Clear</button>
+      </div>
+    </div>
+    <div id="status" class="status-line">Configure steps below, then run. Leave symbol blank to scan the selected watchlist.</div>
+  </div>
+
+  <!-- STEP 1: Trend Template -->
+  <div class="card step-card" id="step-trend_template">
+    <div class="step-head">
+      <input type="checkbox" id="tt-enabled" checked onchange="toggleStep('trend_template')"/>
+      <span class="title">1. Trend Template (structural)</span>
+      <span class="desc">Price/50/150/200D MA stack, rising 200D MA, 52w range position, RS rank</span>
+    </div>
+    <div class="step-params">
+      <div class="param"><span class="plabel">Min RS Rank</span><input type="number" id="tt-rs_rank_min" value="70" min="0" max="99"/></div>
+      <div class="param"><span class="plabel">Min % Above 52w Low</span><input type="number" id="tt-pct_above_low_min" value="30" min="0" max="500"/></div>
+      <div class="param"><span class="plabel">Max % Below 52w High</span><input type="number" id="tt-pct_below_high_max" value="25" min="0" max="100"/></div>
+      <div class="param"><span class="plabel">200D Slope Window (bars)</span><input type="number" id="tt-slope_lookback_bars" value="21" min="5" max="120"/></div>
+    </div>
+  </div>
+
+  <!-- STEP 2: VCP -->
+  <div class="card step-card" id="step-vcp">
+    <div class="step-head">
+      <input type="checkbox" id="vcp-enabled" checked onchange="toggleStep('vcp')"/>
+      <span class="title">2. VCP / Volatility Contraction (pattern)</span>
+      <span class="desc">ATR + range compression with volume drying up</span>
+    </div>
+    <div class="step-params">
+      <div class="param"><span class="plabel">ATR Compression &lt;</span><input type="number" id="vcp-atr_compression_max" value="70" min="0" max="100"/></div>
+      <div class="param"><span class="plabel">Range Compression &lt;</span><input type="number" id="vcp-range_compression_max" value="70" min="0" max="100"/></div>
+      <div class="param"><span class="plabel">Volume Dryup &lt;</span><input type="number" id="vcp-volume_dryup_max" value="70" min="0" max="100"/></div>
+    </div>
+  </div>
+
+  <!-- STEP 3: Financials -->
+  <div class="card step-card" id="step-financials">
+    <div class="step-head">
+      <input type="checkbox" id="fin-enabled" checked onchange="toggleStep('financials')"/>
+      <span class="title">3. Financials (fundamentals)</span>
+      <span class="desc">EPS/revenue growth, analyst revision trend, optional max P/E</span>
+    </div>
+    <div class="step-params">
+      <div class="param"><span class="plabel">Min EPS Growth %</span><input type="number" id="fin-eps_growth_min" value="20" min="-100" max="500"/></div>
+      <div class="param"><span class="plabel">Min Revenue Growth %</span><input type="number" id="fin-revenue_growth_min" value="15" min="-100" max="500"/></div>
+      <div class="param"><span class="plabel">Max P/E (blank = no limit)</span><input type="number" id="fin-pe_max" placeholder="none" min="0" max="500"/></div>
+      <div class="param">
+        <span class="plabel">EPS Revisions</span>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;text-transform:none;letter-spacing:0">
+          <input type="checkbox" id="fin-require_eps_not_falling" checked style="width:14px;height:14px"/> Exclude "FALLING"
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 4: Breakout Trigger -->
+  <div class="card step-card step-disabled" id="step-breakout">
+    <div class="step-head">
+      <input type="checkbox" id="bo-enabled" onchange="toggleStep('breakout')"/>
+      <span class="title">4. Breakout Trigger (execution)</span>
+      <span class="desc">Off by default -- flip on when hunting the actual entry day, not for the daily watchlist</span>
+      <span class="badge badge-amber">Optional</span>
+    </div>
+    <div class="step-params">
+      <div class="param"><span class="plabel">Resistance Lookback (bars)</span><input type="number" id="bo-resistance_bars" value="20" min="5" max="100"/></div>
+      <div class="param"><span class="plabel">Volume Expansion (x avg)</span><input type="number" id="bo-volume_expansion_mult" value="1.5" min="1" max="10" step="0.1"/></div>
+      <div class="param"><span class="plabel">Max Slope (deg/bar)</span><input type="number" id="bo-max_slope_deg_per_bar" value="35" min="5" max="90"/></div>
+    </div>
+  </div>
+
+  <div id="summary-bar">
+    <div class="sum-chip"><div class="val" id="sum-returned">0</div><div class="lbl">Matches</div></div>
+    <div class="sum-chip"><div class="val" id="sum-scanned">0</div><div class="lbl">Scanned</div></div>
+    <div class="sum-chip"><div class="val" id="sum-time">—</div><div class="lbl">Seconds</div></div>
+  </div>
+
+  <div class="card" id="results-card">
+    <div class="table-wrap" id="table-wrap">
+      <div class="empty">No results yet. Configure steps above and click Run Scan.</div>
+    </div>
+    <div class="query-box" id="query-box" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+const STEPS = ["trend_template", "vcp", "financials", "breakout"];
+const PREFIX = {trend_template: "tt", vcp: "vcp", financials: "fin", breakout: "bo"};
+
+function toggleStep(step) {
+  const enabled = document.getElementById(PREFIX[step] + "-enabled").checked;
+  document.getElementById("step-" + step).classList.toggle("step-disabled", !enabled);
+}
+
+async function loadWatchlists() {
+  try {
+    const resp = await fetch("/scanner-builder/api/watchlists");
+    const data = await resp.json();
+    const sel = document.getElementById("wl");
+    (data.watchlists || []).forEach(w => {
+      const opt = document.createElement("option");
+      opt.value = w.id;
+      opt.textContent = w.name || ("Watchlist " + w.id);
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    console.warn("Could not load watchlists", e);
+  }
+}
+
+function collectSteps() {
+  const steps = {};
+  steps.trend_template = {
+    enabled: document.getElementById("tt-enabled").checked,
+    rs_rank_min: Number(document.getElementById("tt-rs_rank_min").value),
+    pct_above_low_min: Number(document.getElementById("tt-pct_above_low_min").value),
+    pct_below_high_max: Number(document.getElementById("tt-pct_below_high_max").value),
+    slope_lookback_bars: Number(document.getElementById("tt-slope_lookback_bars").value),
+  };
+  steps.vcp = {
+    enabled: document.getElementById("vcp-enabled").checked,
+    atr_compression_max: Number(document.getElementById("vcp-atr_compression_max").value),
+    range_compression_max: Number(document.getElementById("vcp-range_compression_max").value),
+    volume_dryup_max: Number(document.getElementById("vcp-volume_dryup_max").value),
+  };
+  const peRaw = document.getElementById("fin-pe_max").value;
+  steps.financials = {
+    enabled: document.getElementById("fin-enabled").checked,
+    eps_growth_min: Number(document.getElementById("fin-eps_growth_min").value),
+    revenue_growth_min: Number(document.getElementById("fin-revenue_growth_min").value),
+    require_eps_not_falling: document.getElementById("fin-require_eps_not_falling").checked,
+    pe_max: peRaw === "" ? null : Number(peRaw),
+  };
+  steps.breakout = {
+    enabled: document.getElementById("bo-enabled").checked,
+    resistance_bars: Number(document.getElementById("bo-resistance_bars").value),
+    volume_expansion_mult: Number(document.getElementById("bo-volume_expansion_mult").value),
+    max_slope_deg_per_bar: Number(document.getElementById("bo-max_slope_deg_per_bar").value),
+  };
+  return steps;
+}
+
+function clearResults() {
+  document.getElementById("table-wrap").innerHTML = '<div class="empty">No results yet. Configure steps above and click Run Scan.</div>';
+  document.getElementById("summary-bar").style.display = "none";
+  document.getElementById("query-box").style.display = "none";
+  document.getElementById("status").innerHTML = "Configure steps below, then run.";
+  document.getElementById("status").className = "status-line";
+}
+
+async function runScan() {
+  const btn = document.getElementById("run-btn");
+  const status = document.getElementById("status");
+  btn.disabled = true;
+  status.innerHTML = '<span class="spinner"></span> Running scan...';
+  status.className = "status-line";
+
+  const steps = collectSteps();
+  const anyEnabled = STEPS.some(s => steps[s].enabled);
+  if (!anyEnabled) {
+    status.innerHTML = "Enable at least one step.";
+    status.className = "status-line err";
+    btn.disabled = false;
+    return;
+  }
+
+  const wl = document.getElementById("wl").value;
+  const symbol = document.getElementById("symbol").value.trim();
+  const limit = Number(document.getElementById("limit").value || 100);
+
+  const body = { steps, limit };
+  if (wl) body.watchlist_id = wl;
+  if (symbol) body.symbol = symbol;
+
+  const t0 = performance.now();
+  try {
+    const resp = await fetch("/minervini-scanner/api/run", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+    if (data.error) {
+      status.innerHTML = "Error: " + data.error;
+      status.className = "status-line err";
+      btn.disabled = false;
+      return;
+    }
+
+    renderResults(data);
+    document.getElementById("sum-returned").textContent = data.count ?? (data.results || []).length;
+    document.getElementById("sum-scanned").textContent = (data.summary && data.summary.scanned) || "—";
+    document.getElementById("sum-time").textContent = elapsed;
+    document.getElementById("summary-bar").style.display = "flex";
+
+    const qbox = document.getElementById("query-box");
+    qbox.style.display = "block";
+    qbox.textContent = data.query_text || "";
+
+    status.innerHTML = `Done in ${elapsed}s -- ${data.count ?? (data.results||[]).length} match(es).`;
+    status.className = "status-line ok";
+  } catch (e) {
+    status.innerHTML = "Request failed: " + e.message;
+    status.className = "status-line err";
+  }
+  btn.disabled = false;
+}
+
+function renderResults(data) {
+  const rows = data.results || [];
+  const wrap = document.getElementById("table-wrap");
+  if (!rows.length) {
+    wrap.innerHTML = '<div class="empty">No matches for the current step settings.</div>';
+    return;
+  }
+  const cols = (data.result_columns && data.result_columns.length)
+    ? data.result_columns
+    : [{label: "Symbol", expr: "symbol"}, {label: "Price", expr: "close[1d]"}];
+
+  let html = "<table><thead><tr>";
+  cols.forEach(c => html += `<th>${c.label}</th>`);
+  html += "</tr></thead><tbody>";
+  rows.forEach(r => {
+    const rc = r._result_columns || {};
+    html += "<tr>";
+    cols.forEach(c => {
+      let v = rc[c.label];
+      if (v === undefined || v === null) v = (c.expr === "symbol" ? (r.symbol || "") : "—");
+      html += `<td>${v}</td>`;
+    });
+    html += "</tr>";
+  });
+  html += "</tbody></table>";
+  wrap.innerHTML = html;
+}
+
+loadWatchlists();
+</script>
+</body>
+</html>

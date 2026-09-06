@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Scanner Primitives Guide</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1300px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:1000px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:14px}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    input[type=text],select{padding:8px 10px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:8px;font-size:12px}
+    .muted{color:var(--muted,var(--muted2))}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .status-err{color:#f87171;font-size:12px}
+    .cat-section{margin-bottom:8px}
+    .cat-header{font-size:13px;font-weight:900;color:#818cf8;text-transform:uppercase;letter-spacing:.04em;padding:10px 0 6px;border-bottom:1px solid rgba(129,140,248,.25);margin-top:10px;cursor:pointer;user-select:none}
+    .cat-header:hover{color:#a5b4fc}
+    .cat-count{color:var(--muted,var(--muted2));font-weight:600;font-size:11px}
+    .prim-row{padding:10px 4px;border-bottom:1px solid rgba(255,255,255,.05)}
+    .prim-name{font-weight:900;font-size:13.5px;color:#e5e7eb}
+    .prim-sig{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#4ade80;background:rgba(74,222,128,.08);padding:2px 8px;border-radius:5px;display:inline-block;margin-top:3px}
+    .prim-desc{font-size:12.5px;line-height:1.55;color:var(--muted,var(--muted2));margin-top:6px}
+    .prim-params{margin-top:8px;display:flex;flex-direction:column;gap:4px}
+    .prim-param-row{display:flex;align-items:center;gap:8px;font-size:11.5px;padding:3px 8px;background:rgba(255,255,255,.03);border-radius:4px}
+    .prim-param-name{font-family:ui-monospace,Menlo,Consolas,monospace;color:#e5e7eb;font-weight:700;min-width:90px}
+    .prim-param-badge{font-size:9.5px;text-transform:uppercase;padding:1px 6px;border-radius:3px;font-weight:800}
+    .prim-param-badge.required{background:rgba(248,113,113,.15);color:#f87171}
+    .prim-param-badge.optional{background:rgba(74,222,128,.15);color:#4ade80}
+    .prim-param-default{color:var(--muted,var(--muted2));font-size:11px}
+    .prim-examples{margin-top:8px;padding:8px 10px;background:rgba(99,102,241,.06);border-left:2px solid #6366f1;border-radius:0 6px 6px 0}
+    .prim-example-label{font-size:10px;text-transform:uppercase;color:#818cf8;font-weight:800;margin-bottom:4px}
+    .prim-example-item{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;color:#e5e7eb;padding:3px 0}
+    .prim-example-name{color:var(--muted,var(--muted2));font-family:system-ui,sans-serif;font-size:11px}
+    .hidden{display:none}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>📖 Scanner Primitives Guide</h1>
+    <p>Live reference generated directly from Scanner Builder's own primitive registry (the same list powering its autocomplete) — not a separate hand-maintained copy, so it can't go stale the way a written-once guide does. Every name/signature/description below is exactly what the interpreter actually accepts. Where a primitive appears in one of the app's real built-in scanner queries, that usage is shown as a genuine, working example — not an invented one.</p>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <input type="text" id="search-input" placeholder="Search by name, signature, or description..." style="width:340px" oninput="renderPrimitives()"/>
+      <span class="muted" style="font-size:12px" id="count-label"></span>
+      <button onclick="expandAll(true)" style="font-size:11px;padding:5px 10px;border-radius:6px;background:rgba(255,255,255,.06);border:1px solid var(--border,var(--border2));color:var(--muted,var(--muted2));cursor:pointer">Expand all categories</button>
+      <button onclick="expandAll(false)" style="font-size:11px;padding:5px 10px;border-radius:6px;background:rgba(255,255,255,.06);border:1px solid var(--border,var(--border2));color:var(--muted,var(--muted2));cursor:pointer">Collapse all</button>
+    </div>
+  </div>
+
+  <div id="status" class="card muted">Loading live primitive catalog…</div>
+  <div id="results-body"></div>
+</div>
+
+<script>
+let allPrimitives = [];
+let builtinScanners = [];
+
+// No category field exists on the primitive registry itself -- this is
+// a client-side organizational aid based on keyword-matching each
+// primitive's own name, not a claim of official categories. Anything
+// that doesn't match lands in "Other" rather than being force-fit.
+const CATEGORY_RULES = [
+  { label: "Options Walls & OI", keywords: ["wall", "oichange", "oi", "pcr", "openinterest", "gex", "gamma"] },
+  { label: "Technical Indicators", keywords: ["rsi", "ema", "sma", "macd", "atr", "adx", "bollinger", "stoch"] },
+  { label: "Crosses, Lookback & Time", keywords: ["cross", "lookback", "shift", "priorday", "between", "changepct"] },
+  { label: "Support / Resistance", keywords: ["support", "resistance", "pivot", "breakout"] },
+  { label: "UAE Framework", keywords: ["uae"] },
+  { label: "Relative Strength / Sector", keywords: ["relativestrength", "rsrank", "sectorrs", "sector", "leadership", "beta"] },
+  { label: "Fundamentals", keywords: ["pe(", "profitmargin", "revenuegrowth", "earningsgrowth", "analyst", "marketcap", "dividend"] },
+  { label: "Weekly / Flow Composite", keywords: ["flow", "weekly"] },
+  { label: "Price Action / Candles", keywords: ["candle", "engulf", "doji", "hammer", "pattern", "gap"] },
+  { label: "Earnings", keywords: ["earnings", "earn"] },
+];
+
+function categorize(name) {
+  const n = name.toLowerCase();
+  for (const rule of CATEGORY_RULES) {
+    if (rule.keywords.some(kw => n.includes(kw))) return rule.label;
+  }
+  return "Other";
+}
+
+function findExamples(primName) {
+  // Genuine usage, not invented -- searches the app's own real built-in
+  // scanner query_text strings for this primitive actually being called
+  // (name followed by an opening paren, case-insensitive).
+  const re = new RegExp('\\b' + primName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\(', 'i');
+  return builtinScanners.filter(s => re.test(s.query_text));
+}
+
+function expandAll(open) {
+  document.querySelectorAll('.cat-body').forEach(el => el.classList.toggle('hidden', !open));
+}
+
+function toggleCat(id) {
+  document.getElementById(id).classList.toggle('hidden');
+}
+
+function parseParameters(signature) {
+  // Best-effort parser, not a formal grammar -- these signatures follow
+  // a consistent enough style ("Name(param1, param2=default[, optional3])")
+  // that this handles the common cases well. Falls back to an empty
+  // list (raw signature stays visible regardless, this is purely
+  // additive) rather than guessing wrong on an edge case -- wrapped
+  // defensively so a signature this can't parse cleanly never breaks
+  // the page, just skips the per-parameter table for that one primitive.
+  //
+  // The [...] brackets in these signatures mark "everything from here
+  // is optional", not a grouping -- e.g. ATR([period=14[, timeframe]])
+  // means period is optional (default 14) AND timeframe is separately
+  // optional after it, not "period and timeframe are one nested unit".
+  // Verified against real signatures before trusting this: an earlier
+  // version that only split on bracket-depth-0 commas merged "period"
+  // and "timeframe" into one malformed entry for exactly this pattern --
+  // caught by testing against the actual signature strings this app
+  // uses, not just assumed to work from reading the parsing logic.
+  try {
+    const open = signature.indexOf("(");
+    if (open === -1) return [];
+    let depth = 0, close = -1;
+    for (let i = open; i < signature.length; i++) {
+      if (signature[i] === "(") depth++;
+      else if (signature[i] === ")") { depth--; if (depth === 0) { close = i; break; } }
+    }
+    if (close === -1) return [];
+    const inner = signature.slice(open + 1, close).trim();
+    if (!inner) return [];
+    const parts = [];
+    let buf = "", bracketDepth = 0, bufWasOptional = false;
+    for (const ch of inner) {
+      if (ch === "[") { bracketDepth++; continue; }
+      if (ch === "]") { bracketDepth--; continue; }
+      if (ch === ",") {
+        parts.push({text: buf, optional: bufWasOptional});
+        buf = ""; bufWasOptional = false;
+      } else {
+        buf += ch;
+        if (bracketDepth > 0) bufWasOptional = true;
+      }
+    }
+    if (buf.trim()) parts.push({text: buf, optional: bufWasOptional});
+    return parts.map(({text, optional}) => {
+      const clean = text.trim();
+      const eq = clean.indexOf("=");
+      const name = (eq === -1 ? clean : clean.slice(0, eq)).trim();
+      const def = eq === -1 ? null : clean.slice(eq + 1).trim();
+      return {name, default: def, optional: optional || def !== null};
+    }).filter(p => p.name);
+  } catch (e) {
+    return [];
+  }
+}
+
+function renderPrimitives() {
+  const q = document.getElementById('search-input').value.trim().toLowerCase();
+  const filtered = q
+    ? allPrimitives.filter(p => p.name.toLowerCase().includes(q) || p.signature.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q))
+    : allPrimitives;
+
+  document.getElementById('count-label').textContent = `${filtered.length} of ${allPrimitives.length} primitives`;
+
+  const byCategory = {};
+  filtered.forEach(p => {
+    const cat = categorize(p.name);
+    (byCategory[cat] = byCategory[cat] || []).push(p);
+  });
+  const orderedCats = [...CATEGORY_RULES.map(r => r.label), "Other"].filter(c => byCategory[c] && byCategory[c].length);
+
+  const html = orderedCats.map(cat => {
+    const items = byCategory[cat].sort((a, b) => a.name.localeCompare(b.name));
+    const bodyId = 'cat-' + cat.replace(/[^a-zA-Z0-9]/g, '-');
+    const rows = items.map(p => {
+      const examples = findExamples(p.name);
+      const exHtml = examples.length ? `
+        <div class="prim-examples">
+          <div class="prim-example-label">Used in ${examples.length} real built-in scanner${examples.length > 1 ? 's' : ''}</div>
+          ${examples.slice(0, 3).map(ex => `<div class="prim-example-item">${ex.query_text} <span class="prim-example-name">— "${ex.name}"</span></div>`).join("")}
+        </div>` : '';
+      const params = parseParameters(p.signature);
+      const paramsHtml = params.length ? `
+        <div class="prim-params">
+          ${params.map(pr => `<div class="prim-param-row">
+            <span class="prim-param-name">${pr.name}</span>
+            <span class="prim-param-badge ${pr.optional ? 'optional' : 'required'}">${pr.optional ? 'optional' : 'required'}</span>
+            ${pr.default !== null ? `<span class="prim-param-default">default: ${pr.default}</span>` : ''}
+          </div>`).join("")}
+        </div>` : '';
+      return `<div class="prim-row">
+        <div class="prim-name">${p.name}</div>
+        <div class="prim-sig">${p.signature}</div>
+        <div class="prim-desc">${p.description || ''}</div>
+        ${paramsHtml}
+        ${exHtml}
+      </div>`;
+    }).join("");
+    return `<div class="cat-section">
+      <div class="cat-header" onclick="toggleCat('${bodyId}')">${cat} <span class="cat-count">(${items.length})</span></div>
+      <div id="${bodyId}" class="cat-body${q ? '' : ' hidden'}">${rows}</div>
+    </div>`;
+  }).join("");
+
+  document.getElementById('results-body').innerHTML = `<div class="card">${html || '<div class="muted">No primitives match this search.</div>'}</div>`;
+  if (q) expandAll(true);  // auto-expand matching categories while searching
+}
+
+async function loadCatalog() {
+  const status = document.getElementById('status');
+  try {
+    const resp = await fetch('/scanner-builder/api/function_catalog');
+    const d = await resp.json();
+    allPrimitives = d.function_meta || [];
+    builtinScanners = d.builtin_scanners || [];
+    status.remove();
+    renderPrimitives();
+  } catch (e) {
+    status.innerHTML = `<span class="status-err">Failed to load live catalog: ${e.message}</span>`;
+  }
+}
+
+loadCatalog();
+</script>
+</body>
+</html>

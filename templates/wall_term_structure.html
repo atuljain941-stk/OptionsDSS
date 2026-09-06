@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Wall Term Structure</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1600px;margin:0 auto;padding:18px}
+    .hero{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0;color:var(--muted,var(--muted2));font-size:13px;line-height:1.45;max-width:920px}
+    .badge{display:inline-block;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:900;border:1px solid transparent;text-transform:uppercase;letter-spacing:.03em}
+    .badge-purple{background:#a78bfa22;color:#c084fc;border-color:#a78bfa44}
+    .ctrl-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:12px 14px;margin-bottom:14px}
+    label{font-size:11px;color:var(--muted,var(--muted2));font-weight:800;text-transform:uppercase;letter-spacing:.03em}
+    input,select{padding:7px 9px;border:1px solid var(--border,var(--border2));background:var(--bg,#0b1020);color:var(--text,var(--text2));border-radius:8px;font-size:13px}
+    .symbol-input{width:90px;text-transform:uppercase}
+    .btn{padding:9px 18px;border:none;border-radius:8px;font-weight:900;cursor:pointer;font-size:13px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:14px;margin-bottom:14px}
+    .chart-row{display:flex;flex-direction:column;gap:14px}
+    .chart-row-top{display:flex;gap:14px;flex-wrap:wrap}
+    .chart-row-top>.card{flex:1;min-width:340px}
+    .resizable-card{resize:both;overflow:hidden;min-height:320px;min-width:340px;max-width:100%;display:flex;flex-direction:column}
+    .resizable-card>div{flex:1;min-height:0}
+    .idea-card{border-left:4px solid transparent;margin-bottom:8px;padding:10px 12px}
+    .idea-High{border-left-color:#4ade80}
+    .idea-Medium{border-left-color:#fbbf24}
+    .idea-Low{border-left-color:#64748b}
+    .conf-badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:900}
+    .conf-badge-High{background:#22c55e22;color:#4ade80}
+    .conf-badge-Medium{background:#f59e0b22;color:#fbbf24}
+    .conf-badge-Low{background:rgba(255,255,255,.06);color:#94a3b8}
+    .card-title{font-size:14px;font-weight:900;margin-bottom:8px}
+    .muted{color:var(--muted,var(--muted2))}
+    .narrative{font-size:13px;line-height:1.6;margin-bottom:10px}
+    .findings{font-size:12px;line-height:1.7;padding-left:18px;margin:0 0 12px}
+    .trade-ideas{background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:10px;padding:10px 14px;font-size:12px;line-height:1.7}
+    .trade-ideas ul{margin:4px 0 0;padding-left:18px}
+    .disclaimer{font-size:11px;color:#fbbf24;margin-top:10px;line-height:1.5}
+    .flag-pill{display:inline-block;padding:3px 9px;border-radius:999px;font-size:10px;font-weight:800;margin:2px 4px 2px 0}
+    .flag-on{background:#22c55e22;color:#4ade80}
+    .flag-off{background:rgba(255,255,255,.05);color:var(--muted,var(--muted2))}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+    th,td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left}
+    th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <div>
+      <div class="tiny muted" style="margin-bottom:4px;font-size:11px">v1.0 · reuses the existing wall-scoring engine (spy_strategies._walls) across N expiries, no new OI fetch</div>
+      <h1>🧱 Wall Term Structure</h1>
+      <p>Wall term structure and OI-change side by side (same strikes/expiries), price chart below, and top trade ideas for the nearest and outermost expiry checked — walls that are large <i>and</i> freshly building carry more weight than large-but-unwinding ones.</p>
+    </div>
+    <span class="badge badge-purple">Wall Term Structure</span>
+  </div>
+
+  <div class="ctrl-bar">
+    <label>Symbol</label>
+    <input type="text" id="wts-symbol" class="symbol-input" value="SPY"/>
+    <label># Expiries</label>
+    <input type="number" id="wts-num-exp" value="6" min="2" max="12" style="width:60px"/>
+    <label>Walls/side</label>
+    <input type="number" id="wts-side" value="3" min="1" max="8" style="width:52px"/>
+    <label># Strikes/side</label>
+    <input type="number" id="wts-num-strikes" value="12" min="3" max="50" style="width:56px" title="Limits the OI-change chart to this many strikes above and below spot -- default 12 covers a ~12-25pt range depending on strike spacing, well beyond typical daily moves."/>
+    <label style="display:flex;align-items:center;gap:5px;cursor:pointer" title="When off, OI-change values only show on hover instead of always sitting on the chart -- default off to keep the chart readable with many bars close together.">
+      <input type="checkbox" id="wts-show-labels" onchange="loadTermStructure()"/> Show OI-Δ labels
+    </label>
+    <button class="btn btn-primary" onclick="loadTermStructure()">Analyze</button>
+    <span id="wts-status" class="muted tiny" style="font-size:11px"></span>
+  </div>
+
+  <div id="wts-content">
+    <div class="card"><div class="spinner"></div> Enter a symbol and click Analyze.</div>
+  </div>
+</div>
+
+<script>
+function fmtNum(v, d=2) { if (v === null || v === undefined) return "—"; return Number(v).toFixed(d); }
+
+function renderAnalysis(a) {
+  const flagLabels = {
+    call_converging: "Call walls converging",
+    call_building: "Call wall OI building",
+    near_term_put_pressure: "Near-term put pressure",
+    near_term_call_pressure: "Near-term call pressure",
+  };
+  const flagsHtml = Object.entries(a.flags).map(([k, v]) =>
+    `<span class="flag-pill ${v ? 'flag-on' : 'flag-off'}">${v ? '✓' : '·'} ${flagLabels[k] || k}</span>`
+  ).join("");
+  const findingsHtml = (a.findings || []).map(f => `<li>${f}</li>`).join("");
+  const ideasHtml = (a.trade_ideas || []).map(t => `<li>${t}</li>`).join("");
+  return `
+    <div class="card">
+      <div class="card-title">Term Structure Read</div>
+      <div style="margin-bottom:10px">${flagsHtml}</div>
+      <div class="narrative">${a.narrative}</div>
+      ${findingsHtml ? `<ul class="findings">${findingsHtml}</ul>` : ""}
+      ${ideasHtml ? `<div class="trade-ideas"><b>Worth evaluating:</b><ul>${ideasHtml}</ul></div>` : ""}
+      <div class="disclaimer">⚠️ ${a.disclaimer}</div>
+    </div>`;
+}
+
+function renderExpiryTable(expiries) {
+  const rows = expiries.map(p => {
+    const c = p.top_call_wall, pu = p.top_put_wall;
+    return `<tr>
+      <td>${p.expiry} (${p.dte}d)</td>
+      <td>${c ? `${c.strike} (${c.pct_from_spot > 0 ? '+' : ''}${fmtNum(c.pct_from_spot)}%, OI ${c.oi?.toLocaleString()||'—'})` : '—'}</td>
+      <td>${pu ? `${pu.strike} (${pu.pct_from_spot > 0 ? '+' : ''}${fmtNum(pu.pct_from_spot)}%, OI ${pu.oi?.toLocaleString()||'—'})` : '—'}</td>
+      <td>${p.gamma_wall ?? '—'}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="card">
+      <div class="card-title">Per-Expiry Walls</div>
+      <table>
+        <thead><tr><th>Expiry</th><th>Top Call Wall</th><th>Top Put Wall</th><th>Gamma Wall</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderCharts(data) {
+  // Price panel: candlestick + EMA20/EMA50 (top) + RSI14 (bottom), same
+  // colors as the main dashboard's price chart (increasing/decreasing
+  // #3b82f6/#ef4444, EMA20 #6366f1, EMA50 #f59e0b) so this reads
+  // consistently with the rest of the app instead of a bare line.
+  const prices = data.prices || [];
+  const dates = prices.map(p => p.date);
+  const open = prices.map(p => +p.open), high = prices.map(p => +p.high),
+        low = prices.map(p => +p.low), close = prices.map(p => +p.close);
+
+  const ema = (arr, n) => { const k = 2/(n+1); let e = arr[0]; return arr.map((v,i) => i ? (e = v*k + e*(1-k)) : v); };
+
+  const rsi14 = (closes, period=14) => {
+    const out = new Array(closes.length).fill(50);
+    if (closes.length < period + 1) return out;
+    let gains = 0, losses = 0;
+    for (let i = 1; i <= period; i++) {
+      const diff = closes[i] - closes[i-1];
+      if (diff >= 0) gains += diff; else losses -= diff;
+    }
+    let avgGain = gains / period, avgLoss = losses / period;
+    out[period] = avgLoss > 0 ? 100 - 100/(1+avgGain/avgLoss) : 100;
+    for (let i = period + 1; i < closes.length; i++) {
+      const diff = closes[i] - closes[i-1];
+      const gain = diff > 0 ? diff : 0, loss = diff < 0 ? -diff : 0;
+      avgGain = (avgGain*(period-1) + gain) / period;
+      avgLoss = (avgLoss*(period-1) + loss) / period;
+      out[i] = avgLoss > 0 ? 100 - 100/(1+avgGain/avgLoss) : 100;
+    }
+    return out;
+  };
+
+  Plotly.newPlot("wts-price-chart", [
+    {type: "candlestick", x: dates, open, high, low, close,
+      increasing: {line: {color: "#3b82f6"}}, decreasing: {line: {color: "#ef4444"}}, name: "Price",
+      xaxis: "x", yaxis: "y"},
+    {x: dates, y: ema(close, 20), mode: "lines", name: "EMA20", line: {color: "#6366f1", width: 1.5}, xaxis: "x", yaxis: "y"},
+    {x: dates, y: ema(close, 50), mode: "lines", name: "EMA50", line: {color: "#f59e0b", width: 1.5}, xaxis: "x", yaxis: "y"},
+    {x: dates, y: rsi14(close), mode: "lines", name: "RSI14", line: {color: "#a78bfa", width: 1.5}, xaxis: "x2", yaxis: "y2"},
+  ], {
+    paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+    font: {color: "#e2e8f0", size: 11},
+    margin: {t:36, l:56, r:20, b:36},
+    title: {text: `${data.symbol} price + EMA20/EMA50 + RSI14 (3mo)`, font: {size: 13}},
+    grid: {rows: 2, columns: 1, subplots: [["xy"], ["xy2"]], roworder: "top to bottom"},
+    xaxis: {gridcolor: "#2a2f42", zerolinecolor: "#2a2f42", rangeslider: {visible: false}, domain: [0, 1], anchor: "y"},
+    yaxis: {gridcolor: "#2a2f42", zerolinecolor: "#2a2f42", domain: [0.32, 1], title: "Price"},
+    xaxis2: {gridcolor: "#2a2f42", zerolinecolor: "#2a2f42", domain: [0, 1], anchor: "y2", matches: "x"},
+    yaxis2: {gridcolor: "#2a2f42", zerolinecolor: "#2a2f42", domain: [0, 0.22], title: "RSI", range: [0, 100]},
+    legend: {orientation: "h", y: 1.08, font: {color: "#e2e8f0"}},
+    shapes: [
+      {type: "line", xref: "paper", x0: 0, x1: 1, yref: "y2", y0: 70, y1: 70, line: {color: "#ef4444", width: 1, dash: "dot"}},
+      {type: "line", xref: "paper", x0: 0, x1: 1, yref: "y2", y0: 30, y1: 30, line: {color: "#22c55e", width: 1, dash: "dot"}},
+    ],
+  }, {responsive: true, displayModeBar: false});
+
+  // Wall term-structure scatter: x = DTE, y = strike, size ~ wall score.
+  // Call = light blue, Put = green (per explicit request -- note this is
+  // NOT the conventional red/green; intentional here).
+  const callX = [], callY = [], callSize = [], callText = [];
+  const putX = [], putY = [], putSize = [], putText = [];
+  data.expiries.forEach(p => {
+    (p.call_walls || []).forEach(w => {
+      callX.push(p.dte); callY.push(w.strike);
+      callSize.push(Math.max(10, Math.min(60, (w.score || 10) * 1.4)));
+      callText.push(`${p.expiry}<br>Call ${w.strike}<br>OI ${w.oi?.toLocaleString()}<br>${w.label||''}`);
+    });
+    (p.put_walls || []).forEach(w => {
+      putX.push(p.dte); putY.push(w.strike);
+      putSize.push(Math.max(10, Math.min(60, (w.score || 10) * 1.4)));
+      putText.push(`${p.expiry}<br>Put ${w.strike}<br>OI ${w.oi?.toLocaleString()}<br>${w.label||''}`);
+    });
+  });
+  const maxDte = Math.max(1, ...data.expiries.map(p => p.dte));
+
+  // Cumulative OI column -- one extra x-position past the last expiry,
+  // sized by TOTAL OI summed across every fetched expiry for that strike
+  // (not wall score, since "cumulative" here means aggregate position
+  // size across the whole term structure, not a per-expiry significance
+  // score that wouldn't mean the same thing summed).
+  // Call and put cumulative diamonds previously shared the exact same
+  // x-position (cumX_pos) -- with strikes often clustered close together
+  // (e.g. 700/705/710/715) and marker sizes up to 60px, that made
+  // genuinely distinct per-strike, per-side diamonds visually merge into
+  // what looked like one aggregated blob even though the underlying
+  // data was already correctly split by strike and type. Small,
+  // deliberate horizontal offset between the two series -- call slightly
+  // left, put slightly right -- keeps them visually separable without
+  // changing the data itself.
+  const cumX_pos = maxDte + 1.5;
+  const cumCallX_pos = cumX_pos - 0.18;
+  const cumPutX_pos = cumX_pos + 0.18;
+  const cumData = data.cumulative_oi || [];
+  const maxCumOi = Math.max(1, ...cumData.map(c => c.total_oi || 0));
+  const cumCallX = [], cumCallY = [], cumCallSize = [], cumCallText = [];
+  const cumPutX = [], cumPutY = [], cumPutSize = [], cumPutText = [];
+  cumData.forEach(c => {
+    const sz = Math.max(10, Math.min(60, (c.total_oi / maxCumOi) * 60));
+    if ((c.type || "").toLowerCase() === "call") {
+      cumCallX.push(cumCallX_pos); cumCallY.push(c.strike); cumCallSize.push(sz);
+      cumCallText.push(`Cumulative (all ${data.expiries.length} expiries)<br>Call ${c.strike}<br>Total OI ${c.total_oi.toLocaleString()}`);
+    } else {
+      cumPutX.push(cumPutX_pos); cumPutY.push(c.strike); cumPutSize.push(sz);
+      cumPutText.push(`Cumulative (all ${data.expiries.length} expiries)<br>Put ${c.strike}<br>Total OI ${c.total_oi.toLocaleString()}`);
+    }
+  });
+
+  Plotly.newPlot("wts-wall-chart", [
+    {x: callX, y: callY, mode: "markers", type: "scatter", name: "Call walls",
+      marker: {color: "#7dd3fc", size: callSize, opacity: 0.8, line: {color: "#0ea5e9", width: 1.5}},
+      text: callText, hoverinfo: "text"},
+    {x: putX, y: putY, mode: "markers", type: "scatter", name: "Put walls",
+      marker: {color: "#4ade80", size: putSize, opacity: 0.8, line: {color: "#16a34a", width: 1.5}},
+      text: putText, hoverinfo: "text"},
+    {x: cumCallX, y: cumCallY, mode: "markers", type: "scatter", name: "Cumulative call OI",
+      marker: {color: "#7dd3fc", size: cumCallSize, opacity: 0.7, line: {color: "#ffffff", width: 2}, symbol: "diamond"},
+      text: cumCallText, hoverinfo: "text"},
+    {x: cumPutX, y: cumPutY, mode: "markers", type: "scatter", name: "Cumulative put OI",
+      marker: {color: "#4ade80", size: cumPutSize, opacity: 0.7, line: {color: "#ffffff", width: 2}, symbol: "diamond"},
+      text: cumPutText, hoverinfo: "text"},
+    {x: [0, cumX_pos + 0.5], y: [data.spot, data.spot], mode: "lines", name: "Spot",
+      line: {color: "#fbbf24", width: 2.5, dash: "dash"}},
+  ], {
+    paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+    font: {color: "#e2e8f0", size: 14},
+    margin: {t:44,l:75,r:25,b:60},
+    title: {text: `${data.symbol} wall term structure (marker size = wall score; ◆ diamonds = cumulative OI, all expiries)`, font:{size:15}},
+    xaxis: {title: {text: "Days to expiry", font:{size:14}}, tickfont:{size:13}, gridcolor: "#2a2f42", zerolinecolor: "#2a2f42",
+            tickvals: [...data.expiries.map(p => p.dte), cumX_pos], ticktext: [...data.expiries.map(p => String(p.dte)), "ALL"]},
+    yaxis: {title: {text: "Strike", font:{size:14}}, tickfont:{size:13}, gridcolor: "#2a2f42", zerolinecolor: "#2a2f42"},
+    legend: {orientation: "h", y: -0.12, font: {color: "#e2e8f0", size: 13}},
+  }, {responsive: true, displayModeBar: false});
+
+  // OI-change chart: diverging horizontal bars anchored at each expiry's
+  // DTE position -- bar extends RIGHT of that position if OI change is
+  // positive (building), LEFT if negative (unwinding), length scaled by
+  // magnitude. Color follows the SAME call=light-blue/put=green scheme as
+  // the wall chart (not build/unwind color) so the two charts read
+  // consistently side by side -- direction is now encoded by which way
+  // the bar points, not by color. Uses the FULL per-strike OI change
+  // (oi_by_strike), not just the wall-filtered subset, so it actually
+  // shows the same build/unwind mix OI Viewer shows for the same expiry.
+  const allChanges = [];
+  data.expiries.forEach(p => (p.oi_by_strike || []).forEach(w => allChanges.push(Math.abs(w.oi_change || 0))));
+  const maxAbsChange = Math.max(1, ...allChanges);
+  const MAX_BAR_WIDTH = 0.42; // fraction of one DTE-unit spacing, keeps bars from crossing into the next expiry column
+
+  const oiBase = [], oiExtent = [], oiY = [], oiColor = [], oiLabel = [], oiHover = [];
+  data.expiries.forEach(p => {
+    (p.oi_by_strike || []).forEach(w => {
+      const chg = w.oi_change || 0;
+      if (!chg) return;
+      const extent = (chg / maxAbsChange) * MAX_BAR_WIDTH;
+      oiBase.push(p.dte); oiExtent.push(extent); oiY.push(w.strike);
+      oiColor.push((w.type || '').toLowerCase() === 'call' ? "#7dd3fc" : "#4ade80");
+      // Always-visible label: just the OI change number, nothing else --
+      // date/strike/type/pct were all being rendered permanently on the
+      // chart before, making it unreadable at a glance. That detail is
+      // still one hover away (oiHover), just not forced onto the chart itself.
+      oiLabel.push(`${chg > 0 ? '+' : ''}${chg.toLocaleString()}`);
+      oiHover.push(`${p.expiry}<br>${w.type || ''} ${w.strike}<br>OI Δ ${chg > 0 ? '+' : ''}${chg.toLocaleString()}` +
+                   (w.oi_change_pct != null ? ` (${w.oi_change_pct > 0 ? '+' : ''}${w.oi_change_pct}%)` : ''));
+    });
+  });
+
+  // Bar thickness: derive from the actual typical strike spacing in this
+  // data (median gap between consecutive distinct strikes) rather than a
+  // guessed constant, so it scales sensibly whether strikes are $1 apart
+  // (many small-price names) or $5 apart (SPY-style).
+  const distinctStrikes = [...new Set(oiY)].sort((a, b) => a - b);
+  const gaps = distinctStrikes.slice(1).map((v, i) => v - distinctStrikes[i]).filter(g => g > 0);
+  gaps.sort((a, b) => a - b);
+  const medianGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 2;
+
+  if (oiBase.length === 0) {
+    // No 2+ distinct daily snapshots yet for any checked expiry, so
+    // _oi_rows() has nothing to diff against -- show exactly what IS
+    // stored per expiry (from the stored_dates diagnostic), PLUS the
+    // actual OI value across those dates for the top strike in each
+    // expiry (sample_strike_history). That second piece is what
+    // actually proves whether this is a real "not enough history yet"
+    // situation or a "the daily fetch is storing identical/duplicate
+    // values under different dates" bug -- if the OI number below is
+    // literally the same across every date, the fetch itself isn't
+    // capturing anything new day to day, which is a different and
+    // deeper problem than this chart alone can fix.
+    const diagRows = data.expiries.map(p => {
+      const dateList = p.stored_dates && p.stored_dates.length ? ` — ${p.stored_dates.join(', ')}` : '';
+      let sampleHtml = '';
+      if (p.sample_strike_history && p.sample_strike_history.length) {
+        const oiValues = p.sample_strike_history.map(h => `${h.date}: ${h.oi.toLocaleString()}`).join(', ');
+        const allSame = new Set(p.sample_strike_history.map(h => h.oi)).size === 1;
+        sampleHtml = `<div style="margin:2px 0 8px;color:${allSame ? '#f87171' : '#4ade80'};font-size:10px">` +
+          `Sample strike ${p.sample_strike_label || ''} OI by date: ${oiValues}` +
+          (allSame ? ' ⚠ identical every date — the fetch may not be capturing fresh data' : ' (values genuinely differ)') +
+          `</div>`;
+      }
+      return `<div style="margin:6px 0"><div>${p.expiry} (${p.dte}d): <b>${p.stored_dates_count ?? '?'}</b> date(s) stored${dateList}</div>${sampleHtml}</div>`;
+    }).join("");
+    document.getElementById("wts-oi-change-chart").innerHTML =
+      '<div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#94a3b8;font-size:14px;padding:20px;overflow-y:auto">' +
+      '<div style="margin-bottom:12px">No OI-change data yet. Actual dates stored right now, plus whether the sample strike\'s OI actually changed across them:</div>' +
+      `<div style="font-size:13px">${diagRows}</div>` +
+      '</div>';
+  } else {
+  const showLabels = document.getElementById("wts-show-labels")?.checked;
+  Plotly.newPlot("wts-oi-change-chart", [
+    {type: "bar", orientation: "h", base: oiBase, x: oiExtent, y: oiY,
+      width: Math.max(0.6, medianGap * 0.78),
+      marker: {color: oiColor, opacity: 0.9, line: {color: "#ffffff44", width: 1.5}},
+      text: showLabels ? oiLabel : undefined, textposition: showLabels ? "outside" : "none",
+      textfont: {size: 16, color: "#f1f5f9"},
+      cliponaxis: false, hovertext: oiHover, hoverinfo: "text", showlegend: false},
+    {x: [0, maxDte], y: [data.spot, data.spot], mode: "lines", name: "Spot",
+      line: {color: "#fbbf24", width: 2.5, dash: "dash"}, showlegend: false},
+  ], {
+    paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+    font: {color: "#e2e8f0", size: 14},
+    margin: {t:44,l:75,r:25,b:60},
+    title: {text: `${data.symbol} OI change by strike (bar right = building, left = unwinding)`, font:{size:16}},
+    xaxis: {title: {text: "Days to expiry", font:{size:14}}, tickfont:{size:13}, gridcolor: "#2a2f42", zerolinecolor: "#2a2f42", range: [-0.5, maxDte + 0.5]},
+    yaxis: {title: {text: "Strike", font:{size:14}}, tickfont:{size:13}, gridcolor: "#2a2f42", zerolinecolor: "#2a2f42"},
+    bargap: 0.15,
+  }, {responsive: true, displayModeBar: false});
+  }
+}
+
+function renderIdeas(data) {
+  if (!data || !data.ideas || !data.ideas.length) {
+    return `<div class="card"><div class="card-title">Top Trade Ideas</div>
+      <div class="muted">${(data && data.note) || "No clear wall-based idea found."}</div></div>`;
+  }
+  const typeLabel = {support_play: "🟢 Support play", resistance_play: "🔴 Resistance play",
+                      breakout_watch: "⚡ Breakout watch", directional_lean: "🧭 Directional lean"};
+  const horizonLabel = {nearest: "Nearest expiry", farthest: "Outermost expiry"};
+  const renderGroup = (horizon, ideas) => {
+    if (!ideas.length) return "";
+    const rows = ideas.map(idea => `
+      <div class="idea-card idea-${idea.confidence_label}">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <b class="tiny" style="font-size:12px">${typeLabel[idea.type] || idea.type}</b>
+          <span class="conf-badge conf-badge-${idea.confidence_label}">${idea.confidence_label} · ${idea.confidence_pct}%</span>
+        </div>
+        <div class="tiny muted" style="font-size:12px;line-height:1.5">${idea.rationale}</div>
+      </div>`).join("");
+    return `<div style="margin-bottom:10px"><div class="tiny" style="font-size:11px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px">${horizonLabel[horizon] || horizon} (${ideas[0].expiry}, ${ideas[0].dte}d)</div>${rows}</div>`;
+  };
+  const nearestIdeas = data.ideas.filter(i => i.horizon === "nearest");
+  const farthestIdeas = data.ideas.filter(i => i.horizon === "farthest");
+  return `
+    <div class="card">
+      <div class="card-title">Top Trade Ideas</div>
+      ${renderGroup("nearest", nearestIdeas)}
+      ${renderGroup("farthest", farthestIdeas)}
+      <div class="disclaimer">⚠️ ${data.disclaimer}</div>
+    </div>`;
+}
+
+async function loadTermStructure() {
+  const symbol = document.getElementById("wts-symbol").value.trim().toUpperCase() || "SPY";
+  const numExp = document.getElementById("wts-num-exp").value || 6;
+  const side = document.getElementById("wts-side").value || 3;
+  const numStrikes = document.getElementById("wts-num-strikes").value || 12;
+  const status = document.getElementById("wts-status");
+  status.textContent = "Loading...";
+  document.getElementById("wts-content").innerHTML = `<div class="card"><div class="spinner"></div> Loading ${symbol}...</div>`;
+  try {
+    const resp = await fetch(`/wall-term-structure/api/read?symbol=${encodeURIComponent(symbol)}&num_expiries=${numExp}&side=${side}&num_strikes=${numStrikes}`);
+    const data = await resp.json();
+    if (data.error) {
+      document.getElementById("wts-content").innerHTML = `<div class="card muted">${data.error}</div>`;
+      status.textContent = "";
+      return;
+    }
+    document.getElementById("wts-content").innerHTML = `
+      <div class="chart-row">
+        <div class="chart-row-top">
+          <div class="card resizable-card" style="height:640px"><div id="wts-wall-chart"></div></div>
+          <div class="card resizable-card" style="height:640px"><div id="wts-oi-change-chart"></div></div>
+        </div>
+        <div class="card"><div id="wts-price-chart" style="height:460px"></div></div>
+      </div>
+      ${renderIdeas(data.trade_ideas)}
+      ${renderAnalysis(data.analysis)}
+      ${renderExpiryTable(data.expiries)}
+    `;
+    renderCharts(data);
+    status.textContent = "Updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("wts-content").innerHTML = `<div class="card muted">Error: ${e.message}</div>`;
+    status.textContent = "";
+  }
+}
+
+// Plotly's own responsive:true reacts to WINDOW resize events, not a CSS
+// `resize` handle being dragged on one specific container -- that drag
+// never fires a window resize event, so without this the chart would
+// stay stuck at its original size while the div around it visibly grows
+// or shrinks. ResizeObserver watches the two resizable chart containers
+// directly and tells Plotly to refit whenever their actual size changes,
+// regardless of what caused it.
+function _wireChartResize(id) {
+  const el = document.getElementById(id);
+  if (!el || el.__resizeWired) return;
+  el.__resizeWired = true;
+  const observer = new ResizeObserver(() => {
+    if (window.Plotly && el.data) Plotly.Plots.resize(el);
+  });
+  observer.observe(el);
+}
+
+loadTermStructure();
+setTimeout(() => { _wireChartResize("wts-wall-chart"); _wireChartResize("wts-oi-change-chart"); }, 500);
+</script>
+</body>
+</html>

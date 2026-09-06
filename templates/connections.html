@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Connections</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1100px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:800px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px}
+    .card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+    .card-head h2{margin:0;font-size:16px;font-weight:900}
+    .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:800}
+    .badge-connected{background:#22c55e22;color:#4ade80}
+    .badge-not-connected{background:#f8717122;color:#f87171}
+    .badge-not-configured{background:rgba(255,255,255,.06);color:#94a3b8}
+    .note{font-size:12.5px;color:var(--muted,var(--muted2));line-height:1.5;margin-bottom:10px}
+    .btn{padding:7px 14px;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:12px;background:#4f46e5;color:#fff}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .test-results{margin-top:10px;font-size:12px}
+    .test-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+    .test-pass{color:#4ade80}.test-fail{color:#f87171}.test-error{color:#f87171}.test-skipped{color:#94a3b8}
+    .spinner{display:inline-block;width:13px;height:13px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .foot-note{margin-top:16px;font-size:11px;color:var(--muted,var(--muted2));line-height:1.6}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>🔌 Connections</h1>
+    <p>Status of every credential-based connection this app uses, in one place. Read-only — checking here never re-authorizes, refreshes, or touches stored credentials. To actually fix a broken connection, use that service's own config page (Schwab config, ICICI page, Signal Notifier settings for Telegram) — this page only tells you which one needs it.</p>
+  </div>
+
+  <div class="grid" id="connections-grid">
+    <div class="card"><div class="spinner"></div> Loading...</div>
+  </div>
+
+  <div class="foot-note">
+    "Configured" (top badges) is a cheap local check — credentials are present. "Run full test" makes a real, non-mutating API call to confirm the connection actually works right now, not just that credentials exist.
+  </div>
+</div>
+
+<script>
+function badgeClass(c) {
+  if (!c.configured) return "badge-not-configured";
+  return c.connected ? "badge-connected" : "badge-not-connected";
+}
+function badgeText(c) {
+  if (!c.configured) return "Not configured";
+  return c.connected ? "Connected" : "Not connected";
+}
+
+function renderCard(key, c) {
+  return `
+    <div class="card" id="card-${key}">
+      <div class="card-head">
+        <h2>${c.label || key}</h2>
+        <span class="badge ${badgeClass(c)}">${badgeText(c)}</span>
+      </div>
+      <div class="note">${c.error ? ('Error: ' + c.error) : (c.note || '')}</div>
+      <button class="btn" onclick="runTest('${key}')" id="test-btn-${key}">Run full test</button>
+      <div class="test-results" id="test-results-${key}"></div>
+    </div>`;
+}
+
+async function loadStatus() {
+  try {
+    const resp = await fetch('/connections/api/status');
+    const d = await resp.json();
+    document.getElementById('connections-grid').innerHTML =
+      Object.entries(d).map(([key, c]) => renderCard(key, c)).join('');
+  } catch (e) {
+    document.getElementById('connections-grid').innerHTML = `<div class="card">Error loading status: ${e.message}</div>`;
+  }
+}
+
+async function runTest(key) {
+  const btn = document.getElementById(`test-btn-${key}`);
+  const out = document.getElementById(`test-results-${key}`);
+  btn.disabled = true;
+  const prevText = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span> Testing...';
+  out.innerHTML = '';
+  try {
+    const resp = await fetch(`/connections/api/test/${key}`, { method: 'POST' });
+    const d = await resp.json();
+    if (d.error) {
+      out.innerHTML = `<div class="test-row"><span class="test-error">Error: ${d.error}</span></div>`;
+    } else {
+      const rows = (d.results || []).map(r => {
+        const cls = r.status === 'pass' ? 'test-pass' : r.status === 'skipped' ? 'test-skipped' : 'test-fail';
+        return `<div class="test-row"><span>${r.name}</span><span class="${cls}">${r.status}</span></div>`;
+      }).join('');
+      out.innerHTML = rows || '<div class="test-row muted">No detailed results returned.</div>';
+    }
+  } catch (e) {
+    out.innerHTML = `<div class="test-row"><span class="test-error">Error: ${e.message}</span></div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevText;
+  }
+}
+
+loadStatus();
+</script>
+</body>
+</html>

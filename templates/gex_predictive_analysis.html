@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>GEX Predictive Analysis</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1400px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:960px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:16px}
+    .card h2{margin:0 0 8px;font-size:15px;font-weight:900}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:8px 16px;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:12px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    select,input[type=number],input[type=text]{padding:8px 10px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:8px;font-size:12px}
+    table.dt{width:100%;border-collapse:collapse;font-size:12px}
+    table.dt th,table.dt td{padding:7px 9px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left}
+    table.dt th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase}
+    .muted{color:var(--muted,var(--muted2))}
+    .warn-banner{background:rgba(251,191,36,.1);border:1px solid #fbbf24;border-radius:8px;padding:10px 14px;font-size:12.5px;color:#fbbf24;margin-bottom:14px}
+    .blocked-banner{background:rgba(148,163,184,.08);border:1px solid #64748b;border-radius:8px;padding:12px 14px;font-size:12.5px;color:#cbd5e1}
+    .flag-note{color:#fbbf24;font-size:11px}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .status-err{color:#f87171;font-size:12px}
+    .bottom-line{font-size:13.5px;line-height:1.7;padding:14px;background:rgba(99,102,241,.08);border:1px solid #6366f1;border-radius:8px}
+    .null-bar{display:inline-block;height:6px;background:#f59e0b;border-radius:3px;vertical-align:middle;margin-left:6px}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>📊 GEX Predictive Analysis <span class="muted" style="font-size:13px;font-weight:600">(read-only)</span></h1>
+    <p>Tests whether GEX Trend Tracker's 5-min snapshots actually predict short-horizon forward price moves, before trusting any trade signal built on top of them. Pure analysis — nothing here writes anything. Forward returns are computed by self-joining gex_trend_log's own spot column at future offsets, not from a separate price table (none of oiapp's other price tables are fine-grained enough for 5/15/30/60-min windows).</p>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <span class="muted" style="font-size:12px">Symbols (comma-separated)</span>
+      <input type="text" id="symbols-input" value="SPY,QQQ,IWM" style="width:160px"/>
+      <span class="muted" style="font-size:12px">Min N for "conclusive"</span>
+      <input type="number" id="min-n-input" min="5" step="5" value="30" style="width:60px"/>
+      <button class="btn btn-primary" onclick="runAnalysis()">▶ Run Analysis</button>
+      <span id="status" class="muted" style="font-size:12px"></span>
+    </div>
+  </div>
+
+  <div id="results-body"><div class="card muted">Click "Run Analysis" to query gex_trend_log and compute the report.</div></div>
+</div>
+
+<script>
+function fmtNullBar(pct) {
+  const w = Math.max(2, pct * 0.8);
+  return `<span class="null-bar" style="width:${w}px"></span>`;
+}
+
+function renderSchema(schema) {
+  if (!schema.has_data) {
+    return `<div class="card"><div class="status-err">No rows found in gex_trend_log for these symbols.</div></div>`;
+  }
+  const symRows = schema.per_symbol.map(s => `<tr><td>${s.symbol}</td><td>${s.rows}</td><td>${s.days}</td></tr>`).join("");
+  const nullRows = schema.null_rates.map(n => `
+    <tr><td>${n.column}</td><td>${n.null_pct}% ${fmtNullBar(n.null_pct)}</td><td class="flag-note">${n.note || ""}</td></tr>`).join("");
+  return `
+    <div class="card">
+      <h2>Schema Coverage</h2>
+      ${schema.thin_warning ? `<div class="warn-banner">⚠ Only ${schema.days_covered} trading day(s) covered (${schema.date_min} → ${schema.date_max}). Treat everything below as provisional until 10-15 days accumulate, spanning both trending and range-bound sessions.</div>` : ""}
+      <table class="dt">
+        <thead><tr><th>Symbol</th><th>Rows</th><th>Days</th></tr></thead>
+        <tbody>${symRows}</tbody>
+      </table>
+      <div style="margin-top:10px;font-weight:800;font-size:12px">Column NULL rates</div>
+      <table class="dt">
+        <thead><tr><th>Column</th><th>Null %</th><th>Note</th></tr></thead>
+        <tbody>${nullRows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderRegimeVsMove(rv) {
+  if (!rv || !rv.available) {
+    return `<div class="card"><h2>Q1: Short-gamma vs long-gamma forward move size</h2><div class="muted">${rv ? rv.reason : "Not available"}</div></div>`;
+  }
+  const rows = rv.rows.map(r => {
+    if (!r.comparable) {
+      return `<tr><td>${r.horizon_min}min</td><td>${r.time_bucket}</td><td colspan="4" class="muted">short n=${r.n_short}, long n=${r.n_long} — not enough of both to compare</td></tr>`;
+    }
+    return `<tr>
+      <td>${r.horizon_min}min</td><td>${r.time_bucket}</td>
+      <td>${r.median_short_pct}% (n=${r.n_short})</td>
+      <td>${r.median_long_pct}% (n=${r.n_long})</td>
+      <td>${r.mannwhitney_p != null ? "p=" + r.mannwhitney_p : "—"}</td>
+      <td class="flag-note">${r.flag || ""}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="card">
+      <h2>Q1: Does short-gamma regime correlate with larger forward moves than long-gamma?</h2>
+      <table class="dt">
+        <thead><tr><th>Horizon</th><th>Time Bucket</th><th>Short-γ median |move|</th><th>Long-γ median |move|</th><th>Mann-Whitney</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderFlipDistance(fd) {
+  const rows = fd.rows.map(r => r.available
+    ? `<tr><td>${r.horizon_min}min</td><td>${r.method}</td><td>${r.correlation}</td><td>${r.p_value != null ? r.p_value : "—"}</td><td>${r.n}</td><td class="flag-note">${r.flag || ""}</td></tr>`
+    : `<tr><td>${r.horizon_min}min</td><td colspan="5" class="muted">n=${r.n}, too few rows</td></tr>`
+  ).join("");
+  return `
+    <div class="card">
+      <h2>Flip-distance (zero-gamma level) vs forward move magnitude</h2>
+      <table class="dt">
+        <thead><tr><th>Horizon</th><th>Method</th><th>Correlation</th><th>p-value</th><th>n</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderWallAnalysis(wa) {
+  if (wa.blocked) {
+    return `<div class="card"><h2>Q2/Q3: Wall proximity → reversal? Wall decay → failure?</h2><div class="blocked-banner">🚫 BLOCKED: ${wa.reason}</div></div>`;
+  }
+  const proxRows = wa.proximity_rows.length
+    ? wa.proximity_rows.map(r => `<tr><td>${r.horizon_min}min</td><td>${r.median_move_near_pct}% (n=${r.n_near})</td><td>${r.median_move_far_pct}% (n=${r.n_far})</td><td class="flag-note">${r.flag || ""}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">Not enough near/far rows yet to compare.</td></tr>`;
+  return `
+    <div class="card">
+      <h2>Q2/Q3: Wall proximity → reversal? Wall decay → failure?</h2>
+      <div class="muted" style="font-size:11.5px;margin-bottom:8px">Rows with usable wall-distance data: ${wa.n_with_wall_distance} ${wa.flag ? `<span class="flag-note">(${wa.flag})</span>` : ""}</div>
+      <table class="dt">
+        <thead><tr><th>Horizon</th><th>Median |move| near wall (≤0.3%)</th><th>Median |move| far from wall</th><th></th></tr></thead>
+        <tbody>${proxRows}</tbody>
+      </table>
+      <div class="muted" style="font-size:11px;margin-top:6px">Lower moves near a wall suggest rejection/pin behavior; similar or higher moves suggest walls get run through.</div>
+      <div style="margin-top:10px;font-size:12.5px">${wa.decay_note}</div>
+    </div>`;
+}
+
+async function runAnalysis() {
+  const symbols = document.getElementById("symbols-input").value.trim();
+  const minN = document.getElementById("min-n-input").value || 30;
+  const status = document.getElementById("status");
+  const el = document.getElementById("results-body");
+  status.innerHTML = '<span class="spinner"></span> Querying gex_trend_log and computing...';
+  el.innerHTML = "";
+  try {
+    const resp = await fetch(`/gex-predictive-analysis/api/run?symbols=${encodeURIComponent(symbols)}&min_n=${minN}`);
+    const d = await resp.json();
+    if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
+    status.textContent = "✓ Analysis complete";
+    if (!d.schema.has_data) {
+      el.innerHTML = renderSchema(d.schema);
+      return;
+    }
+    el.innerHTML = renderSchema(d.schema) + renderRegimeVsMove(d.regime_vs_move) +
+                    renderFlipDistance(d.flip_distance) + renderWallAnalysis(d.wall_analysis) +
+                    `<div class="card"><h2>Bottom Line</h2><div class="bottom-line">${d.bottom_line}</div></div>`;
+  } catch (e) {
+    status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
+  }
+}
+</script>
+</body>
+</html>

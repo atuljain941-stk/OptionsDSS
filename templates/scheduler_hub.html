@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scheduler</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root {
+      --sh-bg:#0f1424; --sh-border:rgba(148,163,184,.16); --sh-text:#e5eefc; --sh-muted:#7b8ab5;
+      --sh-good:#22c55e; --sh-bad:#ef4444; --sh-accent:#7c9df8;
+    }
+    html,body { height:100%; }
+    body { margin:0; background: linear-gradient(180deg, #0c1120 0%, #0f1424 100%); color: var(--sh-text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; font-size:14px; }
+    * { box-sizing:border-box; }
+    button, input, select { font: inherit; }
+    .sh-shell { min-height:100vh; padding:16px; }
+    .sh-card { background: rgba(28,36,56,.88); border:1px solid var(--sh-border); border-radius:14px; box-shadow:0 8px 30px rgba(0,0,0,.22); padding:14px; margin-bottom:14px; }
+    .sh-brand { font-weight:900; font-size:20px; }
+    .sh-sub { color:var(--sh-muted); font-size:13px; margin-top:2px; }
+    .sh-group-title { font-weight:900; font-size:14px; color:#c7d2fe; margin:18px 0 8px; text-transform:uppercase; letter-spacing:.04em; }
+    .sh-job { background: rgba(8,12,24,.4); border:1px solid var(--sh-border); border-radius:12px; padding:12px; margin-bottom:10px; }
+    .sh-job-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .sh-job-title { font-weight:800; font-size:14px; display:flex; align-items:center; gap:10px; }
+    .sh-job-desc { color:var(--sh-muted); font-size:12px; margin-top:4px; }
+    .sh-job-meta { color:var(--sh-muted); font-size:11.5px; margin-top:6px; display:flex; gap:14px; flex-wrap:wrap; }
+    .sh-switch { position:relative; display:inline-block; width:40px; height:22px; flex:0 0 auto; }
+    .sh-switch input { opacity:0; width:0; height:0; }
+    .sh-slider { position:absolute; cursor:pointer; inset:0; background:rgba(148,163,184,.28); border-radius:999px; transition:.15s; }
+    .sh-slider::before { content:''; position:absolute; height:16px; width:16px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.15s; }
+    .sh-switch input:checked + .sh-slider { background: linear-gradient(180deg,#34d399,#22c55e); }
+    .sh-switch input:checked + .sh-slider::before { transform: translateX(18px); }
+    .sh-btn { border-radius:9px; border:1px solid var(--sh-border); background: linear-gradient(180deg, rgba(124,157,248,.28), rgba(124,157,248,.16)); color:var(--sh-text); padding:6px 11px; font-size:12px; font-weight:700; cursor:pointer; }
+    .sh-btn:hover { filter:brightness(1.08); }
+    .sh-btn:disabled { opacity:.5; cursor:not-allowed; }
+    .sh-schedule-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; padding-top:10px; border-top:1px dashed var(--sh-border); }
+    .sh-input { border-radius:8px; border:1px solid var(--sh-border); background: rgba(8,12,24,.7); color:var(--sh-text); padding:6px 9px; font-size:12px; }
+    .sh-times-chip { display:inline-flex; align-items:center; gap:6px; background:rgba(124,157,248,.14); border-radius:999px; padding:3px 10px; font-size:12px; }
+    .sh-times-chip button { background:none; border:none; color:#fca5a5; cursor:pointer; font-size:12px; padding:0; }
+    .sh-empty { color:var(--sh-muted); padding:20px; text-align:center; border:1px dashed var(--sh-border); border-radius:12px; }
+    .sh-readonly-note { font-size:11px; color:#fcd34d; margin-top:6px; }
+    .sh-integrations { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px,1fr)); gap:10px; }
+    .sh-integration { background: rgba(8,12,24,.4); border:1px solid var(--sh-border); border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:6px; }
+    .sh-integration-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .sh-integration-name { font-weight:800; font-size:13px; }
+    .sh-pill { display:inline-flex; align-items:center; gap:5px; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:800; }
+    .sh-pill.on { background:rgba(34,197,94,.14); color:#86efac; }
+    .sh-pill.off { background:rgba(239,68,68,.14); color:#fca5a5; }
+    .sh-integration-detail { color:var(--sh-muted); font-size:11.5px; }
+    .sh-integration a { color:#93b4ff; font-size:12px; text-decoration:none; font-weight:700; }
+    .sh-integration a:hover { text-decoration:underline; }
+    @keyframes sh-pulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
+  </style>
+</head>
+<body>
+  <div class="sh-shell">
+    <div class="sh-card">
+      <div class="sh-brand">🗓️ Scheduler</div>
+      <div class="sh-sub">Every background job running in this app, in one place — what it does, when it runs, and a switch to turn it off if things feel slow.</div>
+    </div>
+
+    <div class="sh-card">
+      <div class="sh-group-title" style="margin-top:0">Integrations</div>
+      <div class="sh-sub" style="margin-bottom:10px">Whether each external API is actually connected — the same check the app does internally, surfaced here instead of only showing up as a warning in the startup log.</div>
+      <div class="sh-integrations" id="sh-integrations">
+        <div class="sh-empty">Loading…</div>
+      </div>
+    </div>
+
+    <div id="sh-groups"></div>
+
+    <div class="sh-card">
+      <div class="sh-group-title" style="margin-top:0">Recent Runs (all jobs)</div>
+      <div class="sh-sub" style="margin-bottom:10px">Every run of every background job, in order — start time, how long it took, and whether it succeeded. This is the answer to "did the 7:30 pipeline run, is it done yet."</div>
+      <table style="width:100%; border-collapse:collapse; font-size:12.5px">
+        <thead><tr style="color:var(--sh-muted); text-align:left">
+          <th style="padding:6px 8px">Job</th><th style="padding:6px 8px">Started</th>
+          <th style="padding:6px 8px">Duration</th><th style="padding:6px 8px">Status</th>
+          <th style="padding:6px 8px">Note</th>
+        </tr></thead>
+        <tbody id="sh-history-rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="/static/scheduler_hub.js"></script>
+  <script src="/static/panel_tools.js"></script>
+  <script>
+    async function loadIntegrations() {
+      try {
+        const r = await fetch('/scheduler-hub/api/integrations');
+        const d = await r.json();
+        const el = document.getElementById('sh-integrations');
+        if (!d.ok || !d.integrations || !d.integrations.length) {
+          el.innerHTML = '<div class="sh-empty">No integration status available.</div>';
+          return;
+        }
+        el.innerHTML = d.integrations.map(i => `
+          <div class="sh-integration">
+            <div class="sh-integration-head">
+              <span class="sh-integration-name">${i.name}</span>
+              <span class="sh-pill ${i.configured ? 'on' : 'off'}">${i.configured ? '● connected' : '○ not connected'}</span>
+            </div>
+            <div class="sh-integration-detail">${i.detail || ''}</div>
+            <a href="${i.setup_url}">${i.configured ? 'Manage' : 'Set up'} →</a>
+          </div>
+        `).join('');
+      } catch (e) {
+        document.getElementById('sh-integrations').innerHTML = '<div class="sh-empty">Could not load integration status.</div>';
+      }
+    }
+    loadIntegrations();
+
+    async function loadHistory() {
+      try {
+        const r = await fetch('/scheduler-hub/api/history?limit=40');
+        const d = await r.json();
+        const tbody = document.getElementById('sh-history-rows');
+        if (!d.ok || !d.history || !d.history.length) {
+          tbody.innerHTML = '<tr><td colspan="5" style="padding:16px;color:var(--sh-muted)">No runs recorded yet.</td></tr>';
+          return;
+        }
+        const fmtDuration = (h) => {
+          if (h.status === 'running') return `⏳ running (${Math.round(h.elapsed_sec || 0)}s so far)`;
+          if (h.duration_sec == null) return '—';
+          return h.duration_sec < 60 ? `${h.duration_sec.toFixed(1)}s` : `${Math.floor(h.duration_sec/60)}m ${Math.round(h.duration_sec%60)}s`;
+        };
+        const fmtTime = (iso) => { try { return new Date(iso).toLocaleString(); } catch { return iso; } };
+        tbody.innerHTML = d.history.map(h => `
+          <tr style="border-top:1px solid var(--sh-border)">
+            <td style="padding:6px 8px;font-weight:700">${h.job_key}</td>
+            <td style="padding:6px 8px;color:var(--sh-muted)">${fmtTime(h.started_at)}</td>
+            <td style="padding:6px 8px">${fmtDuration(h)}</td>
+            <td style="padding:6px 8px">${h.status === 'ok' ? '✅' : h.status === 'running' ? '⏳' : '❌'} ${h.status}</td>
+            <td style="padding:6px 8px;color:var(--sh-muted);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(h.note||'').replace(/"/g,'&quot;')}">${h.note || ''}</td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        document.getElementById('sh-history-rows').innerHTML =
+          `<tr><td colspan="5" style="padding:16px;color:var(--sh-muted)">Could not load history: ${e.message}</td></tr>`;
+      }
+    }
+    loadHistory();
+    setInterval(loadHistory, 8000);
+  </script>
+</body>
+</html>

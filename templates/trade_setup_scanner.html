@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Trade Setup Context Scanner</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--card-radius:12px;--accent:#6366f1}
+    body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif}
+    .shell{max-width:1500px;margin:0 auto;padding:18px}
+    .hero{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+    .hero h1{margin:0 0 4px;font-size:24px;font-weight:900}
+    .hero p{margin:0;color:var(--muted);font-size:13px;max-width:760px;line-height:1.5}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px;margin-bottom:14px}
+    .card h3{margin:0 0 10px;font-size:14px;font-weight:800}
+    label{font-size:11px;color:var(--muted);display:block;margin-bottom:4px}
+    select,input[type=number],input[type=text]{padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px}
+    .btn{padding:9px 18px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px;transition:opacity .15s}
+    .btn:hover{opacity:.85}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-ghost{background:rgba(255,255,255,.06);color:var(--text);border:1px solid var(--border)}
+    .btn-teal{background:#0d9488;color:#fff}
+    .btn-sm{padding:5px 10px;font-size:11px;border-radius:6px}
+    .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
+    .badge-green{background:#22c55e22;color:#22c55e;border:1px solid #22c55e44}
+    .badge-amber{background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b44}
+    .badge-blue{background:#3b82f622;color:#3b82f6;border:1px solid #3b82f644}
+    .badge-neutral{background:#64748b22;color:#94a3b8;border:1px solid #64748b44}
+    .dim-table{width:100%;border-collapse:collapse;font-size:12px}
+    .dim-table th{text-align:left;color:var(--muted);font-weight:600;font-size:10px;padding:4px 8px;border-bottom:1px solid var(--border)}
+    .dim-table td{padding:5px 8px;border-bottom:1px solid var(--border)22;vertical-align:middle}
+    .dim-table select{padding:4px 6px;font-size:11px;min-width:80px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+    .opp-card{background:var(--card);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px;margin-bottom:10px}
+    .opp-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+    .opp-symbol{font-size:18px;font-weight:900;color:var(--accent);min-width:64px}
+    .opp-score{font-size:20px;font-weight:900}
+    .reasons{font-size:11px;color:#94a3b8;line-height:1.7;margin-top:8px;padding:8px 10px;background:rgba(255,255,255,.02);border-radius:6px;border-left:2px solid var(--border)}
+    .reasons li{margin-left:16px}
+    .confluence-chip{font-size:10px;background:#1e293b;border-radius:4px;padding:2px 7px;color:#94a3b8}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    #summary-bar{display:none;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+    .sum-chip{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 14px;min-width:80px;text-align:center}
+    .sum-chip .val{font-size:18px;font-weight:900;line-height:1}
+    .sum-chip .lbl{font-size:10px;color:var(--muted);margin-top:2px}
+    #saved-status{font-size:11px;color:var(--muted);margin-left:8px}
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="hero">
+    <div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">v1 · Trade Setup Context Scanner</div>
+      <h1>🧭 Trade Setup Context Scanner</h1>
+      <p>Scores WHAT PRODUCED the current price, not just where it is now — breakout quality, pre-move compression, extension risk, HTF regime, squeeze state, pullback quality, level importance, volume, relative strength, and sector RS. Composite score + confluence, sorted highest first.</p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
+      <a class="btn btn-ghost" href="/">Dashboard</a>
+      <a class="btn btn-ghost" href="/scanner-builder">Scanner Builder</a>
+    </div>
+  </div>
+
+  <!-- Scan parameters -->
+  <div class="card">
+    <h3>Scan Parameters</h3>
+    <div class="row" style="margin-bottom:12px">
+      <div>
+        <label>Watchlist</label>
+        <select id="wl-select" style="min-width:200px"><option value="">All symbols</option></select>
+      </div>
+      <div>
+        <label>Min Score (0-10)</label>
+        <input type="number" id="min-score" value="0" min="0" max="10" step="0.5" style="width:80px"/>
+      </div>
+      <div>
+        <label>Min Confluence (dims agreeing)</label>
+        <input type="number" id="min-confluence" value="0" min="0" max="11" style="width:80px"/>
+      </div>
+      <div>
+        <label>Top N Results</label>
+        <input type="number" id="top-n" value="20" min="1" max="104" style="width:80px"/>
+      </div>
+      <div>
+        <label>RS Benchmark</label>
+        <input type="text" id="rs-benchmark" value="SPY" style="width:80px"/>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <button class="btn btn-ghost" id="btn-save-settings">Save Settings</button>
+        <span id="saved-status"></span>
+      </div>
+    </div>
+
+    <table class="dim-table">
+      <thead><tr><th>Dimension</th><th>Enabled</th><th>Timeframe</th></tr></thead>
+      <tbody id="dim-rows"></tbody>
+    </table>
+
+    <div style="margin-top:14px">
+      <button class="btn btn-primary" id="btn-run-scan">Run Scan</button>
+      <span id="scan-status" style="margin-left:10px;font-size:12px;color:var(--muted)"></span>
+    </div>
+  </div>
+
+  <!-- Summary -->
+  <div id="summary-bar">
+    <div class="sum-chip"><div class="val" id="sum-count">0</div><div class="lbl">Matches</div></div>
+    <div class="sum-chip"><div class="val" id="sum-avg">0</div><div class="lbl">Avg Score</div></div>
+    <div class="sum-chip"><div class="val" id="sum-top">-</div><div class="lbl">Top Ticker</div></div>
+  </div>
+
+  <!-- Save / load results -->
+  <div class="card">
+    <h3>Saved Results</h3>
+    <div class="row">
+      <div>
+        <label>Save current results as</label>
+        <input type="text" id="save-name" style="min-width:180px"/>
+      </div>
+      <div>
+        <button class="btn btn-teal" id="btn-save-results">Save Results</button>
+      </div>
+      <div style="margin-left:24px">
+        <label>Load a prior scan</label>
+        <select id="saved-scans-select" style="min-width:260px"><option value="">-- select a saved scan --</option></select>
+      </div>
+      <div>
+        <button class="btn btn-ghost" id="btn-load-results">Load</button>
+        <button class="btn btn-ghost" id="btn-delete-results">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="results-wrap"></div>
+
+</div>
+
+<script>
+const API = "/scanner/trade-setup";
+
+const DIMENSIONS = [
+  ["breakout", "Breakout Quality / Trap Risk"],
+  ["candle_strength", "Candle Strength"],
+  ["pre_move_compression", "Pre-Move Compression (VCP)"],
+  ["extension", "Extension Risk (RSIDiff90 + Slope)"],
+  ["regime", "HTF Regime Alignment (always daily+weekly)"],
+  ["squeeze", "TTM Squeeze State"],
+  ["pullback", "Pullback Quality"],
+  ["level_importance", "Level Importance (touch count)"],
+  ["volume", "Volume Confirmation"],
+  ["relative_strength", "Relative Strength vs Benchmark"],
+  ["sector_rs", "Sector Relative Strength"],
+];
+// dims that support a per-dimension timeframe override (regime is fixed daily+weekly)
+const TF_DIMS = {
+  breakout: "breakout_tf", candle_strength: "candle_tf", pre_move_compression: "compression_tf",
+  extension: "extension_tf", squeeze: "squeeze_tf", pullback: "pullback_tf",
+  volume: "volume_tf", relative_strength: "relative_strength_tf", sector_rs: "sector_rs_tf",
+};
+
+let currentResults = [];
+let currentParamsUsed = {};
+let currentWatchlistId = "";
+
+function buildDimRows(dimensions, timeframes) {
+  const tbody = document.getElementById("dim-rows");
+  tbody.innerHTML = "";
+  DIMENSIONS.forEach(([key, label]) => {
+    const tr = document.createElement("tr");
+    const enabled = dimensions[key] !== false;
+    const tfKey = TF_DIMS[key];
+    const tfVal = tfKey ? (timeframes[tfKey] || "1d") : null;
+    tr.innerHTML = `
+      <td>${label}</td>
+      <td><input type="checkbox" data-dim="${key}" ${enabled ? "checked" : ""}/></td>
+      <td>${tfKey ? `<select data-tf="${tfKey}"><option value="1d" ${tfVal==="1d"?"selected":""}>Daily</option><option value="1w" ${tfVal==="1w"?"selected":""}>Weekly</option></select>` : '<span style="color:var(--muted);font-size:11px">Daily + Weekly</span>'}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function readParamsFromForm() {
+  const dimensions = {};
+  document.querySelectorAll("#dim-rows [data-dim]").forEach(cb => {
+    dimensions[cb.dataset.dim] = cb.checked;
+  });
+  const timeframes = {};
+  document.querySelectorAll("#dim-rows [data-tf]").forEach(sel => {
+    timeframes[sel.dataset.tf] = sel.value;
+  });
+  return {
+    dimensions, timeframes,
+    min_score: parseFloat(document.getElementById("min-score").value || 0),
+    min_confluence: parseInt(document.getElementById("min-confluence").value || 0),
+    top_n: parseInt(document.getElementById("top-n").value || 20),
+    relative_strength_benchmark: document.getElementById("rs-benchmark").value || "SPY",
+  };
+}
+
+function applyParamsToForm(params) {
+  document.getElementById("min-score").value = params.min_score ?? 0;
+  document.getElementById("min-confluence").value = params.min_confluence ?? 0;
+  document.getElementById("top-n").value = params.top_n ?? 20;
+  document.getElementById("rs-benchmark").value = params.relative_strength_benchmark || "SPY";
+  buildDimRows(params.dimensions || {}, params.timeframes || {});
+}
+
+async function loadWatchlists() {
+  const r = await fetch(`${API}/api/watchlists`);
+  const data = await r.json();
+  const sel = document.getElementById("wl-select");
+  (data.watchlists || []).forEach(w => {
+    const opt = document.createElement("option");
+    opt.value = w.id; opt.textContent = `${w.name} (${w.cnt})`;
+    sel.appendChild(opt);
+  });
+}
+
+async function loadSettings() {
+  const r = await fetch(`${API}/api/settings`);
+  const data = await r.json();
+  applyParamsToForm(data.params || {});
+  const statusEl = document.getElementById("saved-status");
+  statusEl.textContent = data.saved ? `Saved settings loaded (updated ${data.updated_at})` : "Using defaults (not yet saved)";
+}
+
+async function saveSettings() {
+  const params = readParamsFromForm();
+  await fetch(`${API}/api/settings`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({params}),
+  });
+  document.getElementById("saved-status").textContent = "Settings saved.";
+}
+
+async function loadSavedScansList() {
+  const r = await fetch(`${API}/api/results/list`);
+  const data = await r.json();
+  const sel = document.getElementById("saved-scans-select");
+  sel.innerHTML = '<option value="">-- select a saved scan --</option>';
+  (data.saved_scans || []).forEach(s => {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    opt.textContent = `${s.name} — ${s.created_at} (${s.result_count} matches)`;
+    sel.appendChild(opt);
+  });
+}
+
+function badgeForSignal(signal) {
+  if (signal.includes("High")) return "badge-green";
+  if (signal.includes("Favorable")) return "badge-blue";
+  if (signal.includes("Watch")) return "badge-amber";
+  return "badge-neutral";
+}
+
+function renderResults(results) {
+  currentResults = results;
+  const wrap = document.getElementById("results-wrap");
+  wrap.innerHTML = "";
+  if (!results.length) {
+    wrap.innerHTML = '<div class="card" style="text-align:center;color:var(--muted)">No matches at current filters.</div>';
+    document.getElementById("summary-bar").style.display = "none";
+    return;
+  }
+  document.getElementById("summary-bar").style.display = "flex";
+  document.getElementById("sum-count").textContent = results.length;
+  const avg = (results.reduce((a, r) => a + r.score, 0) / results.length).toFixed(1);
+  document.getElementById("sum-avg").textContent = avg;
+  document.getElementById("sum-top").textContent = results[0].symbol;
+
+  results.forEach(r => {
+    const div = document.createElement("div");
+    div.className = "opp-card";
+    const conf = r.confluence || {};
+    div.innerHTML = `
+      <div class="opp-header">
+        <div class="opp-symbol">${r.symbol}</div>
+        <div class="opp-score">${r.score}<span style="font-size:11px;color:var(--muted)">/10</span></div>
+        <span class="badge ${badgeForSignal(r.signal)}">${r.signal}</span>
+        <span class="confluence-chip">Confluence ${conf.label || "n/a"}</span>
+        <span style="margin-left:auto;font-size:12px;color:var(--muted)">$${r.price ?? "-"}</span>
+      </div>
+      <div class="reasons"><ul style="margin:0;padding:0">${(r.reasons||[]).map(x => `<li>${x}</li>`).join("")}</ul></div>
+    `;
+    wrap.appendChild(div);
+  });
+}
+
+async function runScan() {
+  const params = readParamsFromForm();
+  currentParamsUsed = params;
+  currentWatchlistId = document.getElementById("wl-select").value || null;
+  const statusEl = document.getElementById("scan-status");
+  statusEl.innerHTML = '<span class="spinner"></span> Scanning...';
+  try {
+    const r = await fetch(`${API}/scan`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({watchlist_id: currentWatchlistId, params}),
+    });
+    const data = await r.json();
+    renderResults(data.results || []);
+    statusEl.textContent = `Done — ${data.count} match(es).`;
+  } catch (e) {
+    statusEl.textContent = "Scan failed: " + e;
+  }
+}
+
+async function saveResults() {
+  if (!currentResults.length) { alert("Run a scan first."); return; }
+  const name = document.getElementById("save-name").value.trim();
+  const r = await fetch(`${API}/api/results/save`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      name, watchlist_id: currentWatchlistId, params: currentParamsUsed, results: currentResults,
+    }),
+  });
+  const data = await r.json();
+  document.getElementById("save-name").value = "";
+  await loadSavedScansList();
+  alert(`Saved as "${data.name}".`);
+}
+
+async function loadResults() {
+  const id = document.getElementById("saved-scans-select").value;
+  if (!id) return;
+  const r = await fetch(`${API}/api/results/${id}`);
+  const data = await r.json();
+  applyParamsToForm(data.params || {});
+  renderResults(data.results || []);
+  currentWatchlistId = data.watchlist_id || "";
+  if (currentWatchlistId) document.getElementById("wl-select").value = currentWatchlistId;
+}
+
+async function deleteResults() {
+  const id = document.getElementById("saved-scans-select").value;
+  if (!id) return;
+  if (!confirm("Delete this saved scan?")) return;
+  await fetch(`${API}/api/results/${id}`, {method: "DELETE"});
+  await loadSavedScansList();
+}
+
+function defaultSaveName() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  document.getElementById("save-name").value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+
+document.getElementById("btn-run-scan").addEventListener("click", runScan);
+document.getElementById("btn-save-settings").addEventListener("click", saveSettings);
+document.getElementById("btn-save-results").addEventListener("click", saveResults);
+document.getElementById("btn-load-results").addEventListener("click", loadResults);
+document.getElementById("btn-delete-results").addEventListener("click", deleteResults);
+
+(async function init() {
+  await loadWatchlists();
+  await loadSettings();
+  await loadSavedScansList();
+  defaultSaveName();
+})();
+</script>
+</body>
+</html>

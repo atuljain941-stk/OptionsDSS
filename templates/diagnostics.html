@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Diagnostics</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root {
+      --dg-bg:#0f1424; --dg-border:rgba(148,163,184,.16); --dg-text:#e5eefc; --dg-muted:#7b8ab5;
+      --dg-good:#22c55e; --dg-bad:#ef4444; --dg-warn:#f59e0b; --dg-accent:#7c9df8;
+    }
+    html,body { height:100%; }
+    body { margin:0; background: linear-gradient(180deg, #0c1120 0%, #0f1424 100%); color: var(--dg-text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; font-size:14px; }
+    * { box-sizing:border-box; }
+    .dg-shell { min-height:100vh; padding:16px; max-width:1400px; margin:0 auto; }
+    .dg-card { background: rgba(28,36,56,.88); border:1px solid var(--dg-border); border-radius:14px; box-shadow:0 8px 30px rgba(0,0,0,.22); padding:14px; margin-bottom:14px; }
+    .dg-brand { font-weight:900; font-size:20px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .dg-sub { color:var(--dg-muted); font-size:13px; margin-top:2px; }
+    .dg-group-title { font-weight:900; font-size:14px; color:#c7d2fe; margin:4px 0 10px; text-transform:uppercase; letter-spacing:.04em; }
+    .dg-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px,1fr)); gap:10px; }
+    .dg-stat { background: rgba(8,12,24,.4); border:1px solid var(--dg-border); border-radius:12px; padding:12px; }
+    .dg-stat .k { color:var(--dg-muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; font-weight:800; }
+    .dg-stat .v { font-size:22px; font-weight:900; margin-top:4px; }
+    .dg-stat .v.small { font-size:15px; }
+    table { width:100%; border-collapse:collapse; font-size:12.5px; }
+    th, td { padding:7px 9px; border-bottom:1px solid var(--dg-border); text-align:left; }
+    th { color:var(--dg-muted); font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:800; background:rgba(124,157,248,.14); color:#c7d2fe; }
+    .pill.good { background:rgba(34,197,94,.14); color:#86efac; }
+    .pill.bad { background:rgba(239,68,68,.14); color:#fca5a5; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; color:var(--dg-muted); }
+    .dg-btn { border-radius:9px; border:1px solid var(--dg-border); background: linear-gradient(180deg, rgba(124,157,248,.28), rgba(124,157,248,.16)); color:var(--dg-text); padding:6px 11px; font-size:12px; font-weight:700; cursor:pointer; }
+    .dg-btn:hover { filter:brightness(1.08); }
+    .dg-empty { color:var(--dg-muted); padding:20px; text-align:center; border:1px dashed var(--dg-border); border-radius:12px; }
+    .thread-list { max-height:180px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <div class="dg-shell">
+    <div class="dg-card">
+      <div class="dg-brand">
+        <div>📊 Diagnostics</div>
+        <button class="dg-btn" onclick="refresh()">Refresh</button>
+      </div>
+      <div class="dg-sub">Response times, cache hit rates, DB connections, and live thread count — refreshes every 5s. Use this to catch a performance regression before it becomes "the app feels slow."</div>
+    </div>
+
+    <div class="dg-card">
+      <div class="dg-group-title">System</div>
+      <div class="dg-grid" id="dg-system"></div>
+    </div>
+
+    <div class="dg-card">
+      <div class="dg-group-title">Scanner Builder — Scan Response Time</div>
+      <div id="dg-scanner"></div>
+    </div>
+
+    <div class="dg-card">
+      <div class="dg-group-title">All Endpoints</div>
+      <table>
+        <thead><tr><th>Endpoint</th><th>Count</th><th>Avg</th><th>P50</th><th>P95</th><th>Max</th><th>Last</th></tr></thead>
+        <tbody id="dg-endpoints"></tbody>
+      </table>
+    </div>
+
+    <div class="dg-card">
+      <div class="dg-group-title">Task Pool Health</div>
+      <div class="dg-sub" style="margin-bottom:10px">Two separate pools on purpose: the Interactive pool is for scans someone is actively waiting on; the Background pool is for watchlist Fetch Price/OI, the 7:30 AM sweep, and other bulk work nobody's watching in real time. Kept apart so a background fetch can never starve an interactive scan of workers (or vice versa) — that contention used to cause scans to time out at 100% for no visible reason whenever a bulk fetch happened to be running at the same time.</div>
+      <button class="dg-btn" onclick="loadPoolHealth()">Check Pool Health</button>
+      <button class="dg-btn" style="background:#7c2d12" onclick="replacePool('interactive')">Replace Interactive Pool</button>
+      <button class="dg-btn" style="background:#7c2d12" onclick="replacePool('background')">Replace Background Pool</button>
+      <pre id="dg-pool-health" class="mono" style="margin-top:10px;white-space:pre-wrap;font-size:12px;background:rgba(8,12,24,.4);border:1px solid var(--dg-border);border-radius:8px;padding:10px"></pre>
+    </div>
+
+    <div class="dg-card">
+      <div class="dg-group-title">Thread Dump (for "something is stuck")</div>
+      <div class="dg-sub" style="margin-bottom:10px">Shows the exact Python stack of every live thread right now — the line it's stuck on, not a guess. Use this instead of speculating which call site is hung.</div>
+      <button class="dg-btn" onclick="loadThreadDump()">Dump Threads Now</button>
+      <pre id="dg-thread-dump" class="mono" style="margin-top:10px;max-height:400px;overflow:auto;white-space:pre-wrap;font-size:11px;background:rgba(8,12,24,.4);border:1px solid var(--dg-border);border-radius:8px;padding:10px"></pre>
+    </div>
+
+    <div class="dg-card">
+      <div class="dg-group-title">Live Threads (<span id="dg-thread-count">0</span>)</div>
+      <div class="thread-list mono" id="dg-threads"></div>
+    </div>
+
+    <div class="dg-card">
+      <div class="dg-group-title">Scheduler Hub Jobs</div>
+      <table>
+        <thead><tr><th>Job</th><th>Interval</th><th>Low priority</th><th>Running</th><th>Last run</th></tr></thead>
+        <tbody id="dg-jobs"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+function fmtMs(v) { return (v === undefined || v === null) ? '—' : `${v} ms`; }
+function fmtAgo(ts) {
+  if (!ts) return 'never';
+  const secs = Math.round(Date.now()/1000 - ts);
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.round(secs/60)}m ago`;
+  return `${Math.round(secs/3600)}h ago`;
+}
+
+async function refresh() {
+  const r = await fetch('/diagnostics/api/snapshot');
+  const d = await r.json();
+  if (!d.ok) return;
+
+  const sys = d.system || {};
+  const cc = sys.cumulative_counters || {};
+  const totalHits = (cc.snapshot_memory_hits||0) + (cc.snapshot_sqlite_hits||0);
+  const totalLookups = totalHits + (cc.snapshot_computed||0);
+  const hitRate = totalLookups ? Math.round(100*totalHits/totalLookups) : 0;
+
+  document.getElementById('dg-system').innerHTML = `
+    <div class="dg-stat"><div class="k">Live threads</div><div class="v">${sys.thread_count||0}</div></div>
+    <div class="dg-stat"><div class="k">Shared task pool size</div><div class="v">${(sys.shared_task_pool||{}).max_workers ?? '—'}</div></div>
+    <div class="dg-stat"><div class="k">Scan snapshot cache hit rate</div><div class="v">${hitRate}%</div></div>
+    <div class="dg-stat"><div class="k">DB connections opened (lifetime)</div><div class="v">${cc.db_connections_opened||0}</div></div>
+    <div class="dg-stat"><div class="k">Snapshot: memory hits</div><div class="v small">${cc.snapshot_memory_hits||0}</div></div>
+    <div class="dg-stat"><div class="k">Snapshot: sqlite hits</div><div class="v small">${cc.snapshot_sqlite_hits||0}</div></div>
+    <div class="dg-stat"><div class="k">Snapshot: computed fresh</div><div class="v small">${cc.snapshot_computed||0}</div></div>
+  `;
+
+  const eps = d.endpoints || {};
+  const scan = eps['scanner_builder.api_run'];
+  if (scan && scan.count) {
+    const lm = scan.last_meta || {};
+    const lc = lm.cache || {};
+    document.getElementById('dg-scanner').innerHTML = `
+      <div class="dg-grid">
+        <div class="dg-stat"><div class="k">Last scan</div><div class="v">${fmtMs(scan.last_ms)}</div></div>
+        <div class="dg-stat"><div class="k">Avg (last ${scan.count})</div><div class="v">${fmtMs(scan.avg_ms)}</div></div>
+        <div class="dg-stat"><div class="k">P95</div><div class="v">${fmtMs(scan.p95_ms)}</div></div>
+        <div class="dg-stat"><div class="k">Min / Max</div><div class="v small">${fmtMs(scan.min_ms)} / ${fmtMs(scan.max_ms)}</div></div>
+        <div class="dg-stat"><div class="k">Last scan: symbols / matches</div><div class="v small">${lm.symbols ?? '—'} / ${lm.matches ?? '—'}</div></div>
+        <div class="dg-stat"><div class="k">Last scan: cache mem/sqlite/computed</div><div class="v small">${lc.memory_hits ?? 0} / ${lc.sqlite_hits ?? 0} / ${lc.computed ?? 0}</div></div>
+      </div>`;
+  } else {
+    document.getElementById('dg-scanner').innerHTML = `<div class="dg-empty">No scans run yet this session. Run a query from Scanner Builder, then come back here.</div>`;
+  }
+
+  const epRows = Object.entries(eps).filter(([k,v]) => v.count).map(([k,v]) => `
+    <tr>
+      <td class="mono">${k}</td>
+      <td>${v.count}</td>
+      <td>${fmtMs(v.avg_ms)}</td>
+      <td>${fmtMs(v.p50_ms)}</td>
+      <td>${fmtMs(v.p95_ms)}</td>
+      <td>${fmtMs(v.max_ms)}</td>
+      <td>${fmtMs(v.last_ms)}</td>
+    </tr>`).join('');
+  document.getElementById('dg-endpoints').innerHTML = epRows || `<tr><td colspan="7" class="dg-empty">No endpoint timing recorded yet.</td></tr>`;
+
+  document.getElementById('dg-thread-count').textContent = sys.thread_count || 0;
+  document.getElementById('dg-threads').innerHTML = (sys.thread_names || []).map(t => `<div>${t}</div>`).join('');
+
+  const jobs = (sys.scheduler_hub || {}).jobs || {};
+  const jobRows = Object.entries(jobs).map(([k,v]) => `
+    <tr>
+      <td class="mono">${k}</td>
+      <td>${v.interval_seconds}s</td>
+      <td>${v.low_priority ? '<span class="pill">yes</span>' : ''}</td>
+      <td>${v.running ? '<span class="pill good">running</span>' : ''}</td>
+      <td>${fmtAgo(v.last_run)}</td>
+    </tr>`).join('');
+  document.getElementById('dg-jobs').innerHTML = jobRows || `<tr><td colspan="5" class="dg-empty">No jobs registered.</td></tr>`;
+}
+
+refresh();
+setInterval(refresh, 5000);
+
+async function loadPoolHealth() {
+  const el = document.getElementById('dg-pool-health');
+  el.textContent = 'Checking…';
+  try {
+    const r = await fetch('/diagnostics/api/pool-health');
+    const d = await r.json();
+    const fmt = (p) => {
+      const free = p.max_workers - p.threads_alive;
+      const warn = free <= 2 ? ' ⚠ LOW — likely degraded or contended' : '';
+      return `Max workers: ${p.max_workers}\nThreads alive: ${p.threads_alive}\nFree workers: ${free}${warn}\nQueued tasks waiting: ${p.queued_tasks}\nPool replaced so far this session: ${p.pool_replaced_count}`;
+    };
+    el.textContent = `── Interactive (scans) ──\n${fmt(d.interactive)}\n\n── Background (fetches, sweeps) ──\n${fmt(d.background)}`;
+  } catch (e) {
+    el.textContent = 'Failed to load: ' + e.message;
+  }
+}
+
+async function replacePool(which) {
+  if (!confirm(`Replace the ${which} task pool? Anything currently stuck in it keeps running as an orphaned thread (Python can't kill it), but new work will no longer wait behind it. Safe to do at any time.`)) return;
+  const el = document.getElementById('dg-pool-health');
+  el.textContent = 'Replacing…';
+  try {
+    const r = await fetch(`/diagnostics/api/pool-health/replace?which=${which}`, {method: 'POST'});
+    const d = await r.json();
+    el.textContent = `${d.which} pool replaced. ${d.orphaned_threads} orphaned thread(s) left running in the background (harmless, will exit with the process). Replacement #${d.replaced_count} for this pool this session.`;
+  } catch (e) {
+    el.textContent = 'Failed to replace: ' + e.message;
+  }
+}
+
+async function loadThreadDump() {
+  const el = document.getElementById('dg-thread-dump');
+  el.textContent = 'Loading…';
+  try {
+    const r = await fetch('/diagnostics/api/thread-dump');
+    const d = await r.json();
+    el.textContent = (d.threads || []).map(t =>
+      `=== ${t.name} (daemon=${t.daemon}, alive=${t.alive}) ===\n${t.stack}`
+    ).join('\n');
+  } catch (e) {
+    el.textContent = 'Failed to load thread dump: ' + e.message;
+  }
+}
+</script>
+</body>
+</html>

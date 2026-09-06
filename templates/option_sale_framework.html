@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Option Sale Framework</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1200px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:960px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:14px}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:8px 16px;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:12px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    select,input[type=number],input[type=text]{padding:8px 10px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:8px;font-size:12px}
+    .muted{color:var(--muted,var(--muted2))}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .status-err{color:#f87171;font-size:12px}
+    .stage-card{border-left:4px solid var(--border,var(--border2));padding-left:14px}
+    .stage-card.pass{border-left-color:#4ade80}
+    .stage-card.caution{border-left-color:#fbbf24}
+    .stage-card.conflict{border-left-color:#f87171}
+    .stage-num{display:inline-block;width:22px;height:22px;border-radius:50%;background:#4f46e5;color:#fff;text-align:center;line-height:22px;font-size:11px;font-weight:900;margin-right:8px}
+    .stage-title{font-size:14px;font-weight:900}
+    .stage-note{font-size:12.5px;line-height:1.6;margin-top:6px;color:var(--muted,var(--muted2))}
+    .kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:10px}
+    .kv-item{background:rgba(255,255,255,.03);border-radius:6px;padding:6px 10px}
+    .kv-label{font-size:9.5px;text-transform:uppercase;color:var(--muted,var(--muted2))}
+    .kv-value{font-size:13px;font-weight:800;margin-top:2px}
+    .verdict-go{color:#4ade80}
+    .verdict-caution{color:#fbbf24}
+    .verdict-stand-aside{color:#f87171}
+    .flag-item{font-size:12.5px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+    .flag-item:last-child{border-bottom:none}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>🧭 Option Sale Framework</h1>
+    <p>Sequential 7-stage evaluation, run in this exact order: market/sector regime → weekly trend → daily setup → IV vs HV → expected move/strikes → trade structure/risk → beta/correlation sizing. Every stage runs regardless of how earlier ones look — this is a complete picture to weigh, not an automated kill-switch. Stage 7 is explicitly a sizing filter, not a go/no-go gate.</p>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <span class="muted" style="font-size:12px">Symbol</span>
+      <input type="text" id="symbol-input" placeholder="e.g. AAPL" style="width:100px;text-transform:uppercase"/>
+      <span class="muted" style="font-size:12px">Expiry</span>
+      <select id="expiry-select" style="width:150px"><option value="">Load a symbol first</option></select>
+      <span class="muted" style="font-size:12px">Strategy</span>
+      <select id="strategy-select" style="width:150px">
+        <option value="iron_fly">Iron Fly</option>
+        <option value="strangle">Short Strangle</option>
+        <option value="straddle">Short Straddle</option>
+        <option value="jade_lizard">Jade Lizard</option>
+        <option value="broken_wing_fly">Broken-Wing Fly</option>
+      </select>
+      <button class="btn btn-primary" onclick="evaluateTrade()">▶ Evaluate</button>
+      <span id="eval-status" class="muted" style="font-size:12px"></span>
+    </div>
+    <div class="toolbar" style="margin-top:10px">
+      <span class="muted" style="font-size:12px">Existing positions (comma-separated, for stage 7 correlation)</span>
+      <input type="text" id="positions-input" placeholder="e.g. MSFT, GOOG" style="width:220px;text-transform:uppercase"/>
+      <span class="muted" style="font-size:12px">Min RR</span>
+      <input type="number" id="min-rr-input" min="0" step="0.1" value="0.5" style="width:60px"/>
+      <span class="muted" style="font-size:12px">Min OI</span>
+      <input type="number" id="min-oi-input" min="0" step="10" value="50" style="width:60px"/>
+      <span class="muted" style="font-size:12px">Max spread %</span>
+      <input type="number" id="max-spread-input" min="1" step="1" value="15" style="width:55px"/>
+    </div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--muted,var(--muted2))">Advanced: trend threshold &amp; sizing curve (defaults are reasoned starting points, not validated-optimal -- see code comments for exactly what's been checked)</summary>
+      <div class="toolbar" style="margin-top:8px">
+        <span class="muted" style="font-size:12px">Trend ATR threshold</span>
+        <input type="number" id="min-atr-multiple-input" min="0.1" step="0.1" value="1.0" style="width:60px" title="Minimum gap between price/EMA13/EMA50, in multiples of ATR(14), before calling stage 2/3 a trend rather than CHOPPY. Lower = more sensitive to weak trends but more false positives on noise; higher = the reverse. Sweep data in _trend_classify's docstring."/>
+        <span class="muted" style="font-size:12px">Beta neutral point</span>
+        <input type="number" id="beta-neutral-input" min="0.1" step="0.1" value="1.0" style="width:60px" title="Beta at or below this gets no sizing adjustment. Above it, size scales as neutral/beta (risk-parity style)."/>
+        <span class="muted" style="font-size:12px">Beta floor</span>
+        <input type="number" id="beta-floor-input" min="0.1" max="1.0" step="0.05" value="0.5" style="width:60px" title="Minimum size multiplier from the beta adjustment, however high beta goes."/>
+        <span class="muted" style="font-size:12px">Correlation floor</span>
+        <input type="number" id="corr-floor-input" min="0" max="1" step="0.05" value="0.3" style="width:60px" title="Correlation to an existing position at or below this gets no sizing penalty."/>
+        <span class="muted" style="font-size:12px">Correlation full-penalty at</span>
+        <input type="number" id="corr-full-input" min="0" max="1" step="0.05" value="0.9" style="width:60px" title="Correlation at which the full penalty (down to the beta floor) is applied. Linear between the floor and this point."/>
+      </div>
+    </details>
+  </div>
+
+  <div id="results-body"><div class="card muted">Enter a symbol, pick an expiry and strategy, then run the evaluation.</div></div>
+</div>
+
+<script>
+async function loadExpiries() {
+  const symbol = document.getElementById("symbol-input").value.trim().toUpperCase();
+  const sel = document.getElementById("expiry-select");
+  sel.innerHTML = "";
+  if (!symbol) { sel.innerHTML = '<option value="">Enter a symbol first</option>'; return; }
+  try {
+    const resp = await fetch(`/option-sale-framework/api/expiries?symbol=${encodeURIComponent(symbol)}`);
+    const d = await resp.json();
+    if (!d.ok || !d.expiries.length) { sel.innerHTML = '<option value="">No stored expiries for this symbol</option>'; return; }
+    d.expiries.forEach(e => {
+      const opt = document.createElement("option");
+      opt.value = e; opt.textContent = e;
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    sel.innerHTML = '<option value="">Error loading expiries</option>';
+  }
+}
+document.getElementById("symbol-input").addEventListener("change", loadExpiries);
+document.getElementById("symbol-input").addEventListener("blur", loadExpiries);
+
+function verdictClass(v) {
+  if (v === "GO") return "verdict-go";
+  if (v === "CAUTION") return "verdict-caution";
+  return "verdict-stand-aside";
+}
+
+function fmtKV(label, value) {
+  if (value === null || value === undefined) return "";
+  return `<div class="kv-item"><div class="kv-label">${label}</div><div class="kv-value">${value}</div></div>`;
+}
+
+function stageCardClass(stage) {
+  if (!stage || stage.available === false) return "";
+  if (stage.agreement === "CONFLICT") return "conflict";
+  if (stage.trend === "CHOPPY" || stage.setup_quality === "EXTENDED" || stage.verdict === "UNFAVORABLE_FOR_SELLING") return "caution";
+  if (stage.stage_verdict && stage.stage_verdict !== "PASS") return "caution";
+  return "pass";
+}
+
+function renderStage1(s) {
+  return `<div class="card stage-card ${stageCardClass(s)}">
+    <div><span class="stage-num">1</span><span class="stage-title">Market and Sector Regime</span></div>
+    <div class="stage-note">${s.note || ""}</div>
+    <div class="kv">
+      ${fmtKV("Market Bias", s.market?.bias)}
+      ${fmtKV("Sector", s.sector?.sector)}
+      ${fmtKV("Sector Bias", s.sector?.bias)}
+      ${fmtKV("Agreement", s.agreement)}
+    </div>
+  </div>`;
+}
+
+function renderTrendStage(num, title, s) {
+  if (!s || !s.available) return `<div class="card stage-card"><div><span class="stage-num">${num}</span><span class="stage-title">${title}</span></div><div class="stage-note muted">${s?.note || "Not available"}</div></div>`;
+  return `<div class="card stage-card ${stageCardClass(s)}">
+    <div><span class="stage-num">${num}</span><span class="stage-title">${title}</span></div>
+    <div class="stage-note">${s.note || ""}</div>
+    <div class="kv">
+      ${fmtKV("Trend", s.trend)}
+      ${fmtKV("Price", s.price != null ? "$"+s.price : null)}
+      ${fmtKV("EMA13", s.ema13)}
+      ${fmtKV("EMA50", s.ema50)}
+      ${fmtKV("RSI", s.rsi)}
+      ${fmtKV("ATR Dist", s.dist_from_ema13_atr != null ? s.dist_from_ema13_atr+"x" : null)}
+      ${fmtKV("Setup Quality", s.setup_quality)}
+    </div>
+  </div>`;
+}
+
+function renderStage4(s) {
+  return `<div class="card stage-card ${stageCardClass(s)}">
+    <div><span class="stage-num">4</span><span class="stage-title">IV versus HV</span></div>
+    <div class="stage-note">${s.note || ""}</div>
+    <div class="kv">
+      ${fmtKV("Spot", s.spot != null ? "$"+s.spot : null)}
+      ${fmtKV("ATM IV", s.atm_iv_pct != null ? s.atm_iv_pct+"%" : null)}
+      ${fmtKV("HV30", s.hv30_pct != null ? s.hv30_pct+"%" : null)}
+      ${fmtKV("IV/HV Ratio", s.iv_hv_ratio != null ? s.iv_hv_ratio+"x" : null)}
+      ${fmtKV("Verdict", s.verdict)}
+    </div>
+  </div>`;
+}
+
+function renderStage5(s) {
+  if (!s || !s.available) return `<div class="card stage-card"><div><span class="stage-num">5</span><span class="stage-title">Expected Move and Strikes</span></div><div class="stage-note muted">${s?.note || "Not available"}</div></div>`;
+  return `<div class="card stage-card pass">
+    <div><span class="stage-num">5</span><span class="stage-title">Expected Move and Strikes</span></div>
+    <div class="stage-note">${s.note || ""}</div>
+    <div class="kv">
+      ${fmtKV("Expected Move", s.expected_move_pct+"%")}
+      ${fmtKV("Range Low", "$"+s.range_low)}
+      ${fmtKV("Range High", "$"+s.range_high)}
+      ${fmtKV("DTE", s.dte)}
+    </div>
+  </div>`;
+}
+
+function renderStage6(s) {
+  if (!s || s.available === false) return `<div class="card stage-card conflict"><div><span class="stage-num">6</span><span class="stage-title">Trade Structure and Risk</span></div><div class="stage-note">${s?.note || "Not available"}</div></div>`;
+  return `<div class="card stage-card ${stageCardClass(s)}">
+    <div><span class="stage-num">6</span><span class="stage-title">Trade Structure and Risk</span></div>
+    <div class="stage-note">${s.strategy || ""} — verdict: ${s.stage_verdict}</div>
+    <div class="kv">
+      ${fmtKV("Credit", s.credit != null ? "$"+s.credit : null)}
+      ${fmtKV("Max Profit", s.max_profit != null ? "$"+s.max_profit : null)}
+      ${fmtKV("Max Loss", s.max_loss != null ? "$"+Math.abs(s.max_loss) : null)}
+      ${fmtKV("RR", s.rr)}
+      ${fmtKV("POP", s.pop != null ? Math.round(s.pop*100)+"%" : null)}
+      ${fmtKV("Breakevens", (s.breakeven_lower ?? "—")+" / "+(s.breakeven_upper ?? "—"))}
+    </div>
+  </div>`;
+}
+
+function renderStage7(s) {
+  const correlatedList = (s.correlated_existing_positions || []).map(c => `${c.symbol} (${c.correlation})`).join(", ") || "none";
+  return `<div class="card stage-card ${s.size_multiplier < 1 ? 'caution' : 'pass'}">
+    <div><span class="stage-num">7</span><span class="stage-title">Beta and Correlation — Position Sizing</span></div>
+    <div class="stage-note">${(s.reasons || []).join(" · ")}</div>
+    <div class="kv">
+      ${fmtKV("Beta", s.beta)}
+      ${fmtKV("Corr to SPY", s.correlation_to_spy)}
+      ${fmtKV("Correlated Positions", correlatedList)}
+      ${fmtKV("Size Multiplier", s.size_multiplier+"x")}
+    </div>
+  </div>`;
+}
+
+function renderEarnings(e) {
+  if (!e || !e.available) return "";
+  const spans = e.spans_earnings;
+  return `<div class="card stage-card ${spans ? 'conflict' : 'pass'}">
+    <div><span class="stage-num" style="background:${spans ? '#f87171' : '#4ade80'}">📅</span><span class="stage-title">Earnings Check</span></div>
+    <div class="stage-note">${e.note || ""}</div>
+  </div>`;
+}
+
+function renderVerdict(r) {
+  // Severity-aware: a blocking flag (structure fails, IV works against
+  // the premise, earnings inside the trade) is shown distinctly from a
+  // caution, since they call for different responses.
+  const detailed = r.flags_detailed || r.flags.map(f => ({severity: "caution", text: f}));
+  const flagsHtml = detailed.length
+    ? detailed.map(f => {
+        const blocking = f.severity === "blocking";
+        return `<div class="flag-item" style="color:${blocking ? '#f87171' : '#fbbf24'}">
+          <b>${blocking ? '⛔ BLOCKING' : '⚠ caution'}</b> — ${f.text}
+        </div>`;
+      }).join("")
+    : `<div class="flag-item" style="color:#4ade80">✓ No flags across any stage.</div>`;
+  const conflicts = r.cross_stage_conflicts || [];
+  const conflictsHtml = conflicts.length ? `
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
+      <div style="font-size:11px;text-transform:uppercase;color:#818cf8;font-weight:800;margin-bottom:6px">Cross-stage conflicts</div>
+      ${conflicts.map(c => `<div class="flag-item">↔ ${c}</div>`).join("")}
+    </div>` : "";
+  const counts = (r.blocking_count != null)
+    ? `<span class="muted" style="font-size:12px;margin-left:10px">${r.blocking_count} blocking · ${r.caution_count} caution</span>`
+    : "";
+  return `<div class="card">
+    <div style="font-size:16px;font-weight:900">Overall Verdict: <span class="${verdictClass(r.overall_verdict)}">${r.overall_verdict}</span>${counts}</div>
+    <div style="margin-top:10px">${flagsHtml}</div>
+    ${conflictsHtml}
+  </div>`;
+}
+
+async function evaluateTrade() {
+  const symbol = document.getElementById("symbol-input").value.trim().toUpperCase();
+  const expiry = document.getElementById("expiry-select").value;
+  const strategy = document.getElementById("strategy-select").value;
+  const status = document.getElementById("eval-status");
+  if (!symbol || !expiry) { status.textContent = "Pick a symbol and expiry first"; return; }
+  const positions = document.getElementById("positions-input").value.trim();
+  const minRr = document.getElementById("min-rr-input").value || 0.5;
+  const minOi = document.getElementById("min-oi-input").value || 50;
+  const maxSpread = document.getElementById("max-spread-input").value || 15;
+  const minAtrMultiple = document.getElementById("min-atr-multiple-input").value || 1.0;
+  const betaNeutral = document.getElementById("beta-neutral-input").value || 1.0;
+  const betaFloor = document.getElementById("beta-floor-input").value || 0.5;
+  const corrFloor = document.getElementById("corr-floor-input").value || 0.3;
+  const corrFull = document.getElementById("corr-full-input").value || 0.9;
+  status.innerHTML = '<span class="spinner"></span> Running all 7 stages...';
+  document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> Evaluating...</div>';
+  try {
+    let url = `/option-sale-framework/api/evaluate?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiry)}&strategy=${strategy}&min_rr=${minRr}&min_oi=${minOi}&max_spread_pct=${maxSpread}` +
+      `&min_atr_multiple=${minAtrMultiple}&beta_neutral_point=${betaNeutral}&beta_floor_multiplier=${betaFloor}&correlation_floor=${corrFloor}&correlation_full_penalty=${corrFull}`;
+    if (positions) url += `&existing_positions=${encodeURIComponent(positions)}`;
+    const resp = await fetch(url);
+    const d = await resp.json();
+    if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
+    status.textContent = `✓ Evaluation complete`;
+    const r = d.result;
+    document.getElementById("results-body").innerHTML =
+      renderVerdict(r) +
+      renderEarnings(r.earnings_check) +
+      renderStage1(r.stage_1_market_sector_regime) +
+      renderTrendStage(2, "Weekly Trend", r.stage_2_weekly_trend) +
+      renderTrendStage(3, "Daily Setup", r.stage_3_daily_setup) +
+      renderStage4(r.stage_4_iv_vs_hv) +
+      renderStage5(r.stage_5_expected_move_strikes) +
+      renderStage6(r.stage_6_trade_structure_risk) +
+      renderStage7(r.stage_7_beta_correlation_sizing);
+  } catch (e) {
+    status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
+  }
+}
+</script>
+</body>
+</html>

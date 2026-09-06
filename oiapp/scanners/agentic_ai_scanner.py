@@ -1,0 +1,4034 @@
+# oiapp/scanners/agentic_ai_scanner.py
+"""
+Agentic AI Trade Scanner
+------------------------
+Background scanner that follows the user's top-down workflow:
+market regime -> sector regime -> stock RS/TA/UAE -> option OI/GEX pressure ->
+strategy, expiry and strikes. Findings are de-duplicated by stable trade
+signature so alerts are sent only once per new setup while every setup is kept
+in SQLite history.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import traceback
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from flask import Blueprint, jsonify, render_template, request
+
+agentic_ai_bp = Blueprint("agentic_ai", __name__, url_prefix="/agentic-ai-scanner")
+
+from ..config import DB_PATH as _OIAPP_DB_PATH  # centralized DB location
+DB_PATH = _OIAPP_DB_PATH
+
+MARKET_PROXIES = ["SPY", "QQQ", "IWM"]
+MARKET_PROXY_WEIGHTS = {"SPY": 0.50, "QQQ": 0.30, "IWM": 0.20}
+TIMEFRAME_WEIGHTS = {"1h": 0.25, "1d": 0.45, "1wk": 0.30}
+REGIME_SCORE = {"BULL": 1.0, "WEAK_BULL": 0.55, "SIDEWAYS": 0.0, "WEAK_BEAR": -0.55, "BEAR": -1.0}
+
+DEFAULT_SETTINGS = {
+    "agentic_ai_scanner_enabled": "1",
+    "agentic_ai_interval_seconds": "1800",
+    "agentic_ai_watchlist_id": "",
+    "agentic_ai_max_symbols": "80",
+    "agentic_ai_target_dte": "45",
+    "agentic_ai_min_confidence": "72",
+    "agentic_ai_min_uae_score": "65",
+    "agentic_ai_require_regime_alignment": "1",
+    "agentic_ai_max_alerts_per_run": "8",
+    "agentic_ai_trade_type": "AUTO",
+    "agentic_ai_strike_width": "AUTO",
+    "agentic_ai_short_delta": "0.45",
+    "agentic_ai_target_rr": "1.00",
+    "agentic_ai_min_rr": "0.70",
+    "agentic_ai_earn_guard": "14",
+    "agentic_ai_autotune_mode": "AUTO",
+    "agentic_ai_profile_version": "1",
+    "agentic_ai_last_autotune_json": "",
+    "agentic_ai_filters_json": "",
+    "agentic_ai_incremental_enabled": "1",
+    "agentic_ai_max_workers": "6",
+    "agentic_ai_autoloop_max_iterations": "6",
+    "agentic_ai_autoloop_target_candidates": "3",
+    "agentic_ai_autoloop_target_confidence": "78",
+    "agentic_ai_autoloop_last_json": "",
+}
+
+_WATCHER_STARTED = False
+_WATCHER_LOCK = threading.Lock()
+_WATCHER_STOP_EVENT = threading.Event()
+_LAST_RUN_CACHE: Dict[str, Any] = {"ok": False, "message": "Scanner has not run yet."}
+_RUN_LOCK = threading.Lock()
+_RUN_PROGRESS_LOCK = threading.Lock()
+_RUN_PROGRESS: Dict[str, Any] = {
+    "running": False,
+    "source": None,
+    "started_at": None,
+    "completed_at": None,
+    "total": 0,
+    "scanned": 0,
+    "candidates": 0,
+    "current_symbol": None,
+    "message": "Idle",
+    "percent": 0,
+    "suggestions": [],
+}
+
+_AUTOLOOP_LOCK = threading.Lock()
+_AUTOLOOP_STOP_EVENT = threading.Event()
+_AUTOLOOP_STATUS_LOCK = threading.Lock()
+_AUTOLOOP_STATUS: Dict[str, Any] = {
+    "running": False,
+    "session_id": None,
+    "started_at": None,
+    "completed_at": None,
+    "iteration": 0,
+    "max_iterations": 0,
+    "target_candidates": 0,
+    "target_confidence": 0,
+    "message": "Auto-loop idle",
+    "best_score": None,
+    "best_iteration": None,
+    "best_candidates": 0,
+    "best_confidence": 0,
+    "last_candidates": 0,
+    "last_confidence": 0,
+    "trials": [],
+    "saved": False,
+    "stop_requested": False,
+}
+
+_DB_INIT_LOCK = threading.Lock()
+try:
+    from ..db import _db_write_lock as _DB_WRITE_LOCK
+except Exception:
+    _DB_WRITE_LOCK = threading.RLock()
+_DB_INITIALIZED = False
+
+
+def _conn() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH, timeout=60)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.execute("PRAGMA busy_timeout=60000")
+    except Exception:
+        pass
+    return con
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _today_key() -> str:
+    return date.today().isoformat()
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return default
+
+
+def _update_run_progress(**kwargs: Any) -> Dict[str, Any]:
+    with _RUN_PROGRESS_LOCK:
+        _RUN_PROGRESS.update(kwargs)
+        _RUN_PROGRESS["updated_at"] = _now()
+        return dict(_RUN_PROGRESS)
+
+
+def _get_run_progress() -> Dict[str, Any]:
+    with _RUN_PROGRESS_LOCK:
+        return dict(_RUN_PROGRESS)
+
+
+def _update_autoloop_status(**kwargs: Any) -> Dict[str, Any]:
+    with _AUTOLOOP_STATUS_LOCK:
+        if kwargs:
+            _AUTOLOOP_STATUS.update(kwargs)
+            _AUTOLOOP_STATUS["updated_at"] = _now()
+        return json.loads(json.dumps(_AUTOLOOP_STATUS, default=str))
+
+
+def _get_autoloop_status() -> Dict[str, Any]:
+    with _AUTOLOOP_STATUS_LOCK:
+        return json.loads(json.dumps(_AUTOLOOP_STATUS, default=str))
+
+
+def _build_zero_result_suggestions(settings: Dict[str, Any], progress: Optional[Dict[str, Any]] = None, summary: Optional[Dict[str, Any]] = None) -> List[str]:
+    suggestions: List[str] = []
+    min_conf = _safe_int(settings.get("min_confidence"), 72)
+    min_uae = _safe_int(settings.get("min_uae_score"), 65)
+    if min_conf >= 80:
+        suggestions.append("Lower Min confidence from %d to around 70-75 to allow more setups through." % min_conf)
+    elif min_conf >= 72:
+        suggestions.append("Try lowering Min confidence by 5 points.")
+    if min_uae >= 75:
+        suggestions.append("Lower Min UAE score from %d to around 65-70 if the universe is too selective." % min_uae)
+    elif min_uae >= 65:
+        suggestions.append("Try lowering Min UAE score by 5 points.")
+    if settings.get("require_regime_alignment"):
+        suggestions.append("Temporarily turn off regime alignment to allow countertrend or mixed-regime trades.")
+    if _safe_int(settings.get("max_symbols"), 80) < 100:
+        suggestions.append("Increase Max symbols so the scanner can search a wider universe.")
+    dte = _safe_int(settings.get("target_dte"), 45)
+    if dte < 25:
+        suggestions.append("Move Target DTE closer to 30-45 days so more option structures qualify.")
+    elif dte > 55:
+        suggestions.append("Try Target DTE around 30-45 days to avoid overly long-dated setups.")
+    earn_guard = _safe_int(settings.get("earn_guard"), 14)
+    if earn_guard > 10:
+        suggestions.append("Reduce Earnings guard to 7-10 days if earnings filtering is blocking too many names.")
+    trade_type = (settings.get("trade_type") or "AUTO").upper()
+    if trade_type != "AUTO":
+        suggestions.append("Switch Trade type back to AUTO so the AI can choose the best structure.")
+    filters = settings.get("filters") or {}
+    disabled = [k for k, v in filters.items() if not bool((v or {}).get("enabled", True))]
+    if len(disabled) >= 4:
+        suggestions.append("Re-enable some evidence families; too many disabled filters can eliminate otherwise valid trades.")
+    if progress and progress.get("market_bias") in {"bear", "weak_bear"}:
+        suggestions.append("Current market regime is weak/bearish; bullish scans may be sparse. Consider bearish momentum or sideways setups too.")
+    if progress and progress.get("sector_bias") in {"bear", "weak_bear"}:
+        suggestions.append("Sector regime is weak/bearish; sector confirmation may be suppressing results.")
+    if summary and _safe_int(summary.get("scanned"), 0) > 0 and _safe_int(summary.get("candidates"), 0) == 0:
+        suggestions.append("Widen the universe or relax one of the major gates first: confidence, UAE score, or regime alignment.")
+    if not suggestions:
+        suggestions.append("Relax one major gate at a time: confidence, UAE score, regime alignment, or earnings guard.")
+    return suggestions[:8]
+
+
+def _recent_agentic_runs(limit: int = 8) -> List[Dict[str, Any]]:
+    _ensure_tables()
+    con = _conn()
+    try:
+        rows = con.execute(
+            """
+            SELECT id, started_at, completed_at, source, status, scanned, candidates, new_findings,
+                   repeated_findings, alerts_sent, alerts_attempted, params_json, summary_json, error_text
+            FROM agentic_ai_scanner_runs
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(25, limit)),),
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["params"] = _json_loads(d.get("params_json"), {})
+            d["summary"] = _json_loads(d.get("summary_json"), {})
+            out.append(d)
+        return out
+    finally:
+        con.close()
+
+
+def _clamp_num(value: float, low: float, high: float, ndigits: int = 0) -> float:
+    return round(max(low, min(high, value)), ndigits)
+
+
+def _apply_setting_updates(updates: Dict[str, Any]) -> None:
+    _set_settings_bulk(updates or {})
+
+
+def _auto_tune_settings(settings: Dict[str, Any], market_ctx: Optional[Dict[str, Any]] = None, summary: Optional[Dict[str, Any]] = None, findings: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Relax or tighten bounded parameters based on hit rate and regime.
+
+    Mode semantics:
+    - OFF: never suggest or apply changes.
+    - SUGGEST: compute recommendations but do not persist them.
+    - AUTO: persist safe recommendations and save a new profile version.
+    """
+    market_ctx = market_ctx or {}
+    summary = summary or {}
+    findings = findings or []
+    mode = (settings.get("autotune_mode") or "AUTO").upper()
+    scanned = _safe_int(summary.get("scanned"), 0)
+    candidates = _safe_int(summary.get("candidates"), len(findings))
+    hit_rate = (candidates / scanned) if scanned > 0 else 0.0
+    recent = _recent_agentic_runs(8)
+    recent_completed = [r for r in recent if (r.get("status") or "").upper() == "OK" and _safe_int(r.get("scanned"), 0) > 0]
+    recent_rates = []
+    zero_streak = 0
+    for r in recent_completed:
+        sc = _safe_int(r.get("scanned"), 0)
+        ca = _safe_int(r.get("candidates"), 0)
+        if sc > 0:
+            recent_rates.append(ca / sc)
+        if ca == 0:
+            zero_streak += 1
+        else:
+            break
+    avg_recent_rate = sum(recent_rates) / len(recent_rates) if recent_rates else 0.0
+    current_bias = str(market_ctx.get("bias") or "neutral").lower()
+    current_conf = _safe_int(market_ctx.get("confidence"), 0)
+    trigger_relax = bool(candidates == 0 or hit_rate < 0.015 or (scanned >= 40 and avg_recent_rate < 0.02) or zero_streak >= 2)
+
+    suggestions = _build_zero_result_suggestions(settings, _get_run_progress(), summary)
+    applied: List[Dict[str, Any]] = []
+    tuned = dict(settings)
+    tuned["filters"] = json.loads(json.dumps(settings.get("filters") or {}))
+    filters = tuned["filters"] or {}
+
+    def bump_int(key: str, delta: int, low: int, high: int, reason: str) -> None:
+        old = _safe_int(tuned.get(key), 0)
+        new = int(_clamp_num(old + delta, low, high, 0))
+        if new != old:
+            tuned[key] = new
+            applied.append({"key": key, "from": old, "to": new, "reason": reason})
+
+    def set_bool(key: str, value: bool, reason: str) -> None:
+        old = bool(tuned.get(key))
+        new = bool(value)
+        if new != old:
+            tuned[key] = new
+            applied.append({"key": key, "from": old, "to": new, "reason": reason})
+
+    def adjust_weight(key: str, multiplier: float, low: float, high: float, reason: str) -> None:
+        cfg = filters.get(key) or {}
+        if not cfg.get("enabled", True):
+            return
+        old = _safe_float(cfg.get("weight"), 1.0) or 1.0
+        new = _clamp_num(old * multiplier, low, high, 2)
+        if abs(new - old) >= 0.01:
+            cfg["weight"] = new
+            filters[key] = cfg
+            applied.append({"key": f"filters.{key}.weight", "from": old, "to": new, "reason": reason})
+
+    if trigger_relax and mode in {"SUGGEST", "AUTO"}:
+        relax_conf = -8 if zero_streak >= 2 or candidates == 0 else -5
+        relax_uae = -8 if zero_streak >= 2 or candidates == 0 else -5
+        bump_int("min_confidence", relax_conf, 50, 95, "Too few setups passing confidence gate")
+        bump_int("min_uae_score", relax_uae, 50, 95, "Too few setups passing UAE gate")
+        bump_int("earn_guard", -4 if zero_streak >= 2 or candidates == 0 else -3, 5, 45, "Earnings filter is blocking setups")
+        if _safe_int(tuned.get("target_dte"), 45) < 30:
+            bump_int("target_dte", 5, 7, 75, "Move DTE closer to 30-45 days")
+        elif _safe_int(tuned.get("target_dte"), 45) > 50:
+            bump_int("target_dte", -5, 7, 75, "Move DTE closer to 30-45 days")
+        if current_bias in {"neutral", "sideways", "mixed"} or current_conf < 60:
+            set_bool("require_regime_alignment", False, "Regime alignment is too restrictive for the current regime")
+        adjust_weight("risk", 0.90, 0.55, 2.5, "Reduce risk penalty slightly to allow valid trades through")
+        adjust_weight("flow", 0.92, 0.55, 2.5, "Reduce flow gate slightly to avoid over-filtering")
+        if current_bias in {"bull", "bear"}:
+            adjust_weight("price_action", 1.05, 0.55, 2.5, "Increase price-action emphasis in directional regimes")
+            adjust_weight("volume", 1.05, 0.55, 2.5, "Increase volume confirmation in directional regimes")
+        else:
+            adjust_weight("support_resistance", 1.05, 0.55, 2.5, "Slightly increase context sensitivity in non-trending regimes")
+        disabled = [k for k, v in (filters or {}).items() if not bool((v or {}).get("enabled", True))]
+        if len(disabled) < 4:
+            adjust_weight("market", 0.95, 0.55, 2.5, "Slightly reduce market gate to broaden candidate set")
+            adjust_weight("sector", 0.95, 0.55, 2.5, "Slightly reduce sector gate to broaden candidate set")
+
+    if mode in {"SUGGEST", "AUTO"} and scanned > 0 and candidates > max(12, int(scanned * 0.12)):
+        bump_int("min_confidence", 3, 50, 95, "Scanner found many candidates; slightly tighten confidence")
+        bump_int("min_uae_score", 3, 50, 95, "Scanner found many candidates; slightly tighten UAE score")
+
+    changed = [c for c in applied if c["from"] != c["to"]]
+    saved = False
+    profile_version = _safe_int(settings.get("profile_version"), 1)
+    last_tune = {
+        "mode": mode,
+        "triggered": bool(trigger_relax),
+        "saved": False,
+        "scanned": scanned,
+        "candidates": candidates,
+        "hit_rate": round(hit_rate * 100.0, 2),
+        "recent_avg_hit_rate": round(avg_recent_rate * 100.0, 2),
+        "zero_streak": zero_streak,
+        "market_bias": current_bias,
+        "market_confidence": current_conf,
+        "changes": changed,
+        "suggestions": suggestions,
+        "saved_profile_version": profile_version,
+    }
+    if changed and mode == "AUTO":
+        profile_version += 1
+        tuned["profile_version"] = profile_version
+        last_tune["saved"] = True
+        last_tune["saved_profile_version"] = profile_version
+        updates = {
+            "agentic_ai_min_confidence": tuned.get("min_confidence"),
+            "agentic_ai_min_uae_score": tuned.get("min_uae_score"),
+            "agentic_ai_earn_guard": tuned.get("earn_guard"),
+            "agentic_ai_target_dte": tuned.get("target_dte"),
+            "agentic_ai_require_regime_alignment": "1" if tuned.get("require_regime_alignment") else "0",
+            "agentic_ai_profile_version": profile_version,
+            "agentic_ai_filters_json": json.dumps(tuned.get("filters") or {}, default=str),
+            "agentic_ai_last_autotune_json": json.dumps(last_tune, default=str),
+        }
+        _apply_setting_updates(updates)
+        saved = True
+    else:
+        try:
+            _set_setting("agentic_ai_last_autotune_json", json.dumps(last_tune, default=str))
+        except Exception:
+            pass
+
+    summary_text = "No auto-tune applied." if not changed else "Auto-tune " + ("saved" if saved else "suggested") + ": " + "; ".join([f"{c['key']} {c['from']}→{c['to']}" for c in changed[:8]])
+    if changed:
+        last_tune["summary"] = summary_text
+    return {
+        "mode": mode,
+        "triggered": bool(trigger_relax),
+        "saved": bool(saved),
+        "profile_version": profile_version,
+        "changes": changed,
+        "suggestions": suggestions,
+        "summary": summary_text,
+        "settings": tuned,
+        "last_tune": last_tune,
+    }
+
+
+def _clone_settings_for_trial(settings: Dict[str, Any]) -> Dict[str, Any]:
+    trial = dict(settings or {})
+    trial["filters"] = json.loads(json.dumps(_load_agentic_filters(trial.get("filters") or {}), default=str))
+    trial.pop("raw", None)
+    return trial
+
+
+def _settings_to_app_updates(settings: Dict[str, Any], *, last_autoloop: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    filters = _load_agentic_filters(settings.get("filters") or {})
+    updates = {
+        "agentic_ai_watchlist_id": settings.get("watchlist_id", ""),
+        "agentic_ai_max_symbols": settings.get("max_symbols", 80),
+        "agentic_ai_target_dte": settings.get("target_dte", 45),
+        "agentic_ai_min_confidence": settings.get("min_confidence", 72),
+        "agentic_ai_min_uae_score": settings.get("min_uae_score", 65),
+        "agentic_ai_require_regime_alignment": "1" if settings.get("require_regime_alignment") else "0",
+        "agentic_ai_max_alerts_per_run": settings.get("max_alerts_per_run", 8),
+        "agentic_ai_trade_type": (settings.get("trade_type") or "AUTO"),
+        "agentic_ai_strike_width": settings.get("strike_width", "AUTO"),
+        "agentic_ai_short_delta": settings.get("short_delta", 0.45),
+        "agentic_ai_target_rr": settings.get("target_rr", 1.0),
+        "agentic_ai_min_rr": settings.get("min_rr", 0.70),
+        "agentic_ai_earn_guard": settings.get("earn_guard", 14),
+        "agentic_ai_autotune_mode": settings.get("autotune_mode", "AUTO"),
+        "agentic_ai_incremental_enabled": "1" if settings.get("incremental_enabled", True) else "0",
+        "agentic_ai_max_workers": settings.get("max_workers", 6),
+        "agentic_ai_filters_json": json.dumps(filters, default=str),
+    }
+    if settings.get("profile_version") is not None:
+        updates["agentic_ai_profile_version"] = settings.get("profile_version")
+    if settings.get("autoloop_max_iterations") is not None:
+        updates["agentic_ai_autoloop_max_iterations"] = settings.get("autoloop_max_iterations")
+    if settings.get("autoloop_target_candidates") is not None:
+        updates["agentic_ai_autoloop_target_candidates"] = settings.get("autoloop_target_candidates")
+    if settings.get("autoloop_target_confidence") is not None:
+        updates["agentic_ai_autoloop_target_confidence"] = settings.get("autoloop_target_confidence")
+    if last_autoloop is not None:
+        updates["agentic_ai_autoloop_last_json"] = json.dumps(last_autoloop, default=str)
+    return updates
+
+
+def _trial_overrides(settings: Dict[str, Any]) -> Dict[str, Any]:
+    filters = _load_agentic_filters(settings.get("filters") or {})
+    return {
+        "watchlist_id": settings.get("watchlist_id", ""),
+        "max_symbols": _safe_int(settings.get("max_symbols"), 80),
+        "target_dte": _safe_int(settings.get("target_dte"), 45),
+        "min_confidence": _safe_int(settings.get("min_confidence"), 72),
+        "min_uae_score": _safe_int(settings.get("min_uae_score"), 65),
+        "require_regime_alignment": bool(settings.get("require_regime_alignment")),
+        "max_alerts_per_run": 0,  # tuning loops should not spam alerts
+        "trade_type": (settings.get("trade_type") or "AUTO"),
+        "strike_width": settings.get("strike_width", "AUTO"),
+        "short_delta": _safe_float(settings.get("short_delta"), 0.45),
+        "target_rr": _safe_float(settings.get("target_rr"), 1.0),
+        "min_rr": _safe_float(settings.get("min_rr"), 0.70),
+        "earn_guard": _safe_int(settings.get("earn_guard"), 14),
+        "autotune_mode": "SUGGEST",  # the outer loop owns profile selection
+        "incremental": False,
+        "force_full_run": True,
+        "incremental_enabled": False,
+        "max_workers": _safe_int(settings.get("max_workers"), 6),
+        "filters_json": json.dumps(filters, default=str),
+    }
+
+
+def _trial_result_stats(result: Dict[str, Any]) -> Dict[str, Any]:
+    result = result or {}
+    summary = result.get("summary") or {}
+    findings = result.get("findings") or []
+    confidences = [_safe_int((f or {}).get("confidence"), 0) for f in findings if isinstance(f, dict)]
+    best_conf = max(confidences) if confidences else _safe_int(summary.get("best_confidence"), 0)
+    top_count = min(5, len(confidences)) or 1
+    avg_top = round(sum(sorted(confidences, reverse=True)[:top_count]) / top_count, 2) if confidences else 0
+    scanned = _safe_int(summary.get("scanned"), 0)
+    candidates = _safe_int(summary.get("candidates"), len(findings))
+    hit_rate = (candidates / scanned) if scanned > 0 else 0.0
+    errors = len(summary.get("errors") or []) if isinstance(summary.get("errors"), list) else 0
+    return {
+        "scanned": scanned,
+        "candidates": candidates,
+        "best_confidence": int(best_conf),
+        "avg_top_confidence": avg_top,
+        "hit_rate": round(hit_rate, 4),
+        "errors": errors,
+    }
+
+
+def _score_autoloop_trial(stats: Dict[str, Any], *, target_candidates: int, target_confidence: int) -> float:
+    scanned = max(0, _safe_int(stats.get("scanned"), 0))
+    candidates = max(0, _safe_int(stats.get("candidates"), 0))
+    best_conf = max(0, _safe_int(stats.get("best_confidence"), 0))
+    hit_rate = _safe_float(stats.get("hit_rate"), 0.0) or 0.0
+    avg_top = _safe_float(stats.get("avg_top_confidence"), 0.0) or 0.0
+    errors = max(0, _safe_int(stats.get("errors"), 0))
+    score = best_conf * 0.70 + avg_top * 0.15
+    score += min(candidates, max(1, target_candidates) * 3) * 5.0
+    score += min(hit_rate, 0.25) * 100.0
+    if candidates >= target_candidates:
+        score += 12.0
+    if best_conf >= target_confidence:
+        score += 12.0
+    if scanned > 0 and candidates == 0:
+        score -= 18.0
+    score -= min(errors, 10) * 0.75
+    return round(score, 3)
+
+
+def _mutate_weight(filters: Dict[str, Any], key: str, multiplier: float, reason: str, changes: List[str], low: float = 0.45, high: float = 2.5) -> None:
+    cfg = dict(filters.get(key) or DEFAULT_AGENTIC_FILTERS.get(key) or {"enabled": True, "weight": 1.0})
+    old = _safe_float(cfg.get("weight"), 1.0) or 1.0
+    new = _clamp_num(old * multiplier, low, high, 2)
+    if abs(new - old) >= 0.01:
+        cfg["weight"] = new
+        filters[key] = cfg
+        changes.append(f"{key} weight {old}->{new}: {reason}")
+
+
+def _next_autoloop_candidate(current: Dict[str, Any], stats: Dict[str, Any], history: List[Dict[str, Any]], *, target_candidates: int, target_confidence: int) -> Tuple[Dict[str, Any], List[str]]:
+    nxt = _clone_settings_for_trial(current)
+    filters = _load_agentic_filters(nxt.get("filters") or {})
+    changes: List[str] = []
+    scanned = _safe_int(stats.get("scanned"), 0)
+    candidates = _safe_int(stats.get("candidates"), 0)
+    best_conf = _safe_int(stats.get("best_confidence"), 0)
+    zero_streak = 0
+    for item in reversed(history):
+        if _safe_int((item.get("stats") or {}).get("candidates"), 0) == 0:
+            zero_streak += 1
+        else:
+            break
+
+    def set_int(key: str, value: int, low: int, high: int, reason: str) -> None:
+        old = _safe_int(nxt.get(key), 0)
+        new = int(_clamp_num(value, low, high, 0))
+        if new != old:
+            nxt[key] = new
+            changes.append(f"{key} {old}->{new}: {reason}")
+
+    def set_bool(key: str, value: bool, reason: str) -> None:
+        old = bool(nxt.get(key))
+        new = bool(value)
+        if old != new:
+            nxt[key] = new
+            changes.append(f"{key} {old}->{new}: {reason}")
+
+    if scanned <= 0:
+        set_int("max_symbols", _safe_int(nxt.get("max_symbols"), 80) + 25, 1, 300, "no symbols were scanned; widen universe")
+    elif candidates == 0:
+        # Empty runs are useful evidence: they tell us gates are too tight or the wrong families are over-weighted.
+        relax = 6 if zero_streak >= 2 else 4
+        set_int("min_confidence", _safe_int(nxt.get("min_confidence"), 72) - relax, 50, 95, "empty run; relax confidence gate")
+        set_int("min_uae_score", _safe_int(nxt.get("min_uae_score"), 65) - relax, 45, 95, "empty run; relax UAE gate")
+        if zero_streak >= 1:
+            set_bool("require_regime_alignment", False, "empty runs imply regime alignment may be over-filtering")
+        set_int("earn_guard", _safe_int(nxt.get("earn_guard"), 14) - (4 if zero_streak >= 1 else 2), 3, 45, "empty run; earnings guard may block too many names")
+        _mutate_weight(filters, "market", 0.92, "empty run; reduce broad market veto", changes)
+        _mutate_weight(filters, "sector", 0.92, "empty run; reduce sector veto", changes)
+        _mutate_weight(filters, "flow", 0.90, "empty run; reduce OI/flow over-filtering", changes)
+        _mutate_weight(filters, "risk", 0.88, "empty run; soften risk penalty", changes)
+        _mutate_weight(filters, "price_action", 1.08, "let prior price action drive more decisions", changes)
+        _mutate_weight(filters, "support_resistance", 1.05, "preserve structure context while relaxing gates", changes)
+        _mutate_weight(filters, "volume", 1.04, "prefer real participation when loosening gates", changes)
+    elif candidates < target_candidates:
+        set_int("min_confidence", _safe_int(nxt.get("min_confidence"), 72) - 3, 50, 95, "too few candidates")
+        set_int("min_uae_score", _safe_int(nxt.get("min_uae_score"), 65) - 3, 45, 95, "too few candidates")
+        _mutate_weight(filters, "risk", 0.94, "too few candidates", changes)
+        _mutate_weight(filters, "flow", 0.96, "too few candidates", changes)
+        _mutate_weight(filters, "price_action", 1.05, "prior behavior should rank sparse setups", changes)
+    elif best_conf < target_confidence:
+        # Results exist but are not strong enough; strengthen discriminating factors and trim weaker candidates.
+        set_int("min_confidence", _safe_int(nxt.get("min_confidence"), 72) + 2, 50, 95, "raise quality target after weak candidates")
+        _mutate_weight(filters, "price_action", 1.07, "raise conviction from prior behavior", changes)
+        _mutate_weight(filters, "flow", 1.05, "emphasize OI/flow confirmation", changes)
+        _mutate_weight(filters, "volume", 1.05, "emphasize participation", changes)
+        _mutate_weight(filters, "support_resistance", 1.04, "emphasize clean structure", changes)
+        _mutate_weight(filters, "risk", 1.03, "avoid marginal event-risk setups", changes)
+    else:
+        # Good run; one final mild tightening prevents over-broad profiles.
+        set_int("min_confidence", _safe_int(nxt.get("min_confidence"), 72) + 1, 50, 95, "candidate set is good; mild tightening")
+        _mutate_weight(filters, "price_action", 1.02, "keep strong prior-price evidence", changes)
+        _mutate_weight(filters, "flow", 1.02, "keep flow confirmation", changes)
+
+    nxt["filters"] = filters
+    return nxt, changes[:16]
+
+
+def _store_autoloop_trial(session_id: str, iteration: int, settings: Dict[str, Any], result: Dict[str, Any], stats: Dict[str, Any], score: float, reasoning: List[str], *, status: str = "OK", chosen: bool = False) -> None:
+    def _op():
+        con = _conn()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                """
+                INSERT INTO agentic_ai_autotune_trials(
+                    session_id, iteration, started_at, completed_at, status, score, scanned,
+                    candidates, best_confidence, hit_rate, params_json, result_json, reasoning, chosen
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    session_id,
+                    iteration,
+                    (result.get("summary") or {}).get("started_at") or _now(),
+                    (result.get("summary") or {}).get("completed_at") or _now(),
+                    status,
+                    score,
+                    _safe_int(stats.get("scanned"), 0),
+                    _safe_int(stats.get("candidates"), 0),
+                    _safe_int(stats.get("best_confidence"), 0),
+                    _safe_float(stats.get("hit_rate"), 0.0) or 0.0,
+                    _json_dumps(_trial_overrides(settings)),
+                    _json_dumps({"summary": result.get("summary") or {}, "stats": stats}),
+                    "\n".join(reasoning or []),
+                    1 if chosen else 0,
+                ),
+            )
+            con.commit()
+        finally:
+            con.close()
+    _retry_write(_op, attempts=8, base_delay=0.12)
+
+
+def _mark_autoloop_chosen(session_id: str, iteration: int) -> None:
+    def _op():
+        con = _conn()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("UPDATE agentic_ai_autotune_trials SET chosen=0 WHERE session_id=?", (session_id,))
+            con.execute("UPDATE agentic_ai_autotune_trials SET chosen=1 WHERE session_id=? AND iteration=?", (session_id, iteration))
+            con.commit()
+        finally:
+            con.close()
+    _retry_write(_op, attempts=8, base_delay=0.12)
+
+
+def _run_agentic_autoloop(base_settings: Dict[str, Any], controls: Dict[str, Any]) -> None:
+    session_id = controls.get("session_id") or datetime.now().strftime("autoloop_%Y%m%d_%H%M%S")
+    max_iter = max(1, min(25, _safe_int(controls.get("max_iterations"), _safe_int(base_settings.get("autoloop_max_iterations"), 6))))
+    target_candidates = max(1, min(25, _safe_int(controls.get("target_candidates"), _safe_int(base_settings.get("autoloop_target_candidates"), 3))))
+    target_conf = max(50, min(95, _safe_int(controls.get("target_confidence"), _safe_int(base_settings.get("autoloop_target_confidence"), 78))))
+    current = _clone_settings_for_trial(base_settings)
+    current["autotune_mode"] = "SUGGEST"
+    current["autoloop_max_iterations"] = max_iter
+    current["autoloop_target_candidates"] = target_candidates
+    current["autoloop_target_confidence"] = target_conf
+    best: Optional[Dict[str, Any]] = None
+    trials: List[Dict[str, Any]] = []
+    final_status: Dict[str, Any] = {}
+    try:
+        _AUTOLOOP_STOP_EVENT.clear()
+        _update_autoloop_status(
+            running=True,
+            session_id=session_id,
+            started_at=_now(),
+            completed_at=None,
+            iteration=0,
+            max_iterations=max_iter,
+            target_candidates=target_candidates,
+            target_confidence=target_conf,
+            message="Auto-loop started. Full-scan trials will run until quality target or max loops.",
+            best_score=None,
+            best_iteration=None,
+            best_candidates=0,
+            best_confidence=0,
+            last_candidates=0,
+            last_confidence=0,
+            trials=[],
+            saved=False,
+            stop_requested=False,
+        )
+        for iteration in range(1, max_iter + 1):
+            if _AUTOLOOP_STOP_EVENT.is_set():
+                _update_autoloop_status(message="Stop requested; ending after the current trial.", stop_requested=True)
+                break
+            _update_autoloop_status(iteration=iteration, message=f"Trial {iteration}/{max_iter}: running full scan with candidate weights...")
+            result = run_agentic_scan(source="autotune", overrides=_trial_overrides(current), acquire_lock=True)
+            stats = _trial_result_stats(result)
+            score = _score_autoloop_trial(stats, target_candidates=target_candidates, target_confidence=target_conf)
+            good_enough = bool(stats["candidates"] >= target_candidates and stats["best_confidence"] >= target_conf)
+            reasoning = []
+            if stats["candidates"] == 0:
+                reasoning.append("Empty run used as negative feedback: gates/weights are too restrictive for today's watchlist.")
+            elif stats["candidates"] < target_candidates:
+                reasoning.append("Sparse run used as feedback: broaden gates while preserving price-action/flow quality.")
+            elif stats["best_confidence"] < target_conf:
+                reasoning.append("Candidates found but top score is below target; increase discriminating evidence weights.")
+            else:
+                reasoning.append("Target met: enough candidates with high-enough top confidence.")
+            trial_summary = {
+                "iteration": iteration,
+                "score": score,
+                "stats": stats,
+                "settings": _clone_settings_for_trial(current),
+                "reasoning": reasoning,
+                "good_enough": good_enough,
+            }
+            trials.append(trial_summary)
+            try:
+                _store_autoloop_trial(session_id, iteration, current, result, stats, score, reasoning, chosen=False)
+            except Exception as exc:
+                reasoning.append(f"Trial persisted with warning: {str(exc)[:120]}")
+            if best is None or score >= (_safe_float(best.get("score"), -9999.0) or -9999.0):
+                # Prefer later profiles on ties so repeated empty runs still move the profile toward the relaxed candidate.
+                best = trial_summary
+            _update_autoloop_status(
+                last_candidates=stats["candidates"],
+                last_confidence=stats["best_confidence"],
+                best_score=best.get("score") if best else score,
+                best_iteration=best.get("iteration") if best else iteration,
+                best_candidates=(best.get("stats") or {}).get("candidates", 0) if best else stats["candidates"],
+                best_confidence=(best.get("stats") or {}).get("best_confidence", 0) if best else stats["best_confidence"],
+                trials=[{k: v for k, v in t.items() if k != "settings"} for t in trials[-8:]],
+                message=("Target met; saving best profile." if good_enough else f"Trial {iteration} complete: {stats['candidates']} candidates, best confidence {stats['best_confidence']}."),
+            )
+            if good_enough:
+                break
+            current, mutation_reasons = _next_autoloop_candidate(current, stats, trials, target_candidates=target_candidates, target_confidence=target_conf)
+            if mutation_reasons:
+                _update_autoloop_status(message="Next trial will adjust: " + "; ".join(mutation_reasons[:5]))
+            time.sleep(0.4)
+
+        if best and best.get("settings"):
+            best_settings = _clone_settings_for_trial(best["settings"])
+            best_settings["autotune_mode"] = base_settings.get("autotune_mode", "AUTO")
+            best_settings["profile_version"] = _safe_int(base_settings.get("profile_version"), 1) + 1
+            best_settings["autoloop_max_iterations"] = max_iter
+            best_settings["autoloop_target_candidates"] = target_candidates
+            best_settings["autoloop_target_confidence"] = target_conf
+            final_status = {
+                "session_id": session_id,
+                "completed_at": _now(),
+                "saved_profile_version": best_settings["profile_version"],
+                "best_iteration": best.get("iteration"),
+                "best_score": best.get("score"),
+                "best_stats": best.get("stats"),
+                "trials": [{k: v for k, v in t.items() if k != "settings"} for t in trials],
+                "reasoning": "Auto-loop selected the highest scoring profile using both positive and empty-result trials.",
+            }
+            _set_settings_bulk(_settings_to_app_updates(best_settings, last_autoloop=final_status))
+            try:
+                _mark_autoloop_chosen(session_id, int(best.get("iteration") or 0))
+            except Exception:
+                pass
+            _update_autoloop_status(
+                saved=True,
+                completed_at=_now(),
+                running=False,
+                message=f"Auto-loop complete. Saved best profile v{best_settings['profile_version']} from trial {best.get('iteration')}.",
+                best_score=best.get("score"),
+                best_iteration=best.get("iteration"),
+                best_candidates=(best.get("stats") or {}).get("candidates", 0),
+                best_confidence=(best.get("stats") or {}).get("best_confidence", 0),
+                trials=[{k: v for k, v in t.items() if k != "settings"} for t in trials[-8:]],
+            )
+        else:
+            _update_autoloop_status(running=False, completed_at=_now(), saved=False, message="Auto-loop finished without a usable trial.")
+    except Exception as exc:
+        _update_autoloop_status(running=False, completed_at=_now(), saved=False, message=f"Auto-loop error: {exc}")
+    finally:
+        _AUTOLOOP_STOP_EVENT.clear()
+        try:
+            if final_status:
+                _set_setting("agentic_ai_autoloop_last_json", json.dumps(final_status, default=str))
+        except Exception:
+            pass
+        try:
+            _AUTOLOOP_LOCK.release()
+        except RuntimeError:
+            pass
+
+def _json_dumps(obj: Any) -> str:
+    try:
+        from .uae_trade_scanner import _sanitize
+        obj = _sanitize(obj)
+    except Exception:
+        pass
+    return json.dumps(obj, default=str, allow_nan=False)
+
+
+def _json_loads(txt: Any, default: Any = None) -> Any:
+    if txt is None or txt == "":
+        return default
+    try:
+        return json.loads(txt)
+    except Exception:
+        return default
+
+
+def _safe_float(v: Any, default: Optional[float] = None, ndigits: Optional[int] = None) -> Optional[float]:
+    try:
+        f = float(v)
+        if not math.isfinite(f):
+            return default
+        return round(f, ndigits) if ndigits is not None else f
+    except Exception:
+        return default
+
+
+def _safe_int(v: Any, default: int = 0) -> int:
+    try:
+        if v is None:
+            return default
+        if isinstance(v, float) and not math.isfinite(v):
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
+
+def _retry_write(fn, attempts: int = 8, base_delay: float = 0.12):
+    last_exc = None
+    for i in range(max(1, int(attempts or 1))):
+        try:
+            with _DB_WRITE_LOCK:
+                return fn()
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if 'locked' not in msg and 'busy' not in msg:
+                raise
+            last_exc = exc
+            time.sleep(base_delay * (i + 1))
+    if last_exc:
+        raise last_exc
+
+
+def _ensure_tables() -> None:
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED:
+        return
+    with _DB_INIT_LOCK:
+        if _DB_INITIALIZED:
+            return
+        def _op():
+            global _DB_INITIALIZED
+            con = _conn()
+            try:
+                con.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS agentic_ai_findings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        signature TEXT NOT NULL UNIQUE,
+                        found_at TEXT NOT NULL,
+                        last_seen_at TEXT NOT NULL,
+                        seen_count INTEGER DEFAULT 1,
+                        alert_sent_at TEXT,
+                        alert_result_json TEXT,
+                        source TEXT DEFAULT 'scanner',
+                        status TEXT DEFAULT 'NEW',
+                        symbol TEXT NOT NULL,
+                        sector TEXT,
+                        sector_etf TEXT,
+                        direction TEXT,
+                        recommendation TEXT,
+                        confidence INTEGER,
+                        score INTEGER,
+                        grade TEXT,
+                        market_regime TEXT,
+                        sector_regime TEXT,
+                        strategy_type TEXT,
+                        expiry TEXT,
+                        dte INTEGER,
+                        spot REAL,
+                        legs TEXT,
+                        strikes_json TEXT,
+                        rationale TEXT,
+                        suggested_actions TEXT,
+                        strategy_json TEXT,
+                        metrics_json TEXT,
+                        checklist_json TEXT,
+                        market_context_json TEXT,
+                        sector_context_json TEXT,
+                        created_at TEXT DEFAULT (datetime('now')),
+                        updated_at TEXT DEFAULT (datetime('now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_findings_found_at
+                        ON agentic_ai_findings(found_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_findings_symbol
+                        ON agentic_ai_findings(symbol);
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_findings_status
+                        ON agentic_ai_findings(status);
+
+                    CREATE TABLE IF NOT EXISTS agentic_ai_scanner_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        source TEXT DEFAULT 'manual',
+                        status TEXT DEFAULT 'RUNNING',
+                        scanned INTEGER DEFAULT 0,
+                        candidates INTEGER DEFAULT 0,
+                        new_findings INTEGER DEFAULT 0,
+                        repeated_findings INTEGER DEFAULT 0,
+                        alerts_sent INTEGER DEFAULT 0,
+                        alerts_attempted INTEGER DEFAULT 0,
+                        params_json TEXT,
+                        summary_json TEXT,
+                        error_text TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_runs_started_at
+                        ON agentic_ai_scanner_runs(started_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS agentic_ai_scan_ledger (
+                        scan_date TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        run_id INTEGER,
+                        source TEXT,
+                        status TEXT,
+                        signature TEXT,
+                        scanned_at TEXT DEFAULT (datetime('now')),
+                        updated_at TEXT DEFAULT (datetime('now')),
+                        PRIMARY KEY (scan_date, symbol)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_scan_ledger_date
+                        ON agentic_ai_scan_ledger(scan_date);
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_scan_ledger_symbol
+                        ON agentic_ai_scan_ledger(symbol);
+
+                    CREATE TABLE IF NOT EXISTS agentic_ai_context_cache (
+                        cache_date TEXT NOT NULL,
+                        target_dte INTEGER NOT NULL,
+                        sector_key TEXT NOT NULL,
+                        run_id INTEGER,
+                        market_context_json TEXT NOT NULL,
+                        sector_context_json TEXT NOT NULL,
+                        symbol_sector_json TEXT,
+                        summary_json TEXT,
+                        created_at TEXT DEFAULT (datetime('now')),
+                        updated_at TEXT DEFAULT (datetime('now')),
+                        PRIMARY KEY (cache_date, target_dte, sector_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_context_cache_date
+                        ON agentic_ai_context_cache(cache_date);
+
+                    CREATE TABLE IF NOT EXISTS agentic_ai_autotune_trials (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        iteration INTEGER NOT NULL,
+                        started_at TEXT,
+                        completed_at TEXT,
+                        status TEXT DEFAULT 'RUNNING',
+                        score REAL DEFAULT 0,
+                        scanned INTEGER DEFAULT 0,
+                        candidates INTEGER DEFAULT 0,
+                        best_confidence INTEGER DEFAULT 0,
+                        hit_rate REAL DEFAULT 0,
+                        params_json TEXT,
+                        result_json TEXT,
+                        reasoning TEXT,
+                        chosen INTEGER DEFAULT 0,
+                        created_at TEXT DEFAULT (datetime('now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_autotune_trials_session
+                        ON agentic_ai_autotune_trials(session_id, iteration);
+                    CREATE INDEX IF NOT EXISTS idx_agentic_ai_autotune_trials_created
+                        ON agentic_ai_autotune_trials(created_at DESC);
+                    """
+                )
+                for key, val in DEFAULT_SETTINGS.items():
+                    con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES (?,?)", (key, val))
+                con.commit()
+                _DB_INITIALIZED = True
+            finally:
+                con.close()
+        _retry_write(_op, attempts=12, base_delay=0.15)
+
+
+def _get_setting(key: str, default: str = "") -> str:
+    _ensure_tables()
+    con = _conn()
+    try:
+        row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+        return str(row["value"] if row and row["value"] is not None else default)
+    finally:
+        con.close()
+
+
+def _set_setting(key: str, value: Any) -> None:
+    _set_settings_bulk({key: value})
+
+
+def _set_settings_bulk(updates: Dict[str, Any]) -> None:
+    _ensure_tables()
+    cleaned = {}
+    for key, value in (updates or {}).items():
+        if value is None:
+            cleaned[str(key)] = ""
+        elif isinstance(value, bool):
+            cleaned[str(key)] = "1" if value else "0"
+        elif isinstance(value, (dict, list)):
+            cleaned[str(key)] = json.dumps(value, default=str)
+        else:
+            cleaned[str(key)] = str(value)
+    if not cleaned:
+        return
+
+    def _op():
+        con = _conn()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.executemany(
+                "INSERT INTO app_settings(key,value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                list(cleaned.items()),
+            )
+            con.commit()
+        finally:
+            con.close()
+    _retry_write(_op, attempts=12, base_delay=0.15)
+
+
+def _settings() -> Dict[str, Any]:
+    _ensure_tables()
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT key,value FROM app_settings WHERE key LIKE 'agentic_ai_%'"
+        ).fetchall()
+        raw = {str(r["key"]): str(r["value"] if r["value"] is not None else "") for r in rows}
+    finally:
+        con.close()
+    for k, v in DEFAULT_SETTINGS.items():
+        raw.setdefault(k, v)
+    return {
+        "enabled": raw.get("agentic_ai_scanner_enabled", "1") == "1",
+        "interval_seconds": max(3600, _safe_int(raw.get("agentic_ai_interval_seconds"), 3600)),
+        "watchlist_id": raw.get("agentic_ai_watchlist_id", "").strip(),
+        "max_symbols": max(1, min(300, _safe_int(raw.get("agentic_ai_max_symbols"), 80))),
+        "target_dte": max(7, min(75, _safe_int(raw.get("agentic_ai_target_dte"), 45))),
+        "min_confidence": max(0, min(100, _safe_int(raw.get("agentic_ai_min_confidence"), 72))),
+        "min_uae_score": max(0, min(100, _safe_int(raw.get("agentic_ai_min_uae_score"), 65))),
+        "require_regime_alignment": raw.get("agentic_ai_require_regime_alignment", "1") == "1",
+        "max_alerts_per_run": max(0, min(25, _safe_int(raw.get("agentic_ai_max_alerts_per_run"), 8))),
+        "trade_type": (raw.get("agentic_ai_trade_type", "AUTO") or "AUTO").upper(),
+        "strike_width": _parse_agentic_strike_width(raw.get("agentic_ai_strike_width", "AUTO")),
+        "short_delta": min(0.49, max(0.10, _safe_float(raw.get("agentic_ai_short_delta"), 0.45) or 0.45)),
+        "target_rr": max(0.10, _safe_float(raw.get("agentic_ai_target_rr"), 1.0) or 1.0),
+        "min_rr": max(0.0, _safe_float(raw.get("agentic_ai_min_rr"), 0.70) or 0.70),
+        "earn_guard": max(0, min(45, _safe_int(raw.get("agentic_ai_earn_guard"), 14))),
+        "autotune_mode": (raw.get("agentic_ai_autotune_mode", "AUTO") or "AUTO").upper(),
+        "profile_version": max(1, _safe_int(raw.get("agentic_ai_profile_version"), 1)),
+        "incremental_enabled": _as_bool(raw.get("agentic_ai_incremental_enabled", "1"), True),
+        "max_workers": max(2, min(10, _safe_int(raw.get("agentic_ai_max_workers"), 6))),
+        "autoloop_max_iterations": max(1, min(25, _safe_int(raw.get("agentic_ai_autoloop_max_iterations"), 6))),
+        "autoloop_target_candidates": max(1, min(25, _safe_int(raw.get("agentic_ai_autoloop_target_candidates"), 3))),
+        "autoloop_target_confidence": max(50, min(95, _safe_int(raw.get("agentic_ai_autoloop_target_confidence"), 78))),
+        "last_autotune": _json_loads(raw.get("agentic_ai_last_autotune_json", "{}"), {}),
+        "last_autoloop": _json_loads(raw.get("agentic_ai_autoloop_last_json", "{}"), {}),
+        "filters": _load_agentic_filters(raw.get("agentic_ai_filters_json", "{}")),
+        "raw": raw,
+    }
+
+
+def _parse_agentic_strike_width(value: Any) -> Any:
+    s = str(value if value is not None else "AUTO").strip().upper()
+    if not s or s == "AUTO":
+        return "AUTO"
+    try:
+        return max(0.5, float(s))
+    except Exception:
+        return "AUTO"
+
+
+def _resolve_agentic_strike_width(width_setting: Any, *, sym: str = "", opp: Optional[Dict[str, Any]] = None, market_ctx: Optional[Dict[str, Any]] = None, sector_ctx: Optional[Dict[str, Any]] = None, plan: Optional[Dict[str, Any]] = None) -> float:
+    try:
+        if width_setting not in (None, "", "AUTO"):
+            return max(0.5, float(width_setting))
+    except Exception:
+        pass
+    opp = opp or {}
+    market_ctx = market_ctx or {}
+    sector_ctx = sector_ctx or {}
+    plan = plan or {}
+    trade_type = str(plan.get("trade_type") or "AUTO").upper()
+    iv_proxy = _safe_float(opp.get("iv_proxy"), None) or _safe_float(opp.get("iv_rank"), None) or 50.0
+    market_bias = str(market_ctx.get("bias") or market_ctx.get("bias_label") or "").lower()
+    sector_bias = str(sector_ctx.get("bias") or sector_ctx.get("bias_label") or "").lower()
+    directional = any(x in market_bias for x in ("bull", "bear")) and any(x in sector_bias for x in ("bull", "bear"))
+    strong_trend = directional and (market_bias[:4] == sector_bias[:4] or market_ctx.get("confidence", 0) >= 60 or sector_ctx.get("confidence", 0) >= 60)
+    if trade_type in {"IC", "CONDOR"}:
+        return 2.0
+    if trade_type in {"PS", "CS"}:
+        if strong_trend and iv_proxy >= 55:
+            return 4.0
+        if iv_proxy >= 65:
+            return 3.0
+        return 2.0
+    if trade_type in {"PB", "DB", "CALL_DEBIT", "PUT_DEBIT"}:
+        if strong_trend and iv_proxy >= 50:
+            return 3.0
+        return 2.0
+    if iv_proxy >= 70:
+        return 4.0
+    if strong_trend:
+        return 3.0
+    return 2.0
+
+
+def _watchlists() -> List[Dict[str, Any]]:
+    try:
+        from .watchlist_manager import _ensure_tables as _ensure_wl
+        _ensure_wl()
+    except Exception:
+        pass
+    con = _conn()
+    try:
+        rows = con.execute(
+            """
+            SELECT w.id, w.name, COALESCE(w.is_default,0) AS is_default,
+                   COUNT(ws.id) AS symbol_count
+            FROM watchlists w
+            LEFT JOIN watchlist_symbols ws ON ws.watchlist_id=w.id
+            GROUP BY w.id
+            ORDER BY COALESCE(w.is_default,0) DESC, w.name
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def _resolve_symbols(watchlist_id: Optional[Any], max_symbols: int) -> Tuple[List[str], Dict[str, Any]]:
+    try:
+        from .watchlist_manager import _ensure_tables as _ensure_wl
+        _ensure_wl()
+    except Exception:
+        pass
+    con = _conn()
+    meta = {"watchlist_id": watchlist_id or "", "watchlist_name": "All symbols"}
+    try:
+        rows: List[sqlite3.Row]
+        if watchlist_id:
+            row = con.execute("SELECT name FROM watchlists WHERE id=?", (int(watchlist_id),)).fetchone()
+            if row:
+                meta["watchlist_name"] = row["name"]
+            rows = con.execute(
+                "SELECT symbol FROM watchlist_symbols WHERE watchlist_id=? ORDER BY symbol",
+                (int(watchlist_id),),
+            ).fetchall()
+        else:
+            default = con.execute(
+                "SELECT id,name FROM watchlists WHERE COALESCE(is_default,0)=1 ORDER BY id LIMIT 1"
+            ).fetchone()
+            if default:
+                meta["watchlist_id"] = default["id"]
+                meta["watchlist_name"] = default["name"]
+                rows = con.execute(
+                    "SELECT symbol FROM watchlist_symbols WHERE watchlist_id=? ORDER BY symbol",
+                    (int(default["id"]),),
+                ).fetchall()
+            else:
+                rows = con.execute("SELECT DISTINCT symbol FROM symbols ORDER BY symbol").fetchall()
+        symbols = sorted({str(r["symbol"] or "").strip().upper() for r in rows if str(r["symbol"] or "").strip()})
+        meta["total_universe"] = len(symbols)
+        return symbols[:max_symbols], meta
+    finally:
+        con.close()
+
+
+def _scan_plan(target_dte: int) -> Dict[str, Any]:
+    from .uae_trade_scanner import _dte_plan
+    plan = dict(_dte_plan(int(target_dte)))
+    required = []
+    for tf in ["1h", "1d", "1wk"] + list(plan.get("required_tfs") or []):
+        if tf not in required:
+            required.append(tf)
+    plan["required_tfs"] = required
+    plan["note"] = (plan.get("note") or "") + " Agentic scanner also validates 1H, Daily and Weekly alignment."
+    return plan
+
+
+def _bias_from_score(score: float) -> str:
+    if score >= 0.28:
+        return "bull"
+    if score <= -0.28:
+        return "bear"
+    return "neutral"
+
+
+def _bias_label(bias: str) -> str:
+    return {"bull": "Bullish", "bear": "Bearish", "neutral": "Neutral"}.get(str(bias or "").lower(), "Mixed")
+
+
+def _direction_matches_bias(direction: str, bias: str) -> bool:
+    direction = (direction or "").lower()
+    bias = (bias or "").lower()
+    if direction in ("bull", "bear"):
+        return direction == bias
+    if direction == "neutral":
+        return bias == "neutral"
+    return False
+
+
+def _alignment_score(direction: str, bias: str) -> int:
+    direction = (direction or "").lower()
+    bias = (bias or "").lower()
+    if not direction or not bias:
+        return 55
+    if _direction_matches_bias(direction, bias):
+        return 100
+    if bias == "neutral":
+        return 72 if direction in ("bull", "bear") else 100
+    if direction == "neutral":
+        return 58
+    return 30
+
+
+def _indicator_regime_score(indicators: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
+    total = 0.0
+    used = 0.0
+    tf_rows: Dict[str, Any] = {}
+    for tf, wt in TIMEFRAME_WEIGHTS.items():
+        ind = indicators.get(tf) or {}
+        if not ind:
+            continue
+        reg = str(ind.get("regime") or "SIDEWAYS").upper()
+        base = REGIME_SCORE.get(reg, 0.0)
+        hist = _safe_float(ind.get("hist"), 0.0) or 0.0
+        hist_prev = _safe_float(ind.get("hist_prev"), 0.0) or 0.0
+        adx = _safe_float(ind.get("adx"), 0.0) or 0.0
+        if hist > hist_prev and hist > 0:
+            base += 0.08
+        elif hist < hist_prev and hist < 0:
+            base -= 0.08
+        if adx >= 25 and abs(base) > 0:
+            base *= 1.08
+        base = max(-1.2, min(1.2, base))
+        total += base * wt
+        used += wt
+        tf_rows[tf] = {
+            "regime": reg,
+            "score": round(base, 3),
+            "close": ind.get("close"),
+            "hist": ind.get("hist"),
+            "hist_prev": ind.get("hist_prev"),
+            "adx": ind.get("adx"),
+            "adx_rising": ind.get("adx_rising"),
+            "bull_confluence": ind.get("bull_confluence"),
+            "bear_confluence": ind.get("bear_confluence"),
+        }
+    if used <= 0:
+        return 0.0, tf_rows
+    return round(max(-1.0, min(1.0, total / used)), 3), tf_rows
+
+
+def _ema(series: Any, span: int) -> Any:
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def _rsi_series(close: Any, period: int = 14) -> Any:
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
+    rs = gain / loss.replace(0, math.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50.0)
+
+
+def _ret_pct(df: Any, bars: int) -> Optional[float]:
+    try:
+        if df is None or getattr(df, "empty", True) or "Close" not in df or len(df) <= bars:
+            return None
+        c = df["Close"].astype(float).dropna()
+        if len(c) <= bars:
+            return None
+        return round((float(c.iloc[-1]) / float(c.iloc[-1 - bars]) - 1.0) * 100.0, 2)
+    except Exception:
+        return None
+
+
+def _bb_kc_profile_from_df(df: Any, label: str) -> Dict[str, Any]:
+    """Compact Bollinger/Keltner profile used by Agentic quality gates.
+
+    This intentionally mirrors the AI Hub weekly-plan read: a bullish score is
+    not enough when price is already stretched into an upper-band/prior-high
+    area and option OI is showing call-side resistance.  The output is kept
+    JSON-safe so it can be stored in finding history.
+    """
+    try:
+        if df is None or getattr(df, "empty", True) or "Close" not in df or len(df) < 22:
+            return {"timeframe": label, "available": False, "note": "not enough bars"}
+        d = df.copy()
+        for c in ["Open", "High", "Low", "Close", "Volume"]:
+            if c in d:
+                d[c] = d[c].astype(float)
+        close = d["Close"].dropna()
+        if len(close) < 22:
+            return {"timeframe": label, "available": False, "note": "not enough close bars"}
+        high = d["High"].reindex(close.index).astype(float) if "High" in d else close
+        low = d["Low"].reindex(close.index).astype(float) if "Low" in d else close
+        last = float(close.iloc[-1])
+        ma20 = close.rolling(20).mean()
+        sd20 = close.rolling(20).std(ddof=0)
+        bb_mid = float(ma20.iloc[-1])
+        bb_upper = float(bb_mid + 2.0 * sd20.iloc[-1])
+        bb_lower = float(bb_mid - 2.0 * sd20.iloc[-1])
+        bb_widths = ((ma20 + 2.0 * sd20) - (ma20 - 2.0 * sd20)) / ma20.replace(0, math.nan) * 100.0
+        bb_widths = bb_widths.dropna()
+        bb_width_pct = float(bb_widths.iloc[-1]) if len(bb_widths) else 0.0
+        bb_width_rank = None
+        if len(bb_widths):
+            bb_width_rank = round(float((bb_widths <= bb_width_pct).sum()) / max(1, len(bb_widths)) * 100.0, 1)
+        prev_close = close.shift(1)
+        tr = __import__("pandas").concat([
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr20 = float(tr.tail(20).mean()) if len(tr.dropna()) else 0.0
+        ema20 = float(_ema(close, 20).iloc[-1])
+        kc_upper = ema20 + 1.5 * atr20
+        kc_lower = ema20 - 1.5 * atr20
+        bb_pct = (last - bb_lower) / max(1e-9, bb_upper - bb_lower) * 100.0 if bb_upper != bb_lower else 50.0
+        prior_window = d.iloc[-21:-1] if len(d) >= 21 else d.iloc[:-1]
+        prior_high = float(prior_window["High"].max()) if "High" in prior_window and len(prior_window) else None
+        prior_low = float(prior_window["Low"].min()) if "Low" in prior_window and len(prior_window) else None
+        rsi = _rsi_series(close, 14)
+        rsi14 = float(rsi.iloc[-1]) if len(rsi) else 50.0
+        ret_4 = _ret_pct(d, 4)
+        ret_10 = _ret_pct(d, 10)
+        bb_inside_kc = bool(bb_upper < kc_upper and bb_lower > kc_lower)
+        kc_inside_bb = bool(kc_upper < bb_upper and kc_lower > bb_lower)
+        near_upper = bool(bb_pct >= 78 or (prior_high and abs(last - prior_high) / max(last, 1.0) <= 0.02))
+        near_lower = bool(bb_pct <= 22 or (prior_low and abs(last - prior_low) / max(last, 1.0) <= 0.02))
+        stretched_up = bool((bb_pct >= 85 and rsi14 >= 65) or rsi14 >= 74 or (ret_4 is not None and ret_4 >= 18 and bb_pct >= 75))
+        stretched_down = bool((bb_pct <= 15 and rsi14 <= 35) or rsi14 <= 26 or (ret_4 is not None and ret_4 <= -18 and bb_pct <= 25))
+        squeeze_state = "squeeze_on" if bb_inside_kc else "bb_expanded_kc_inside" if kc_inside_bb else "neutral_volatility"
+        return {
+            "timeframe": label,
+            "available": True,
+            "close": round(last, 2),
+            "rsi14": round(rsi14, 2),
+            "bb_upper": round(bb_upper, 2),
+            "bb_lower": round(bb_lower, 2),
+            "bb_mid": round(bb_mid, 2),
+            "bb_pct": round(bb_pct, 1),
+            "bb_width_pct": round(bb_width_pct, 2),
+            "bb_width_rank": bb_width_rank,
+            "kc_upper": round(kc_upper, 2),
+            "kc_lower": round(kc_lower, 2),
+            "bb_inside_kc": bb_inside_kc,
+            "kc_inside_bb": kc_inside_bb,
+            "squeeze_state": squeeze_state,
+            "prior_high": round(prior_high, 2) if prior_high else None,
+            "prior_low": round(prior_low, 2) if prior_low else None,
+            "near_upper": near_upper,
+            "near_lower": near_lower,
+            "stretched_up": stretched_up,
+            "stretched_down": stretched_down,
+            "ret_4": ret_4,
+            "ret_10": ret_10,
+            "note": f"{label}: {squeeze_state}, BB% {bb_pct:.0f}, RSI {rsi14:.1f}, width-rank {bb_width_rank if bb_width_rank is not None else 'n/a'}",
+        }
+    except Exception as exc:
+        return {"timeframe": label, "available": False, "note": str(exc)[:120]}
+
+
+def _price_action_quality_context(frames: Dict[str, Any], direction: str) -> Dict[str, Any]:
+    daily = _bb_kc_profile_from_df(frames.get("1d"), "1D")
+    weekly = _bb_kc_profile_from_df(frames.get("1wk"), "1W")
+    direction = (direction or "").lower()
+    notes: List[str] = []
+    for p in (daily, weekly):
+        if p.get("available"):
+            notes.append(str(p.get("note") or ""))
+    weekly_stretched_up = bool(weekly.get("stretched_up") or (weekly.get("near_upper") and (_safe_float(weekly.get("rsi14"), 0) or 0) >= 68))
+    daily_stretched_up = bool(daily.get("stretched_up") or (daily.get("near_upper") and (_safe_float(daily.get("rsi14"), 0) or 0) >= 68))
+    weekly_stretched_down = bool(weekly.get("stretched_down") or (weekly.get("near_lower") and (_safe_float(weekly.get("rsi14"), 50) or 50) <= 32))
+    daily_stretched_down = bool(daily.get("stretched_down") or (daily.get("near_lower") and (_safe_float(daily.get("rsi14"), 50) or 50) <= 32))
+    range_premium_ok = bool(
+        (daily.get("available") and (daily.get("kc_inside_bb") or (daily.get("bb_width_rank") or 0) >= 45)) or
+        (weekly.get("available") and weekly.get("kc_inside_bb"))
+    )
+    bullish_extension_risk = bool(direction == "bull" and (weekly_stretched_up or (daily_stretched_up and weekly.get("near_upper"))))
+    bearish_extension_risk = bool(direction == "bear" and (weekly_stretched_down or (daily_stretched_down and weekly.get("near_lower"))))
+    if bullish_extension_risk:
+        notes.append("Bullish entry is chasing an upper-band/weekly-extension area; prefer pullback support, IC, or call-credit only after rejection confirms.")
+    if bearish_extension_risk:
+        notes.append("Bearish entry is chasing a lower-band/weekly-extension area; prefer bounce/rejection confirmation before call/put credit structures.")
+    if range_premium_ok:
+        notes.append("BB/Keltner context supports defined-risk premium structures when OI walls bracket price.")
+    return {
+        "available": bool(daily.get("available") or weekly.get("available")),
+        "daily": daily,
+        "weekly": weekly,
+        "weekly_stretched_up": weekly_stretched_up,
+        "daily_stretched_up": daily_stretched_up,
+        "weekly_stretched_down": weekly_stretched_down,
+        "daily_stretched_down": daily_stretched_down,
+        "bullish_extension_risk": bullish_extension_risk,
+        "bearish_extension_risk": bearish_extension_risk,
+        "range_premium_ok": range_premium_ok,
+        "summary": "; ".join(notes[:5]) if notes else "BB/Keltner price-action context unavailable.",
+        "notes": notes[:8],
+    }
+
+
+
+DEFAULT_AGENTIC_FILTERS = {
+    "market": {"enabled": True, "weight": 1.15},
+    "sector": {"enabled": True, "weight": 1.0},
+    "price_action": {"enabled": True, "weight": 1.30},
+    "volume": {"enabled": True, "weight": 1.0},
+    "support_resistance": {"enabled": True, "weight": 1.10},
+    "flow": {"enabled": True, "weight": 1.20},
+    "iv": {"enabled": True, "weight": 0.85},
+    "risk": {"enabled": True, "weight": 1.25},
+}
+
+
+def _load_agentic_filters(raw: Any) -> Dict[str, Any]:
+    try:
+        data = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+    except Exception:
+        data = {}
+    out: Dict[str, Any] = {}
+    for k, default in DEFAULT_AGENTIC_FILTERS.items():
+        item = dict(default)
+        src = data.get(k) or {}
+        if isinstance(src, dict):
+            item["enabled"] = bool(src.get("enabled", item["enabled"]))
+            try:
+                item["weight"] = max(0.0, float(src.get("weight", item["weight"])))
+            except Exception:
+                pass
+        out[k] = item
+    return out
+
+
+def _prior_price_action_context(frames: Dict[str, Any], direction: str) -> Dict[str, Any]:
+    daily = frames.get("1d")
+    try:
+        if daily is None or getattr(daily, "empty", True) or len(daily) < 25:
+            return {"available": False, "note": "not enough daily bars"}
+        d = daily.copy()
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in d:
+                d[col] = d[col].astype(float)
+        close = d["Close"].dropna()
+        high = d["High"].dropna() if "High" in d else close
+        low = d["Low"].dropna() if "Low" in d else close
+        open_ = d["Open"].dropna() if "Open" in d else close
+        vol = d["Volume"].dropna() if "Volume" in d else None
+        if len(close) < 25:
+            return {"available": False, "note": "not enough close bars"}
+        last = float(close.iloc[-1])
+        prev5 = float(close.iloc[-6]) if len(close) >= 6 else float(close.iloc[-1])
+        prev20 = float(close.iloc[-21]) if len(close) >= 21 else float(close.iloc[0])
+        prev60 = float(close.iloc[-61]) if len(close) >= 61 else float(close.iloc[0])
+        ret_1 = round((last / float(close.iloc[-2]) - 1) * 100.0, 2) if len(close) >= 2 else 0.0
+        ret_5 = round((last / prev5 - 1) * 100.0, 2)
+        ret_20 = round((last / prev20 - 1) * 100.0, 2)
+        ret_60 = round((last / prev60 - 1) * 100.0, 2)
+        prior_high_5 = float(high.iloc[-6:-1].max()) if len(high) >= 6 else float(high.iloc[:-1].max())
+        prior_low_5 = float(low.iloc[-6:-1].min()) if len(low) >= 6 else float(low.iloc[:-1].min())
+        prior_high_20 = float(high.iloc[-21:-1].max()) if len(high) >= 21 else float(high.iloc[:-1].max())
+        prior_low_20 = float(low.iloc[-21:-1].min()) if len(low) >= 21 else float(low.iloc[:-1].min())
+        body = abs(float(close.iloc[-1]) - float(open_.iloc[-1])) if len(open_) else 0.0
+        rng = max(0.01, float(high.iloc[-1]) - float(low.iloc[-1])) if len(high) and len(low) else 0.01
+        body_pct = round(body / rng * 100.0, 1)
+        trs = []
+        for i in range(len(close)):
+            prev = float(close.iloc[i - 1]) if i > 0 else float(close.iloc[i])
+            h = float(high.iloc[i]) if i < len(high) else float(close.iloc[i])
+            l = float(low.iloc[i]) if i < len(low) else float(close.iloc[i])
+            trs.append(max(h - l, abs(h - prev), abs(l - prev)))
+        atr14 = sum(trs[-14:]) / min(14, len(trs))
+        vol_ratio = None
+        if vol is not None and len(vol) >= 21:
+            avg20 = float(vol.iloc[-21:-1].mean())
+            vol_ratio = round(float(vol.iloc[-1]) / avg20, 2) if avg20 > 0 else None
+        breakout_up = last > prior_high_20
+        breakdown_down = last < prior_low_20
+        continuation = (ret_5 > 0 and ret_20 > 0 and last >= prior_high_5 * 0.995) or (ret_5 < 0 and ret_20 < 0 and last <= prior_low_5 * 1.005)
+        stretch_up = ret_20 >= 12 or last >= prior_high_20 * 1.02
+        stretch_down = ret_20 <= -12 or last <= prior_low_20 * 0.98
+        trend_hint = "bull" if ret_20 > 0 and ret_5 >= 0 else "bear" if ret_20 < 0 and ret_5 <= 0 else "neutral"
+        if direction == "bull":
+            score = 55
+            if breakout_up:
+                score += 18
+            if continuation:
+                score += 10
+            if vol_ratio and vol_ratio >= 1.5:
+                score += 10
+            if body_pct >= 55:
+                score += 7
+            if stretch_up:
+                score -= 15
+            if ret_20 < 0:
+                score -= 8
+        elif direction == "bear":
+            score = 55
+            if breakdown_down:
+                score += 18
+            if continuation:
+                score += 10
+            if vol_ratio and vol_ratio >= 1.5:
+                score += 10
+            if body_pct >= 55:
+                score += 7
+            if stretch_down:
+                score -= 15
+            if ret_20 > 0:
+                score -= 8
+        else:
+            score = 60
+            if abs(ret_20) < 6 and abs(ret_5) < 3:
+                score += 15
+            if vol_ratio and vol_ratio <= 0.95:
+                score += 10
+            if body_pct <= 40:
+                score += 7
+        notes: List[str] = []
+        notes.append(f"1d ret 1/5/20/60 = {ret_1}% / {ret_5}% / {ret_20}% / {ret_60}%.")
+        notes.append(f"Recent range vs prior 5d high/low {round(prior_high_5, 2)} / {round(prior_low_5, 2)}; 20d high/low {round(prior_high_20, 2)} / {round(prior_low_20, 2)}.")
+        notes.append(f"Latest candle body {body_pct}% of range; ATR14 {round(atr14, 2)}; volume ratio {vol_ratio if vol_ratio is not None else 'n/a' }.")
+        if breakout_up:
+            notes.append("Price is breaking above the prior 20-day range; current move is significant, not random noise.")
+        if breakdown_down:
+            notes.append("Price is breaking below the prior 20-day range; current move is significant, not random noise.")
+        if stretch_up or stretch_down:
+            notes.append("Move is stretched versus prior 20-day behavior; mean-reversion risk is elevated.")
+        if continuation:
+            notes.append("Current move is continuing from the prior 5/20-day trend, so the candle has structural follow-through.")
+        return {
+            "available": True,
+            "score": int(max(0, min(100, score))),
+            "ret_1d_pct": ret_1,
+            "ret_5d_pct": ret_5,
+            "ret_20d_pct": ret_20,
+            "ret_60d_pct": ret_60,
+            "prior_high_5": round(prior_high_5, 2),
+            "prior_low_5": round(prior_low_5, 2),
+            "prior_high_20": round(prior_high_20, 2),
+            "prior_low_20": round(prior_low_20, 2),
+            "body_pct": body_pct,
+            "atr14": round(atr14, 2),
+            "volume_ratio20": vol_ratio,
+            "breakout_up": breakout_up,
+            "breakdown_down": breakdown_down,
+            "continuation": continuation,
+            "stretch_up": stretch_up,
+            "stretch_down": stretch_down,
+            "trend_hint": trend_hint,
+            "summary": " ".join(notes[:4]),
+            "notes": notes,
+        }
+    except Exception as exc:
+        return {"available": False, "note": str(exc)[:120]}
+
+
+def _expected_move_context(spot: Optional[float], iv_proxy: Optional[float], dte: int) -> Dict[str, Any]:
+    sp = _safe_float(spot, None)
+    iv = _safe_float(iv_proxy, None)
+    if not sp or not iv or dte <= 0:
+        return {"available": False, "note": "missing spot/iv/dte"}
+    try:
+        sigma = sp * (iv / 100.0) * math.sqrt(max(1, dte) / 365.0)
+        pct = round((sigma / sp) * 100.0, 2)
+        return {"available": True, "one_sigma": round(sigma, 2), "expected_move_pct": pct, "expected_move_abs": round(sigma, 2)}
+    except Exception as exc:
+        return {"available": False, "note": str(exc)[:120]}
+
+
+def _estimate_pop(trade: Dict[str, Any]) -> Optional[float]:
+    try:
+        ttype = str(trade.get("trade_type") or "").upper()
+        sd = abs(_safe_float(trade.get("short_delta"), None) or 0.0)
+        if ttype in {"PS", "CS"}:
+            return round(max(5.0, min(95.0, (1.0 - sd) * 100.0)), 1)
+        if ttype == "IC":
+            p1 = 1.0 - abs(_safe_float(trade.get("short_delta"), 0.0) or 0.0)
+            return round(max(40.0, min(90.0, p1 * 100.0 + 10.0)), 1)
+        if ttype in {"CALL", "PUT"}:
+            return round(max(30.0, min(80.0, 62.0 - sd * 20.0)), 1)
+        return round(max(30.0, min(80.0, 60.0 - sd * 15.0)), 1)
+    except Exception:
+        return None
+
+
+def _strategy_fit_label(family: str, trade_type: str, iv_proxy: Optional[float]) -> str:
+    fam = (family or "").lower()
+    ttype = (trade_type or "").upper()
+    iv = _safe_float(iv_proxy, None) or 0.0
+    if fam.startswith("bullish"):
+        return "CALL debit spread" if iv >= 25 else "Long call"
+    if fam.startswith("bearish"):
+        return "PUT debit spread" if iv >= 25 else "Long put"
+    if fam.startswith("mean"):
+        return "Credit spread / butterfly" if iv >= 25 else "Reversal debit spread"
+    if fam.startswith("sideways"):
+        return "Iron condor / calendar" if iv >= 20 else "Calendar / diagonal"
+    if ttype in {"PS", "CS", "IC"}:
+        return ttype
+    return "Defined-risk options"
+
+
+def _classify_trade_family(direction: str, price_ctx: Dict[str, Any], daily: Dict[str, Any], market_ctx: Dict[str, Any], sector_ctx: Dict[str, Any]) -> Tuple[str, str]:
+    dirn = (direction or "").lower()
+    ret5 = _safe_float(price_ctx.get("ret_5d_pct"), 0.0) or 0.0
+    ret20 = _safe_float(price_ctx.get("ret_20d_pct"), 0.0) or 0.0
+    trend = str(price_ctx.get("trend_hint") or "neutral").lower()
+    breakout_up = bool(price_ctx.get("breakout_up"))
+    breakdown_down = bool(price_ctx.get("breakdown_down"))
+    stretch_up = bool(price_ctx.get("stretch_up"))
+    stretch_down = bool(price_ctx.get("stretch_down"))
+    volume_ratio = _safe_float(price_ctx.get("volume_ratio20"), None)
+    sideways_regime = (market_ctx.get("bias") == "sideways" or sector_ctx.get("bias") == "sideways" or daily.get("trend") == "mixed")
+    notes: List[str] = []
+    if dirn == "bull":
+        if breakout_up or (trend == "bull" and ret5 > 0 and ret20 > 0 and not stretch_up):
+            notes.append("Uptrend is breaking out / continuing with supportive prior 5D and 20D structure.")
+            return "Bullish Momentum", " ".join(notes)
+        if stretch_up or ret20 >= 12 or (daily.get("rsi14") or 0) >= 72:
+            notes.append("Price is extended versus prior 20D history; bullish setup is more likely a pullback/reversion candidate.")
+            return "Mean Reversion", " ".join(notes)
+        if sideways_regime and abs(ret5) < 3 and abs(ret20) < 8:
+            notes.append("Market/sector regime and prior price action are range-bound.")
+            return "Sideways", " ".join(notes)
+        if volume_ratio and volume_ratio >= 1.5:
+            notes.append("Bullish bias with strong participation but without a clean breakout.")
+            return "Bullish Momentum", " ".join(notes)
+        notes.append("Directional bullish bias remains the cleaner read.")
+        return "Bullish Momentum", " ".join(notes)
+    if dirn == "bear":
+        if breakdown_down or (trend == "bear" and ret5 < 0 and ret20 < 0 and not stretch_down):
+            notes.append("Downtrend is breaking down / continuing with supportive prior 5D and 20D structure.")
+            return "Bearish Momentum", " ".join(notes)
+        if stretch_down or ret20 <= -12 or (daily.get("rsi14") or 50) <= 28:
+            notes.append("Price is extended versus prior 20D history; bearish setup is more likely a rebound/reversion candidate.")
+            return "Mean Reversion", " ".join(notes)
+        if sideways_regime and abs(ret5) < 3 and abs(ret20) < 8:
+            notes.append("Market/sector regime and prior price action are range-bound.")
+            return "Sideways", " ".join(notes)
+        if volume_ratio and volume_ratio >= 1.5:
+            notes.append("Bearish bias with strong participation but without a clean breakdown.")
+            return "Bearish Momentum", " ".join(notes)
+        notes.append("Directional bearish bias remains the cleaner read.")
+        return "Bearish Momentum", " ".join(notes)
+    if sideways_regime or (abs(ret5) < 3 and abs(ret20) < 8):
+        notes.append("Range-bound regime with limited directional expansion.")
+        return "Sideways", " ".join(notes)
+    notes.append("No clean directional edge; mean reversion is the safer framing.")
+    return "Mean Reversion", " ".join(notes)
+
+
+def _factor_scores(
+    direction: str,
+    trade: Dict[str, Any],
+    daily: Dict[str, Any],
+    rs: Dict[str, Any],
+    market_ctx: Dict[str, Any],
+    sector_ctx: Dict[str, Any],
+    price_ctx: Dict[str, Any],
+    option_quality_ctx: Dict[str, Any],
+    quality_gate: Dict[str, Any],
+    exact_trade: Optional[Dict[str, Any]] = None,
+    checks_exact: Optional[List[Dict[str, Any]]] = None,
+    iv_proxy: Optional[float] = None,
+    earn_days: Optional[int] = None,
+    earn_guard: Optional[int] = None,
+) -> Dict[str, Any]:
+    trade_type = str((exact_trade or trade).get("trade_type") or trade.get("trade_type") or "").upper()
+    direction = (direction or "").lower()
+    market_score = _alignment_score(direction, market_ctx.get("bias"))
+    sector_score = _alignment_score(direction, sector_ctx.get("bias"))
+    price_score = _safe_int(price_ctx.get("score"), 50)
+    vol_ratio = _safe_float(daily.get("volume_ratio20"), None) or _safe_float(price_ctx.get("volume_ratio20"), None)
+    volume_score = 55
+    if vol_ratio is not None:
+        if vol_ratio >= 2.0:
+            volume_score = 92
+        elif vol_ratio >= 1.5:
+            volume_score = 84
+        elif vol_ratio >= 1.2:
+            volume_score = 72
+        elif vol_ratio <= 0.8:
+            volume_score = 42
+    rs_score = _rs_score(direction, rs)
+    sr_score = 55
+    if checks_exact:
+        for c in checks_exact:
+            if str(c.get("name") or "").lower().startswith("s/r"):
+                sr_score = int(round(_safe_float(c.get("points"), 5.0) or 5.0 / max(1.0, _safe_float(c.get("max_points"), 10.0) or 10.0) * 100.0))
+                break
+    else:
+        if bool(price_ctx.get("breakout_up") or price_ctx.get("breakdown_down")):
+            sr_score = 75
+        if bool(price_ctx.get("stretch_up") or price_ctx.get("stretch_down")):
+            sr_score = min(sr_score, 45)
+    flow_score = 55
+    oi_available = bool(option_quality_ctx.get("available"))
+    if oi_available:
+        if option_quality_ctx.get("balanced_two_sided"):
+            flow_score = 78
+        if option_quality_ctx.get("call_side_heavy") and direction == "bull":
+            flow_score = 84
+        elif option_quality_ctx.get("put_side_heavy") and direction == "bear":
+            flow_score = 84
+        elif option_quality_ctx.get("weak_short_strike_oi"):
+            flow_score = 42
+        else:
+            flow_score = 68
+    iv = _safe_float(iv_proxy, None) or _safe_float((exact_trade or trade).get("iv_proxy"), None) or 0.0
+    iv_score = 55
+    if trade_type in {"PS", "CS", "IC"}:
+        if iv >= 40:
+            iv_score = 86
+        elif iv >= 25:
+            iv_score = 74
+        elif iv >= 15:
+            iv_score = 60
+        else:
+            iv_score = 42
+    else:
+        if 15 <= iv <= 35:
+            iv_score = 84
+        elif iv < 15:
+            iv_score = 60
+        else:
+            iv_score = 48
+    risk_score = 85
+    if earn_days is not None and earn_guard is not None and earn_days < earn_guard:
+        risk_score -= 35
+    if price_ctx.get("stretch_up") or price_ctx.get("stretch_down"):
+        risk_score -= 12
+    if quality_gate.get("block"):
+        risk_score -= 30
+    if quality_gate.get("penalty"):
+        risk_score -= min(30, _safe_int(quality_gate.get("penalty"), 0))
+    if option_quality_ctx.get("weak_short_strike_oi"):
+        risk_score -= 10
+    risk_score = int(max(0, min(100, risk_score)))
+    factors = {
+        "market": market_score,
+        "sector": sector_score,
+        "price_action": price_score,
+        "volume": volume_score,
+        "support_resistance": sr_score,
+        "flow": flow_score,
+        "iv": iv_score,
+        "risk": risk_score,
+        "relative_strength": rs_score,
+    }
+    evidence: List[str] = []
+    evidence.extend((price_ctx.get("notes") or [])[:3])
+    if vol_ratio is not None:
+        evidence.append(f"Volume ratio 20D is {vol_ratio}x.")
+    if option_quality_ctx.get("summary"):
+        evidence.append(str(option_quality_ctx.get("summary")))
+    evidence.append(f"Market alignment score {market_score}/100 and sector alignment score {sector_score}/100.")
+    evidence.append(f"Relative strength score {rs_score}/100; IV proxy {iv:.1f}.")
+    return {"factors": factors, "evidence": evidence[:8]}
+
+def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(r[1]).lower() for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _option_type_expr(cols: set[str]) -> str:
+    return "lower(type)" if "type" in cols else "lower(option_type)" if "option_type" in cols else "''"
+
+
+def _target_option_oi_context(symbol: str, expiry: Optional[str], spot: Optional[float], trade: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Cumulative OI through the selected expiry plus target-expiry short-strike quality.
+
+    Agentic alerts should not call a PS/CS actionable merely because market and
+    sector are bullish/bearish.  This context checks whether the chosen short
+    strike is anchored by meaningful OI and whether cumulative call/put walls
+    conflict with the proposed direction.
+    """
+    sym = (symbol or "").upper().strip()
+    out: Dict[str, Any] = {"available": False, "symbol": sym, "expiry": expiry, "notes": []}
+    if not sym or not expiry:
+        out["notes"].append("No expiry for option-wall quality check.")
+        return out
+    con = _conn()
+    try:
+        cols = _table_columns(con, "options")
+        if not cols:
+            out["notes"].append("options table is unavailable.")
+            return out
+        typ_expr = _option_type_expr(cols)
+        today_s = date.today().isoformat()
+        latest_row = con.execute(
+            "SELECT MAX(date) AS d FROM options WHERE symbol=? AND expiration>=? AND expiration<=?",
+            (sym, today_s, expiry),
+        ).fetchone()
+        latest = str(latest_row["d"] or "") if latest_row else ""
+        if not latest:
+            latest_row = con.execute("SELECT MAX(date) AS d FROM options WHERE symbol=?", (sym,)).fetchone()
+            latest = str(latest_row["d"] or "") if latest_row else ""
+        if not latest:
+            out["notes"].append("No local option OI snapshot for symbol.")
+            return out
+        rows = con.execute(
+            f"""
+            SELECT expiration, {typ_expr} AS type, strike, SUM(COALESCE(oi,0)) AS oi
+            FROM options
+            WHERE symbol=? AND date=? AND expiration>=? AND expiration<=?
+            GROUP BY expiration, {typ_expr}, strike
+            """,
+            (sym, latest, today_s, expiry),
+        ).fetchall()
+        target_rows = con.execute(
+            f"""
+            SELECT expiration, {typ_expr} AS type, strike, SUM(COALESCE(oi,0)) AS oi
+            FROM options
+            WHERE symbol=? AND date=? AND expiration=?
+            GROUP BY expiration, {typ_expr}, strike
+            """,
+            (sym, latest, expiry),
+        ).fetchall()
+        if not rows:
+            out["notes"].append("No option rows through target expiry.")
+            return out
+        sp = _safe_float(spot, None)
+        calls = [r for r in rows if str(r["type"] or "").startswith("c")]
+        puts = [r for r in rows if str(r["type"] or "").startswith("p")]
+        call_oi = sum(_safe_float(r["oi"], 0.0) or 0.0 for r in calls)
+        put_oi = sum(_safe_float(r["oi"], 0.0) or 0.0 for r in puts)
+        total_oi = call_oi + put_oi
+        pcr = round(put_oi / max(1.0, call_oi), 3)
+        call_put_ratio = round(call_oi / max(1.0, put_oi), 3)
+        def top_walls(pool: List[Any], side: str, limit: int = 6) -> List[Dict[str, Any]]:
+            items: List[Dict[str, Any]] = []
+            for r in pool:
+                k = _safe_float(r["strike"], None)
+                oi = _safe_float(r["oi"], 0.0) or 0.0
+                if k is None or oi <= 0:
+                    continue
+                if sp and side == "call" and k < sp:
+                    # ITM call OI can be meaningful, but for resistance quality we
+                    # prioritise walls above spot.
+                    continue
+                if sp and side == "put" and k > sp:
+                    continue
+                dist_pct = round(abs(k - sp) / max(0.01, sp) * 100.0, 2) if sp else None
+                items.append({"strike": round(k, 2), "oi": int(oi), "distance_pct": dist_pct})
+            items.sort(key=lambda x: (-x["oi"], x.get("distance_pct") if x.get("distance_pct") is not None else 999))
+            return items[:limit]
+        top_calls = top_walls(calls, "call", 8)
+        top_puts = top_walls(puts, "put", 8)
+        target_by_key: Dict[Tuple[str, float], float] = {}
+        aggregate_by_key: Dict[Tuple[str, float], float] = {}
+        for r in target_rows:
+            k = _safe_float(r["strike"], None)
+            typ = "call" if str(r["type"] or "").startswith("c") else "put"
+            if k is not None:
+                target_by_key[(typ, round(k, 6))] = target_by_key.get((typ, round(k, 6)), 0.0) + (_safe_float(r["oi"], 0.0) or 0.0)
+        for r in rows:
+            k = _safe_float(r["strike"], None)
+            typ = "call" if str(r["type"] or "").startswith("c") else "put"
+            if k is not None:
+                aggregate_by_key[(typ, round(k, 6))] = aggregate_by_key.get((typ, round(k, 6)), 0.0) + (_safe_float(r["oi"], 0.0) or 0.0)
+        trade = trade or {}
+        ttype = str(trade.get("trade_type") or "").upper()
+        short_infos: List[Dict[str, Any]] = []
+        def add_short(label: str, opt_type: str, strike_val: Any) -> None:
+            k = _safe_float(strike_val, None)
+            if k is None:
+                return
+            target_oi = target_by_key.get((opt_type, round(k, 6)), 0.0)
+            agg_oi = aggregate_by_key.get((opt_type, round(k, 6)), 0.0)
+            max_side_oi = max([v for (typ, _), v in aggregate_by_key.items() if typ == opt_type] or [0.0])
+            rel = round(agg_oi / max(1.0, max_side_oi), 3) if max_side_oi else 0.0
+            short_infos.append({"label": label, "type": opt_type, "strike": round(k, 2), "target_oi": int(target_oi), "aggregate_oi": int(agg_oi), "side_max_oi": int(max_side_oi), "side_oi_ratio": rel})
+        if ttype == "PS":
+            add_short("short_put", "put", trade.get("sell_strike"))
+        elif ttype == "CS":
+            add_short("short_call", "call", trade.get("sell_strike"))
+        elif ttype == "IC":
+            add_short("short_put", "put", trade.get("put_sell"))
+            add_short("short_call", "call", trade.get("call_sell"))
+        else:
+            add_short("short_put", "put", trade.get("sell_strike"))
+        weak_short = False
+        weak_notes: List[str] = []
+        min_abs = _safe_int(os.environ.get("AGENTIC_AI_MIN_SHORT_STRIKE_OI", 25), 25)
+        for s in short_infos:
+            dyn_floor = max(min_abs, int(0.05 * max(1, s.get("side_max_oi") or 0)))
+            if (s.get("aggregate_oi") or 0) < dyn_floor:
+                weak_short = True
+                weak_notes.append(f"{s.get('label')} {s.get('strike')}: aggregate OI {s.get('aggregate_oi')} is below quality floor {dyn_floor} versus side max {s.get('side_max_oi')}.")
+        if weak_notes:
+            out["notes"].extend(weak_notes)
+        expiries = sorted({str(r["expiration"]) for r in rows if r["expiration"]})
+        out.update({
+            "available": True,
+            "snapshot_date": latest,
+            "expiries_included": expiries,
+            "target_expiry": expiry,
+            "call_oi": int(call_oi),
+            "put_oi": int(put_oi),
+            "total_oi": int(total_oi),
+            "pcr": pcr,
+            "call_put_ratio": call_put_ratio,
+            "call_side_heavy": bool(call_put_ratio >= 1.35 and call_oi >= put_oi + 100),
+            "put_side_heavy": bool(pcr >= 1.35 and put_oi >= call_oi + 100),
+            "balanced_two_sided": bool(0.7 <= pcr <= 1.3 and top_calls and top_puts),
+            "top_call_walls": top_calls,
+            "top_put_walls": top_puts,
+            "raw_call_wall": top_calls[0] if top_calls else None,
+            "raw_put_wall": top_puts[0] if top_puts else None,
+            "short_strike_checks": short_infos,
+            "weak_short_strike_oi": weak_short,
+            "summary": f"Cumulative OI through {expiry}: calls {int(call_oi):,}, puts {int(put_oi):,}, PCR {pcr}; top call walls {[x['strike'] for x in top_calls[:3]]}, top put walls {[x['strike'] for x in top_puts[:3]]}.",
+        })
+        return out
+    except Exception as exc:
+        out["notes"].append(str(exc)[:180])
+        return out
+    finally:
+        con.close()
+
+
+def _agentic_quality_gate(direction: str, trade: Dict[str, Any], price_ctx: Dict[str, Any], oi_ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Final sanity gate before a background alert is treated as a new trade find."""
+    direction = (direction or "").lower()
+    ttype = str((trade or {}).get("trade_type") or "").upper()
+    notes: List[str] = []
+    penalty = 0
+    block = False
+    alternate = ""
+    weak_short = bool((oi_ctx or {}).get("weak_short_strike_oi"))
+    call_heavy = bool((oi_ctx or {}).get("call_side_heavy"))
+    put_heavy = bool((oi_ctx or {}).get("put_side_heavy"))
+    bull_ext = bool((price_ctx or {}).get("bullish_extension_risk"))
+    bear_ext = bool((price_ctx or {}).get("bearish_extension_risk"))
+    range_ok = bool((price_ctx or {}).get("range_premium_ok"))
+
+    if weak_short and ttype in {"PS", "CS", "IC"}:
+        penalty += 18
+        notes.append("Chosen credit-spread short strike is not backed by meaningful target/cumulative OI; this should not be a normal-size alert.")
+    if ttype == "PS" or direction == "bull":
+        if call_heavy:
+            penalty += 8
+            notes.append("Cumulative option map is call-side heavy; upside resistance/call-seller pressure conflicts with a fresh bullish premium-sale alert.")
+        if bull_ext:
+            penalty += 14
+            notes.append("Daily/weekly price action is stretched near the upper band/prior high; bullish PS should wait for pullback/support confirmation.")
+        if weak_short and call_heavy and bull_ext:
+            block = True
+            alternate = "Do not alert bullish PS. Prefer WATCH, or evaluate IC/CS only after rejection confirms."
+    if ttype == "CS" or direction == "bear":
+        if put_heavy:
+            penalty += 8
+            notes.append("Cumulative option map is put-side heavy; downside support/put-seller pressure conflicts with a fresh bearish premium-sale alert.")
+        if bear_ext:
+            penalty += 14
+            notes.append("Price is stretched into lower-band support; bearish CS should wait for bounce/rejection confirmation.")
+        if weak_short and put_heavy and bear_ext:
+            block = True
+            alternate = "Do not alert bearish CS. Prefer WATCH until bounce/rejection confirms."
+    if ttype == "IC":
+        if not range_ok:
+            penalty += 10
+            notes.append("IC needs range-premium confirmation; BB/Keltner context did not support a contained range.")
+        if bull_ext or bear_ext:
+            penalty += 8
+            notes.append("IC is lower quality while price is stretched and still directional; require rejection/inside-day confirmation.")
+    if (oi_ctx or {}).get("total_oi") is not None and (_safe_int((oi_ctx or {}).get("total_oi"), 0) < 500):
+        penalty += 8
+        notes.append("Target/cumulative option OI is thin; reduce confidence in option-derived strike selection.")
+    if not notes:
+        notes.append("No Agentic price/OI quality gate red flags detected.")
+    return {
+        "block": block,
+        "penalty": int(min(45, penalty)),
+        "notes": notes,
+        "alternate": alternate,
+        "weak_short_strike_oi": weak_short,
+        "call_side_heavy": call_heavy,
+        "put_side_heavy": put_heavy,
+        "bullish_extension_risk": bull_ext,
+        "bearish_extension_risk": bear_ext,
+        "range_premium_ok": range_ok,
+    }
+
+
+def _daily_metrics(df: Any) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    try:
+        if df is None or getattr(df, "empty", True) or "Close" not in df or len(df) < 35:
+            return {"available": False, "note": "not enough daily bars"}
+        d = df.copy()
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in d:
+                d[col] = d[col].astype(float)
+        close = d["Close"].dropna()
+        rsi = _rsi_series(close, 14)
+        rsi_ema90 = _ema(rsi, 90)
+        ema12 = _ema(close, 12)
+        ema26 = _ema(close, 26)
+        macd_line = ema12 - ema26
+        macd_sig = _ema(macd_line, 9)
+        hist = macd_line - macd_sig
+        ema20 = _ema(close, 20)
+        ema50 = _ema(close, 50)
+        ema200 = _ema(close, 200) if len(close) >= 200 else None
+        vol_ratio = None
+        if "Volume" in d and len(d["Volume"].dropna()) >= 21:
+            vol = d["Volume"].astype(float).fillna(0)
+            avg20 = float(vol.iloc[-21:-1].mean()) if len(vol) >= 21 else 0.0
+            vol_ratio = round(float(vol.iloc[-1]) / avg20, 2) if avg20 > 0 else None
+        prev_high20 = float(d["High"].astype(float).iloc[-21:-1].max()) if "High" in d and len(d) >= 21 else None
+        prev_low20 = float(d["Low"].astype(float).iloc[-21:-1].min()) if "Low" in d and len(d) >= 21 else None
+        spot = float(close.iloc[-1])
+        ema20v = float(ema20.iloc[-1])
+        ema50v = float(ema50.iloc[-1])
+        trend = "bullish" if spot > ema20v > ema50v else "bearish" if spot < ema20v < ema50v else "mixed"
+        breakout = None
+        if prev_high20 and spot > prev_high20:
+            breakout = "20d_high_breakout"
+        elif prev_low20 and spot < prev_low20:
+            breakout = "20d_low_breakdown"
+        out = {
+            "available": True,
+            "spot": round(spot, 2),
+            "rsi14": round(float(rsi.iloc[-1]), 2),
+            "rsi_diff90": round(float(rsi.iloc[-1] - rsi_ema90.iloc[-1]), 2),
+            "macd_hist": round(float(hist.iloc[-1]), 4),
+            "macd_hist_prev": round(float(hist.iloc[-2]), 4) if len(hist) >= 2 else None,
+            "macd_hist_slope": round(float(hist.iloc[-1] - hist.iloc[-2]), 4) if len(hist) >= 2 else None,
+            "ema20": round(ema20v, 2),
+            "ema50": round(ema50v, 2),
+            "ema200": round(float(ema200.iloc[-1]), 2) if ema200 is not None else None,
+            "trend": trend,
+            "breakout": breakout,
+            "volume_ratio20": vol_ratio,
+            "ret_1d": _ret_pct(d, 1),
+            "ret_5d": _ret_pct(d, 5),
+            "ret_20d": _ret_pct(d, 20),
+            "ret_60d": _ret_pct(d, 60),
+        }
+        return out
+    except Exception as exc:
+        return {"available": False, "note": str(exc)[:120]}
+
+
+
+def _frame_col(df: Any, names: Iterable[str]) -> Optional[Any]:
+    """Return the first matching dataframe column by common OHLC aliases."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return None
+        cols = {str(c).lower(): c for c in getattr(df, "columns", [])}
+        for name in names:
+            key = str(name).lower()
+            if key in cols:
+                return df[cols[key]].astype(float).dropna()
+    except Exception:
+        return None
+    return None
+
+
+def _bb_kc_frame_profile(df: Any, label: str) -> Dict[str, Any]:
+    """Daily/weekly BB/Keltner extension profile used as an Agentic guardrail.
+
+    This intentionally does not replace UAE trend scoring.  It only answers:
+    is this a late/stretched entry where a bullish/bearish credit spread should
+    require stronger OI-wall support before we alert it as a new trade?
+    """
+    try:
+        close_s = _frame_col(df, ["Close", "close"])
+        high_s = _frame_col(df, ["High", "high"])
+        low_s = _frame_col(df, ["Low", "low"])
+        if close_s is None or len(close_s) < 22:
+            return {"timeframe": label, "available": False, "note": "not enough bars"}
+        close = [float(x) for x in close_s.tolist() if x is not None and math.isfinite(float(x))]
+        if len(close) < 22 or close[-1] <= 0:
+            return {"timeframe": label, "available": False, "note": "no valid closes"}
+        if high_s is None or len(high_s) < len(close_s):
+            high = close[:]
+        else:
+            high = [float(x) for x in high_s.tail(len(close)).tolist()]
+        if low_s is None or len(low_s) < len(close_s):
+            low = close[:]
+        else:
+            low = [float(x) for x in low_s.tail(len(close)).tolist()]
+        n = min(len(close), len(high), len(low))
+        close, high, low = close[-n:], high[-n:], low[-n:]
+        last = float(close[-1])
+        bb_widths: List[float] = []
+        bb_mid = bb_upper = bb_lower = None
+        for i in range(19, len(close)):
+            sl = close[i - 19:i + 1]
+            m = sum(sl) / 20.0
+            sd = math.sqrt(sum((x - m) ** 2 for x in sl) / 20.0)
+            up = m + 2.0 * sd
+            lo = m - 2.0 * sd
+            if m > 0:
+                bb_widths.append((up - lo) / m * 100.0)
+            if i == len(close) - 1:
+                bb_mid, bb_upper, bb_lower = m, up, lo
+        trs: List[float] = []
+        for i in range(len(close)):
+            prev = close[i - 1] if i > 0 else close[i]
+            trs.append(max(high[i] - low[i], abs(high[i] - prev), abs(low[i] - prev)))
+        atr20 = sum(trs[-20:]) / 20.0 if len(trs) >= 20 else sum(trs) / max(1, len(trs))
+        try:
+            import pandas as pd  # already part of the app stack through yfinance/scanners
+            cs = pd.Series(close)
+            ema20 = float(_ema(cs, 20).iloc[-1])
+            ema50 = float(_ema(cs, 50).iloc[-1]) if len(cs) >= 50 else None
+            rsi14 = float(_rsi_series(cs, 14).iloc[-1])
+        except Exception:
+            ema20 = sum(close[-20:]) / 20.0
+            ema50 = sum(close[-50:]) / 50.0 if len(close) >= 50 else None
+            rsi14 = 50.0
+        kc_upper = ema20 + 1.5 * atr20
+        kc_lower = ema20 - 1.5 * atr20
+        bb_pct = (last - bb_lower) / max(1e-9, bb_upper - bb_lower) * 100.0 if bb_upper and bb_lower and bb_upper != bb_lower else 50.0
+        width = bb_widths[-1] if bb_widths else None
+        width_rank = round(sum(1 for w in bb_widths if width is not None and w <= width) / max(1, len(bb_widths)) * 100.0, 1) if bb_widths else None
+        prior_high = max(high[-21:-1]) if len(high) >= 21 else max(high[:-1]) if len(high) > 1 else None
+        prior_low = min([x for x in low[-21:-1] if x > 0]) if len(low) >= 21 else min([x for x in low[:-1] if x > 0]) if len(low) > 1 else None
+        bb_inside_kc = bool(bb_upper is not None and bb_lower is not None and bb_upper < kc_upper and bb_lower > kc_lower)
+        kc_inside_bb = bool(bb_upper is not None and bb_lower is not None and kc_upper < bb_upper and kc_lower > bb_lower)
+        dist_ema20_pct = (last / ema20 - 1.0) * 100.0 if ema20 else None
+        dist_ema50_pct = (last / ema50 - 1.0) * 100.0 if ema50 else None
+        return {
+            "timeframe": label,
+            "available": True,
+            "close": round(last, 2),
+            "rsi14": round(rsi14, 2),
+            "bb_upper": round(bb_upper, 2) if bb_upper is not None else None,
+            "bb_lower": round(bb_lower, 2) if bb_lower is not None else None,
+            "bb_pct": round(bb_pct, 1),
+            "bb_width_pct": round(width, 2) if width is not None else None,
+            "bb_width_rank": width_rank,
+            "kc_upper": round(kc_upper, 2),
+            "kc_lower": round(kc_lower, 2),
+            "bb_inside_kc": bb_inside_kc,
+            "kc_inside_bb": kc_inside_bb,
+            "prior_high": round(prior_high, 2) if prior_high else None,
+            "prior_low": round(prior_low, 2) if prior_low else None,
+            "dist_ema20_pct": round(dist_ema20_pct, 2) if dist_ema20_pct is not None else None,
+            "dist_ema50_pct": round(dist_ema50_pct, 2) if dist_ema50_pct is not None else None,
+            "near_upper": bool(bb_pct >= 82 or (prior_high and last >= prior_high * 0.985)),
+            "near_lower": bool(bb_pct <= 18 or (prior_low and last <= prior_low * 1.015)),
+            "squeeze_state": "squeeze_on" if bb_inside_kc else "bb_expanded_kc_inside" if kc_inside_bb else "neutral_volatility",
+        }
+    except Exception as exc:
+        return {"timeframe": label, "available": False, "note": str(exc)[:120]}
+
+
+def _price_action_guardrail(direction: str, frames: Dict[str, Any]) -> Dict[str, Any]:
+    direction = (direction or "").lower()
+    daily = _bb_kc_frame_profile((frames or {}).get("1d"), "1D")
+    weekly = _bb_kc_frame_profile((frames or {}).get("1wk"), "1W")
+    notes: List[str] = []
+    penalty = 0
+    warning = False
+    weekly_stretched = False
+    daily_stretched = False
+    if direction == "bull":
+        if weekly.get("available"):
+            if (weekly.get("bb_pct") or 0) >= 86 or (weekly.get("rsi14") or 0) >= 72 or (weekly.get("dist_ema20_pct") or 0) >= 16:
+                weekly_stretched = True
+                warning = True
+                penalty += 12
+                notes.append(
+                    f"1W is extended for a new bullish entry: BB% {weekly.get('bb_pct')}, RSI {weekly.get('rsi14')}, dist EMA20 {weekly.get('dist_ema20_pct')}%."
+                )
+            if weekly.get("kc_inside_bb"):
+                notes.append("1W BB is expanded with Keltner inside; range/mean-reversion risk is higher than fresh trend-expansion edge.")
+        if daily.get("available"):
+            if (daily.get("bb_pct") or 0) >= 91 or (daily.get("rsi14") or 0) >= 72:
+                daily_stretched = True
+                warning = True
+                penalty += 6
+                notes.append(f"1D is near the upper band/overbought: BB% {daily.get('bb_pct')}, RSI {daily.get('rsi14')}.")
+    elif direction == "bear":
+        if weekly.get("available"):
+            if (weekly.get("bb_pct") or 100) <= 14 or (weekly.get("rsi14") or 100) <= 28 or (weekly.get("dist_ema20_pct") or 0) <= -16:
+                weekly_stretched = True
+                warning = True
+                penalty += 12
+                notes.append(
+                    f"1W is extended for a new bearish entry: BB% {weekly.get('bb_pct')}, RSI {weekly.get('rsi14')}, dist EMA20 {weekly.get('dist_ema20_pct')}%."
+                )
+        if daily.get("available"):
+            if (daily.get("bb_pct") or 100) <= 9 or (daily.get("rsi14") or 100) <= 28:
+                daily_stretched = True
+                warning = True
+                penalty += 6
+                notes.append(f"1D is near the lower band/oversold: BB% {daily.get('bb_pct')}, RSI {daily.get('rsi14')}.")
+    else:
+        if daily.get("kc_inside_bb") or weekly.get("kc_inside_bb"):
+            notes.append("BB/KC profile supports range-premium structures more than directional chase.")
+    return {
+        "available": bool(daily.get("available") or weekly.get("available")),
+        "daily": daily,
+        "weekly": weekly,
+        "weekly_stretched": weekly_stretched,
+        "daily_stretched": daily_stretched,
+        "warning": warning,
+        "confidence_penalty": min(22, penalty),
+        "component_penalty": min(18, penalty),
+        "notes": notes[:5],
+        "summary": " ".join(notes[:3]) if notes else "No BB/Keltner extension warning.",
+    }
+
+
+def _norm_option_type(v: Any) -> str:
+    t = str(v or "").strip().lower()
+    if t in {"c", "call", "calls"}:
+        return "call"
+    if t in {"p", "put", "puts"}:
+        return "put"
+    return t
+
+
+def _option_row_oi(row: sqlite3.Row) -> int:
+    for c in ("oi", "open_interest", "openInterest"):
+        try:
+            return _safe_int(row[c], 0)
+        except Exception:
+            continue
+    return 0
+
+
+def _expiry_for_trade(trade: Dict[str, Any], target_dte: int) -> str:
+    exp = str((trade or {}).get("expiry") or "").strip()
+    if exp:
+        return exp[:10]
+    return (date.today() + timedelta(days=int(target_dte or 45))).isoformat()
+
+
+def _aggregate_option_wall_context(symbol: str, spot: Optional[float], expiry: str) -> Dict[str, Any]:
+    symbol = (symbol or "").upper().strip()
+    out: Dict[str, Any] = {"available": False, "symbol": symbol, "notes": []}
+    if not symbol or not spot or spot <= 0:
+        out["notes"].append("No spot for aggregate OI wall context.")
+        return out
+    con = _conn()
+    try:
+        latest = con.execute("SELECT MAX(date) AS d FROM options WHERE symbol=?", (symbol,)).fetchone()
+        snap = latest["d"] if latest and latest["d"] else None
+        if not snap:
+            out["notes"].append("No local strike-level OI snapshot.")
+            return out
+        start = date.today().isoformat()
+        end = (expiry or "")[:10] or (date.today() + timedelta(days=45)).isoformat()
+        rows = con.execute(
+            """
+            SELECT expiration, strike, type, oi
+            FROM options
+            WHERE symbol=? AND date=? AND expiration>=? AND expiration<=?
+            """,
+            (symbol, snap, start, end),
+        ).fetchall()
+        if not rows:
+            rows = con.execute(
+                """
+                SELECT expiration, strike, type, oi
+                FROM options
+                WHERE symbol=? AND date=? AND expiration=?
+                """,
+                (symbol, snap, end),
+            ).fetchall()
+        call_by: Dict[float, int] = {}
+        put_by: Dict[float, int] = {}
+        expiries = set()
+        for r in rows:
+            k = _safe_float(r["strike"], None)
+            if k is None:
+                continue
+            typ = _norm_option_type(r["type"])
+            oi = _option_row_oi(r)
+            expiries.add(str(r["expiration"])[:10])
+            if typ == "call":
+                call_by[k] = call_by.get(k, 0) + oi
+            elif typ == "put":
+                put_by[k] = put_by.get(k, 0) + oi
+        if not call_by and not put_by:
+            out["notes"].append("No usable call/put OI rows in aggregate window.")
+            return out
+        strikes = sorted(set(call_by) | set(put_by))
+        intervals = [round(strikes[i] - strikes[i - 1], 4) for i in range(1, len(strikes)) if strikes[i] > strikes[i - 1]]
+        width = min([x for x in intervals if x > 0], default=max(1.0, round(float(spot) * 0.01, 2)))
+        near_band = max(float(spot) * 0.22, width * 12.0)
+        call_above = [(k, v) for k, v in call_by.items() if k >= float(spot) and (k - float(spot)) <= near_band]
+        put_below = [(k, v) for k, v in put_by.items() if k <= float(spot) and (float(spot) - k) <= near_band]
+        top_calls = sorted(call_above or list(call_by.items()), key=lambda kv: (kv[1], -abs(kv[0] - float(spot))), reverse=True)[:8]
+        top_puts = sorted(put_below or list(put_by.items()), key=lambda kv: (kv[1], -abs(kv[0] - float(spot))), reverse=True)[:8]
+        call_near_oi = sum(v for _, v in call_above)
+        put_near_oi = sum(v for _, v in put_below)
+        call_total = sum(call_by.values())
+        put_total = sum(put_by.values())
+        pcr = round(put_total / max(1, call_total), 3)
+        call_overhang_ratio = round(call_near_oi / max(1, put_near_oi), 2)
+        put_support_ratio = round(put_near_oi / max(1, call_near_oi), 2)
+        call_threshold = (top_calls[0][1] * 0.40) if top_calls else 0
+        put_threshold = (top_puts[0][1] * 0.40) if top_puts else 0
+        call_cluster = [k for k, v in top_calls if v >= call_threshold]
+        put_cluster = [k for k, v in top_puts if v >= put_threshold]
+        bias = "balanced"
+        if call_overhang_ratio >= 1.35 and call_near_oi >= max(100, put_near_oi * 1.25):
+            bias = "bearish_overhead"
+        elif put_support_ratio >= 1.35 and put_near_oi >= max(100, call_near_oi * 1.25):
+            bias = "bullish_support"
+        return {
+            "available": True,
+            "symbol": symbol,
+            "snapshot_date": snap,
+            "expiry_window_end": end,
+            "expiries_used": sorted(expiries),
+            "strike_interval": width,
+            "total_call_oi": call_total,
+            "total_put_oi": put_total,
+            "pcr": pcr,
+            "near_call_oi_above_spot": call_near_oi,
+            "near_put_oi_below_spot": put_near_oi,
+            "call_overhang_ratio": call_overhang_ratio,
+            "put_support_ratio": put_support_ratio,
+            "bias": bias,
+            "top_call_walls": [{"strike": round(k, 2), "oi": int(v)} for k, v in top_calls],
+            "top_put_walls": [{"strike": round(k, 2), "oi": int(v)} for k, v in top_puts],
+            "call_cluster_low": round(min(call_cluster), 2) if call_cluster else None,
+            "call_cluster_high": round(max(call_cluster), 2) if call_cluster else None,
+            "put_cluster_low": round(min(put_cluster), 2) if put_cluster else None,
+            "put_cluster_high": round(max(put_cluster), 2) if put_cluster else None,
+            "call_by_strike": {str(round(k, 2)): int(v) for k, v in call_by.items()},
+            "put_by_strike": {str(round(k, 2)): int(v) for k, v in put_by.items()},
+            "notes": [
+                f"Aggregate OI through {end}: calls {call_total:,}, puts {put_total:,}, PCR {pcr}.",
+                f"Top put walls {', '.join(f'{k:g}P({v:,})' for k, v in top_puts[:3]) or 'n/a'}; top call walls {', '.join(f'{k:g}C({v:,})' for k, v in top_calls[:3]) or 'n/a'}.",
+            ],
+        }
+    except Exception as exc:
+        out["notes"].append(str(exc)[:160])
+        return out
+    finally:
+        con.close()
+
+
+def _agg_oi_at(ctx: Dict[str, Any], typ: str, strike: Optional[float]) -> int:
+    if not ctx or strike is None:
+        return 0
+    table = ctx.get("put_by_strike") if typ == "put" else ctx.get("call_by_strike")
+    if not isinstance(table, dict):
+        return 0
+    key = str(round(float(strike), 2))
+    if key in table:
+        return _safe_int(table.get(key), 0)
+    # Last-resort tolerance for 400 vs 400.0 string formatting.
+    for k, v in table.items():
+        try:
+            if abs(float(k) - float(strike)) <= 0.01:
+                return _safe_int(v, 0)
+        except Exception:
+            continue
+    return 0
+
+
+def _option_setup_guardrail(symbol: str, trade: Dict[str, Any], spot: Optional[float], target_dte: int) -> Dict[str, Any]:
+    """Validate that the selected option structure is actually anchored by OI.
+
+    This catches cases like a bullish PS chosen from price momentum while the
+    selected short put has negligible OI and aggregate call walls dominate the
+    suggested expiry window.
+    """
+    ttype = str((trade or {}).get("trade_type") or "").upper()
+    expiry = _expiry_for_trade(trade, target_dte)
+    ctx = _aggregate_option_wall_context(symbol, spot, expiry)
+    notes: List[str] = []
+    penalty = 0
+    weak_anchor = False
+    call_overhang = False
+    put_overhang = False
+    hard_block = False
+    if not ctx.get("available"):
+        return {
+            "available": False,
+            "wall_context": ctx,
+            "confidence_penalty": 4,
+            "component_penalty": 4,
+            "weak_anchor": False,
+            "call_overhang": False,
+            "put_overhang": False,
+            "hard_block": False,
+            "notes": ctx.get("notes") or ["No aggregate OI wall context."],
+            "summary": "Aggregate OI wall context unavailable.",
+        }
+    width = _safe_float((trade or {}).get("width"), None) or _safe_float(ctx.get("strike_interval"), 1.0) or 1.0
+    top_put_oi = _safe_int(((ctx.get("top_put_walls") or [{}])[0]).get("oi"), 0) if ctx.get("top_put_walls") else 0
+    top_call_oi = _safe_int(((ctx.get("top_call_walls") or [{}])[0]).get("oi"), 0) if ctx.get("top_call_walls") else 0
+    if ttype == "PS":
+        short = _safe_float((trade or {}).get("sell_strike"), None)
+        short_agg = _agg_oi_at(ctx, "put", short)
+        put_cluster_low = _safe_float(ctx.get("put_cluster_low"), None)
+        if short is not None:
+            if top_put_oi and short_agg < max(10, top_put_oi * 0.08):
+                weak_anchor = True
+                penalty += 13
+                notes.append(f"Short put {short:g}P has weak aggregate OI {short_agg:,} versus top put wall OI {top_put_oi:,}.")
+            if put_cluster_low is not None and short > put_cluster_low - width * 0.25:
+                weak_anchor = True
+                penalty += 12
+                notes.append(f"Short put {short:g}P is not below the lower edge of the put-support cluster near {put_cluster_low:g}.")
+        if (_safe_float(ctx.get("call_overhang_ratio"), 0.0) or 0.0) >= 1.35:
+            call_overhang = True
+            penalty += 10
+            notes.append(f"Aggregate call OI overhead dominates near-range put support; call/put overhead ratio {ctx.get('call_overhang_ratio')}.")
+        if (trade or {}).get("short_oi") is not None and _safe_int((trade or {}).get("short_oi"), 0) <= 1 and weak_anchor:
+            hard_block = True
+            notes.append("Exact selected short-leg OI is 1 or lower; do not alert as a fresh OPEN setup.")
+    elif ttype == "CS":
+        short = _safe_float((trade or {}).get("sell_strike"), None)
+        short_agg = _agg_oi_at(ctx, "call", short)
+        call_cluster_high = _safe_float(ctx.get("call_cluster_high"), None)
+        if short is not None:
+            if top_call_oi and short_agg < max(10, top_call_oi * 0.08):
+                weak_anchor = True
+                penalty += 13
+                notes.append(f"Short call {short:g}C has weak aggregate OI {short_agg:,} versus top call wall OI {top_call_oi:,}.")
+            if call_cluster_high is not None and short < call_cluster_high + width * 0.25:
+                weak_anchor = True
+                penalty += 10
+                notes.append(f"Short call {short:g}C is not above the upper edge of the call-resistance cluster near {call_cluster_high:g}.")
+        if (_safe_float(ctx.get("put_support_ratio"), 0.0) or 0.0) >= 1.35:
+            put_overhang = True
+            penalty += 8
+            notes.append(f"Aggregate put support dominates near-range call overhead; put/call support ratio {ctx.get('put_support_ratio')}.")
+        if (trade or {}).get("short_oi") is not None and _safe_int((trade or {}).get("short_oi"), 0) <= 1 and weak_anchor:
+            hard_block = True
+            notes.append("Exact selected short-leg OI is 1 or lower; do not alert as a fresh OPEN setup.")
+    elif ttype == "IC":
+        ps = _safe_float((trade or {}).get("put_sell"), None)
+        cs = _safe_float((trade or {}).get("call_sell"), None)
+        ps_oi = _agg_oi_at(ctx, "put", ps)
+        cs_oi = _agg_oi_at(ctx, "call", cs)
+        if top_put_oi and ps_oi < max(10, top_put_oi * 0.06):
+            penalty += 7
+            notes.append(f"IC put short has light aggregate OI {ps_oi:,} versus put wall {top_put_oi:,}.")
+        if top_call_oi and cs_oi < max(10, top_call_oi * 0.06):
+            penalty += 7
+            notes.append(f"IC call short has light aggregate OI {cs_oi:,} versus call wall {top_call_oi:,}.")
+    else:
+        notes.append("No credit-spread OI anchor check required for debit/unknown structure.")
+    if not notes:
+        notes.append("Selected structure is acceptably aligned with aggregate OI walls.")
+    return {
+        "available": True,
+        "wall_context": ctx,
+        "confidence_penalty": min(35, penalty),
+        "component_penalty": min(24, penalty),
+        "weak_anchor": weak_anchor,
+        "call_overhang": call_overhang,
+        "put_overhang": put_overhang,
+        "hard_block": hard_block,
+        "notes": notes[:6],
+        "summary": " ".join(notes[:4]),
+    }
+
+def _relative_strength(stock_df: Any, bench_df: Any, sector_df: Any = None) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for bars in (20, 60, 90):
+        sr = _ret_pct(stock_df, bars)
+        br = _ret_pct(bench_df, bars)
+        er = _ret_pct(sector_df, bars) if sector_df is not None else None
+        out[f"stock_ret_{bars}d"] = sr
+        out[f"market_ret_{bars}d"] = br
+        out[f"sector_ret_{bars}d"] = er
+        out[f"rs_vs_market_{bars}d"] = round(sr - br, 2) if sr is not None and br is not None else None
+        out[f"rs_vs_sector_{bars}d"] = round(sr - er, 2) if sr is not None and er is not None else None
+    return out
+
+
+def _rs_score(direction: str, rs: Dict[str, Any]) -> int:
+    vals = [rs.get("rs_vs_market_20d"), rs.get("rs_vs_market_60d"), rs.get("rs_vs_sector_20d"), rs.get("rs_vs_sector_60d")]
+    vals = [float(v) for v in vals if v is not None]
+    if not vals:
+        return 55
+    avg = sum(vals) / len(vals)
+    direction = (direction or "").lower()
+    if direction == "bull":
+        return int(max(20, min(100, 55 + avg * 3.5)))
+    if direction == "bear":
+        return int(max(20, min(100, 55 - avg * 3.5)))
+    return int(max(35, min(85, 75 - abs(avg) * 2.5)))
+
+
+def _price_volume_score(direction: str, metrics: Dict[str, Any]) -> int:
+    if not metrics.get("available"):
+        return 55
+    score = 55
+    trend = metrics.get("trend")
+    hist = _safe_float(metrics.get("macd_hist"), 0.0) or 0.0
+    hist_slope = _safe_float(metrics.get("macd_hist_slope"), 0.0) or 0.0
+    rsi_diff = _safe_float(metrics.get("rsi_diff90"), 0.0) or 0.0
+    vol_ratio = _safe_float(metrics.get("volume_ratio20"), 1.0) or 1.0
+    direction = (direction or "").lower()
+    if direction == "bull":
+        if trend == "bullish":
+            score += 16
+        if hist > 0:
+            score += 8
+        if hist_slope > 0:
+            score += 6
+        if rsi_diff > 0:
+            score += min(12, rsi_diff * 0.7)
+        if metrics.get("breakout") == "20d_high_breakout":
+            score += 8
+    elif direction == "bear":
+        if trend == "bearish":
+            score += 16
+        if hist < 0:
+            score += 8
+        if hist_slope < 0:
+            score += 6
+        if rsi_diff < 0:
+            score += min(12, abs(rsi_diff) * 0.7)
+        if metrics.get("breakout") == "20d_low_breakdown":
+            score += 8
+    else:
+        if trend == "mixed":
+            score += 12
+        if abs(rsi_diff) < 8:
+            score += 8
+    if vol_ratio >= 1.25:
+        score += 8
+    elif vol_ratio < 0.70:
+        score -= 8
+    return int(max(20, min(100, round(score))))
+
+
+def _sector_etf_for_sector(sector: str) -> str:
+    try:
+        from ..services.sector_service import SECTOR_ETFS
+        return SECTOR_ETFS.get(sector or "", "SPY")
+    except Exception:
+        return "SPY"
+
+
+def _sector_for_symbol(symbol: str) -> Tuple[str, str]:
+    try:
+        from ..services.sector_service import get_symbol_sector
+        sector = get_symbol_sector(symbol) or "Other"
+    except Exception:
+        sector = "Other"
+    return sector, _sector_etf_for_sector(sector)
+
+
+def _proxy_context(symbol: str, indicators: Dict[str, Any], frames: Dict[str, Any], label: str = "") -> Dict[str, Any]:
+    score, tf_rows = _indicator_regime_score(indicators)
+    bias = _bias_from_score(score)
+    daily = _daily_metrics(frames.get("1d"))
+    confidence = int(max(30, min(95, 50 + abs(score) * 35 + min(10, len(tf_rows) * 3))))
+    return {
+        "symbol": symbol,
+        "label": label or symbol,
+        "bias": bias,
+        "bias_label": _bias_label(bias),
+        "score": score,
+        "confidence": confidence,
+        "timeframes": tf_rows,
+        "daily_metrics": daily,
+    }
+
+
+def _latest_futures_oi_signal(symbol: str) -> Dict[str, Any]:
+    symbol = (symbol or "").upper().strip()
+    out = {"symbol": symbol, "signal": "NO_DATA", "score": 0, "description": "No futures OI data"}
+    con = _conn()
+    try:
+        try:
+            rows = con.execute(
+                """
+                SELECT contract, trade_date, settle, oi, oi_change, volume, source
+                FROM futures_oi_daily
+                WHERE symbol=?
+                ORDER BY trade_date DESC, fetched_at DESC
+                LIMIT 4
+                """,
+                (symbol,),
+            ).fetchall()
+        except Exception:
+            rows = []
+        if len(rows) >= 2:
+            latest = rows[0]
+            prior = rows[1]
+            settle_now = _safe_float(latest["settle"], 0.0) or 0.0
+            settle_prev = _safe_float(prior["settle"], 0.0) or 0.0
+            oi_now = _safe_int(latest["oi"], 0)
+            oi_prev = _safe_int(prior["oi"], 0)
+            oi_change = _safe_int(latest["oi_change"], oi_now - oi_prev)
+            price_up = settle_now > settle_prev
+            oi_up = oi_change > 0
+            if price_up and oi_up:
+                sig, score, desc = "LONG_BUILDUP", 3, "Price up with OI up: new longs entering."
+            elif (not price_up) and oi_up:
+                sig, score, desc = "SHORT_BUILDUP", -3, "Price down with OI up: new shorts entering."
+            elif (not price_up) and (not oi_up):
+                sig, score, desc = "LONG_UNWINDING", -2, "Price down with OI down: longs exiting."
+            else:
+                sig, score, desc = "SHORT_COVERING", 1, "Price up with OI down: shorts covering."
+            return {
+                "symbol": symbol,
+                "contract": latest["contract"],
+                "trade_date": latest["trade_date"],
+                "settle": settle_now,
+                "price_change": round(settle_now - settle_prev, 2),
+                "oi": oi_now,
+                "oi_change": oi_change,
+                "volume": _safe_int(latest["volume"], 0),
+                "source": latest["source"] or "futures_oi_daily",
+                "signal": sig,
+                "score": score,
+                "description": desc,
+            }
+    finally:
+        con.close()
+    try:
+        from ..services.futures_oi import analyze_oi_buildup
+        res = analyze_oi_buildup(symbol)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+    return out
+
+
+def _pressure_context(symbol: str, spot: Optional[float], target_dte: int) -> Dict[str, Any]:
+    symbol = (symbol or "").upper().strip()
+    out: Dict[str, Any] = {"symbol": symbol, "score": 0, "bias": "neutral", "notes": []}
+    if not spot or spot <= 0:
+        out["notes"].append("No spot for options pressure check.")
+        return out
+    expiry = None
+    dte = int(target_dte or 45)
+    try:
+        from .uae_trade_scanner import _pick_expiry, _spy_gex_context
+        expiry, dte2, _ = _pick_expiry(symbol, int(target_dte or 45))
+        if expiry:
+            dte = dte2 or dte
+            gex = _spy_gex_context(symbol, expiry, max(1, dte), float(spot), 25.0)
+            out["gex"] = gex
+            if gex.get("available"):
+                out["notes"].append(
+                    f"GEX {gex.get('regime') or 'n/a'}; flip {gex.get('gamma_flip')}; pin {gex.get('pin_strike')}."
+                )
+    except Exception as exc:
+        out["gex"] = {"available": False, "note": str(exc)[:100]}
+    try:
+        from ..services.oi_wall_service import oi_wall_context
+        walls = oi_wall_context(symbol, float(spot), expiry)
+        out["walls"] = walls
+        wbias = str((walls or {}).get("bias") or "NEUTRAL").upper()
+        if "BULL" in wbias:
+            out["score"] += 0.45
+            out["bias"] = "bull"
+        elif "BEAR" in wbias:
+            out["score"] -= 0.45
+            out["bias"] = "bear"
+        out["notes"].append((walls or {}).get("breach_context") or "No wall context.")
+    except Exception as exc:
+        out["walls"] = {"available": False, "note": str(exc)[:100]}
+    return out
+
+
+def _market_context(indicators_by_symbol: Dict[str, Dict[str, Any]], frames_by_symbol: Dict[str, Dict[str, Any]], target_dte: int) -> Dict[str, Any]:
+    proxies: Dict[str, Any] = {}
+    weighted = 0.0
+    used = 0.0
+    futures: Dict[str, Any] = {}
+    pressure: Dict[str, Any] = {}
+    for sym in MARKET_PROXIES:
+        ctx = _proxy_context(sym, indicators_by_symbol.get(sym, {}), frames_by_symbol.get(sym, {}), label=sym)
+        proxies[sym] = ctx
+        wt = MARKET_PROXY_WEIGHTS.get(sym, 0.0)
+        weighted += float(ctx.get("score") or 0.0) * wt
+        used += wt
+        futures[sym] = _latest_futures_oi_signal(sym)
+        spot = (ctx.get("daily_metrics") or {}).get("spot") or (indicators_by_symbol.get(sym, {}).get("1d") or {}).get("close")
+        pressure[sym] = _pressure_context(sym, _safe_float(spot, None), target_dte)
+    base = weighted / used if used else 0.0
+    fut_scores = [_safe_float(v.get("score"), 0.0) or 0.0 for v in futures.values()]
+    fut_adj = (sum(fut_scores) / max(1, len(fut_scores))) / 10.0
+    wall_scores = [_safe_float(v.get("score"), 0.0) or 0.0 for v in pressure.values()]
+    wall_adj = (sum(wall_scores) / max(1, len(wall_scores))) * 0.15
+    score = max(-1.0, min(1.0, base + fut_adj + wall_adj))
+    bias = _bias_from_score(score)
+    return {
+        "bias": bias,
+        "bias_label": _bias_label(bias),
+        "score": round(score, 3),
+        "confidence": int(max(35, min(96, 55 + abs(score) * 35))),
+        "proxies": proxies,
+        "futures_oi": futures,
+        "options_pressure": pressure,
+        "summary": f"Market regime is {_bias_label(bias)} from 1H/Daily/Weekly proxy alignment plus futures OI and options pressure.",
+    }
+
+
+def _sector_contexts(sector_etfs: Iterable[str], indicators_by_symbol: Dict[str, Dict[str, Any]], frames_by_symbol: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    spy_df = (frames_by_symbol.get("SPY") or {}).get("1d")
+    for etf in sorted({s for s in sector_etfs if s}):
+        ctx = _proxy_context(etf, indicators_by_symbol.get(etf, {}), frames_by_symbol.get(etf, {}), label=etf)
+        ctx["relative_strength"] = _relative_strength((frames_by_symbol.get(etf) or {}).get("1d"), spy_df, None)
+        out[etf] = ctx
+    return out
+
+
+def _context_sector_key(sector_etfs: Iterable[str]) -> str:
+    return ",".join(sorted({str(s).upper().strip() for s in sector_etfs if s}))
+
+
+def _load_daily_context_cache(scan_date: str, target_dte: int, sector_etfs: Iterable[str]) -> Optional[Dict[str, Any]]:
+    sector_key = _context_sector_key(sector_etfs)
+    con = _conn()
+    try:
+        row = con.execute(
+            """
+            SELECT * FROM agentic_ai_context_cache
+            WHERE cache_date=? AND target_dte=? AND sector_key=?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (scan_date, int(target_dte or 45), sector_key),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "market_context": json.loads(row["market_context_json"] or "{}"),
+            "sector_contexts": json.loads(row["sector_context_json"] or "{}"),
+            "symbol_sector": json.loads(row["symbol_sector_json"] or "{}") if row["symbol_sector_json"] else {},
+            "summary": json.loads(row["summary_json"] or "{}") if row["summary_json"] else {},
+            "cache_key": sector_key,
+            "cache_date": scan_date,
+            "target_dte": int(target_dte or 45),
+            "run_id": row["run_id"],
+        }
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+
+def _store_daily_context_cache(scan_date: str, target_dte: int, sector_etfs: Iterable[str], run_id: int, market_ctx: Dict[str, Any], sector_ctx_map: Dict[str, Any], symbol_sector_map: Dict[str, Any], summary: Optional[Dict[str, Any]] = None) -> None:
+    sector_key = _context_sector_key(sector_etfs)
+    def _op():
+        con = _conn()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                """
+                INSERT INTO agentic_ai_context_cache(
+                    cache_date, target_dte, sector_key, run_id,
+                    market_context_json, sector_context_json, symbol_sector_json, summary_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(cache_date, target_dte, sector_key) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    market_context_json=excluded.market_context_json,
+                    sector_context_json=excluded.sector_context_json,
+                    symbol_sector_json=excluded.symbol_sector_json,
+                    summary_json=excluded.summary_json,
+                    updated_at=datetime('now')
+                """,
+                (
+                    scan_date,
+                    int(target_dte or 45),
+                    sector_key,
+                    int(run_id),
+                    json.dumps(market_ctx, default=str),
+                    json.dumps(sector_ctx_map, default=str),
+                    json.dumps(symbol_sector_map, default=str),
+                    json.dumps(summary or {}, default=str),
+                ),
+            )
+            con.commit()
+        finally:
+            con.close()
+    try:
+        _retry_write(_op)
+    except Exception:
+        pass
+
+
+def _options_oi_buildup(symbol: str, target_dte: int = 45) -> Dict[str, Any]:
+    symbol = (symbol or "").upper().strip()
+    con = _conn()
+    try:
+        dates = [r["date"] for r in con.execute(
+            "SELECT DISTINCT date FROM options WHERE symbol=? ORDER BY date DESC LIMIT 2",
+            (symbol,),
+        ).fetchall()]
+        if not dates:
+            return {"available": False, "note": "No local option OI snapshot. Run Scheduler/options fetch first."}
+        d1 = dates[0]
+        d2 = dates[1] if len(dates) > 1 else None
+        end = (date.today() + timedelta(days=int(target_dte or 45))).isoformat()
+        params = (symbol, d1, date.today().isoformat(), end)
+        rows1 = con.execute(
+            """
+            SELECT lower(type) AS type, SUM(COALESCE(oi,0)) AS oi, SUM(COALESCE(volume,0)) AS volume
+            FROM options
+            WHERE symbol=? AND date=? AND expiration>=? AND expiration<=?
+            GROUP BY lower(type)
+            """,
+            params,
+        ).fetchall()
+        cur = {str(r["type"]): {"oi": _safe_int(r["oi"]), "volume": _safe_int(r["volume"])} for r in rows1}
+        prev: Dict[str, Dict[str, int]] = {}
+        if d2:
+            rows2 = con.execute(
+                """
+                SELECT lower(type) AS type, SUM(COALESCE(oi,0)) AS oi, SUM(COALESCE(volume,0)) AS volume
+                FROM options
+                WHERE symbol=? AND date=? AND expiration>=? AND expiration<=?
+                GROUP BY lower(type)
+                """,
+                (symbol, d2, date.today().isoformat(), end),
+            ).fetchall()
+            prev = {str(r["type"]): {"oi": _safe_int(r["oi"]), "volume": _safe_int(r["volume"])} for r in rows2}
+        call_oi = _safe_int((cur.get("call") or {}).get("oi"), 0)
+        put_oi = _safe_int((cur.get("put") or {}).get("oi"), 0)
+        call_prev = _safe_int((prev.get("call") or {}).get("oi"), call_oi)
+        put_prev = _safe_int((prev.get("put") or {}).get("oi"), put_oi)
+        call_delta = call_oi - call_prev
+        put_delta = put_oi - put_prev
+        total_oi = call_oi + put_oi
+        total_delta = call_delta + put_delta
+        pcr = round(put_oi / max(1, call_oi), 3)
+        pcr_prev = round(put_prev / max(1, call_prev), 3) if (call_prev or put_prev) else pcr
+        delta_pcr = round(pcr - pcr_prev, 3)
+        bias = "neutral"
+        score = 0
+        note = "Balanced option OI pressure."
+        # Seller-side interpretation: rising put OI with rising PCR is usually
+        # support/put-selling unless price/skew says otherwise; rising call OI
+        # with falling PCR is usually resistance/call-selling.  Do not treat
+        # call buildup alone as bullish.
+        if put_delta > max(250, abs(call_delta) * 1.20) and delta_pcr >= 0:
+            bias = "bull"
+            score = 12
+            note = "Seller-side read: put OI/PCR are building, suggesting put-seller support if price confirms."
+        elif call_delta > max(250, abs(put_delta) * 1.20) and delta_pcr <= 0:
+            bias = "bear"
+            score = -12
+            note = "Seller-side read: call OI is building while PCR falls, suggesting call-seller resistance unless price breaks out."
+        elif put_delta < -250 and delta_pcr < 0:
+            bias = "bear"
+            score = -8
+            note = "Seller-side read: put support is unwinding; bullish premium-sale quality is weaker."
+        elif call_delta < -250 and delta_pcr > 0:
+            bias = "bull"
+            score = 8
+            note = "Seller-side read: call resistance is unwinding; upside pressure is less hostile."
+        elif total_delta > 0:
+            score = 4
+            note = "Total near-term option OI is expanding; directional read needs PCR/skew/price confirmation."
+        return {
+            "available": True,
+            "snapshot_date": d1,
+            "prior_date": d2,
+            "window_dte": int(target_dte or 45),
+            "call_oi": call_oi,
+            "put_oi": put_oi,
+            "total_oi": total_oi,
+            "call_oi_change": call_delta,
+            "put_oi_change": put_delta,
+            "total_oi_change": total_delta,
+            "pcr": pcr,
+            "pcr_prior": pcr_prev,
+            "delta_pcr_proxy": delta_pcr,
+            "pcr_change": delta_pcr,
+            "bias": bias,
+            "score": score,
+            "note": note,
+        }
+    except Exception as exc:
+        return {"available": False, "note": str(exc)[:140]}
+    finally:
+        con.close()
+
+
+def _options_score(direction: str, oi: Dict[str, Any], pressure: Dict[str, Any]) -> int:
+    score = 55
+    direction = (direction or "").lower()
+    oi_bias = (oi or {}).get("bias")
+    wall_bias = (pressure or {}).get("bias")
+    if oi.get("available"):
+        score += 8 if (oi.get("total_oi_change") or 0) > 0 else -3
+        if direction == oi_bias:
+            score += 12
+        elif oi_bias in ("bull", "bear") and direction != oi_bias:
+            score -= 8
+        pcr = _safe_float(oi.get("pcr"), 1.0) or 1.0
+        if direction == "bull" and pcr < 1.15:
+            score += 5
+        if direction == "bear" and pcr > 0.85:
+            score += 5
+        if direction == "neutral" and 0.75 <= pcr <= 1.35:
+            score += 7
+    if wall_bias in ("bull", "bear"):
+        if direction == wall_bias:
+            score += 14
+        elif direction in ("bull", "bear"):
+            score -= 12
+    return int(max(20, min(100, score)))
+
+
+def _futures_alignment_score(direction: str, market_context: Dict[str, Any]) -> int:
+    vals = []
+    for v in (market_context.get("futures_oi") or {}).values():
+        vals.append(_safe_float(v.get("score"), 0.0) or 0.0)
+    if not vals:
+        return 55
+    avg = sum(vals) / len(vals)
+    if direction == "bull":
+        return int(max(20, min(100, 55 + avg * 9)))
+    if direction == "bear":
+        return int(max(20, min(100, 55 - avg * 9)))
+    return int(max(35, min(85, 70 - abs(avg) * 5)))
+
+
+def _build_actions(finding: Dict[str, Any]) -> str:
+    trade = finding.get("strategy") or {}
+    direction = finding.get("direction")
+    ttype = trade.get("trade_type") or finding.get("strategy_type") or "setup"
+    legs = trade.get("legs") or finding.get("legs") or ""
+    expiry = trade.get("expiry") or finding.get("expiry") or ""
+    score = finding.get("confidence")
+    actions = []
+    if finding.get("recommendation") == "OPEN":
+        actions.append("Action: eligible for normal planned size if current price still confirms on the entry timeframe.")
+    elif finding.get("recommendation") == "OPEN_SMALL":
+        actions.append("Action: open smaller than normal or wait for one more confirming close because confidence is good but not ideal.")
+    else:
+        actions.append("Action: keep on watchlist until alignment improves.")
+    if ttype == "PS":
+        actions.append("Structure: bull put credit spread; sell below support/put wall and avoid entry if spot loses the hourly/daily trend.")
+    elif ttype == "CS":
+        actions.append("Structure: bear call credit spread; sell above resistance/call wall and avoid entry if spot reclaims the hourly/daily trend.")
+    elif ttype == "IC":
+        actions.append("Structure: iron condor; keep short strikes outside the active OI walls and reduce size if market regime turns directional.")
+    elif ttype in ("CALL", "PUT"):
+        actions.append("Structure: debit trade; define premium paid as max risk and prefer entry after momentum confirmation, not before.")
+    if legs:
+        actions.append(f"Candidate legs: {legs} expiring {expiry}.")
+    qgate = ((finding.get("metrics") or {}).get("quality_gate") or {}) if isinstance(finding.get("metrics"), dict) else {}
+    if qgate.get("notes"):
+        actions.append("Quality gate: " + " ".join(str(x) for x in (qgate.get("notes") or [])[:2]))
+    if qgate.get("alternate"):
+        actions.append("Alternative/guardrail: " + str(qgate.get("alternate")))
+    rr = trade.get("rr")
+    if rr is not None:
+        actions.append(f"Reward/risk preview: {rr}:1; use limit pricing and skip if fill materially worsens.")
+    actions.append(f"Review trigger: invalidate if market/sector regime no longer aligns or confidence drops below {score}.")
+    return " ".join(actions)
+
+
+def _make_signature(row: Dict[str, Any]) -> str:
+    trade = row.get("strategy") or {}
+    parts = [
+        row.get("symbol"),
+        row.get("direction"),
+        row.get("strategy_type") or trade.get("trade_type"),
+        row.get("expiry") or trade.get("expiry"),
+        trade.get("sell_strike"),
+        trade.get("buy_strike"),
+        trade.get("put_sell"),
+        trade.get("put_buy"),
+        trade.get("call_sell"),
+        trade.get("call_buy"),
+        row.get("market_regime"),
+        row.get("sector_regime"),
+    ]
+    raw = "|".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _format_alert(row: Dict[str, Any]) -> str:
+    return "\n".join([
+        "Agentic AI trade find",
+        f"Symbol: {row.get('symbol')} | Sector: {row.get('sector') or 'n/a'}",
+        f"Confidence: {row.get('confidence')}/100 | Score: {row.get('score')} | Grade: {row.get('grade') or 'n/a'}",
+        f"Direction: {_bias_label(row.get('direction'))} | Recommendation: {row.get('recommendation')}",
+        f"Market: {_bias_label(row.get('market_regime'))} | Sector: {_bias_label(row.get('sector_regime'))}",
+        f"Strategy: {row.get('strategy_type')} | Expiry: {row.get('expiry')} | DTE: {row.get('dte')}",
+        f"Spot: {row.get('spot')} | Legs: {row.get('legs') or 'n/a'}",
+        f"Rationale: {row.get('rationale')}",
+        f"Suggested actions: {row.get('suggested_actions')}",
+        f"Found: {row.get('found_at') or _now()}",
+        f"Signature: {row.get('signature')}",
+    ])
+
+
+def _send_finding_alert(row: Dict[str, Any]) -> Dict[str, Any]:
+    message = _format_alert(row)
+    telegram_result: Dict[str, Any]
+    try:
+        from ..services.telegram_alerts import telegram_configured, send_telegram_message
+        if telegram_configured():
+            telegram_result = send_telegram_message(message)
+        else:
+            telegram_result = {"ok": False, "skipped": True, "error": "Telegram credentials not configured"}
+    except Exception as exc:
+        telegram_result = {"ok": False, "error": str(exc)[:160]}
+    try:
+        from .watchlist_manager import log_alert_notification
+        log_alert_notification(
+            "AGENTIC_AI_FIND",
+            f"Agentic AI trade find: {row.get('symbol')} {row.get('strategy_type')}",
+            message,
+            symbol=row.get("symbol"),
+            severity="info" if row.get("confidence", 0) < 80 else "success",
+            source="agentic_ai_scanner",
+            scanner_name="Agentic AI Scanner",
+            metadata={"signature": row.get("signature"), "telegram": telegram_result},
+        )
+    except Exception:
+        pass
+    return {"telegram": telegram_result, "local_notification": True}
+
+
+def _log_to_signal_notifier(row: Dict[str, Any], telegram_ok: bool) -> None:
+    """Feeds every new Agentic AI Scanner finding into the exact same
+    signal_notifier_alerts table Trade Opportunity Scanner's alerts land
+    in -- the ONE place this app's factor-level backtest calibration
+    (Signal Notifier's "Backtest -- options-trade alerts vs actual
+    outcome" panel) actually reads from. Before this, Agentic AI
+    Scanner's findings existed only in their own agentic_ai_findings
+    table, completely disconnected from any realized-outcome tracking --
+    a "confidence 85" finding and a "confidence 60" finding were never
+    checked against what actually happened afterward. This closes that
+    gap without changing anything about how Agentic AI Scanner itself
+    decides or sends its findings; it's purely an additional log write.
+
+    row["strategy_type"] and row["strikes"] were confirmed (by reading
+    the code that builds them, not assumed) to already use the exact
+    same field names/codes Trade Scanner's own opp dict uses
+    (trade_type in {"PS","CS","IC",...}, sell_strike/buy_strike,
+    put_sell/put_buy/call_sell/call_buy) -- so this needs no remapping,
+    just assembly into the shape _log_alert() already expects.
+    """
+    try:
+        from .signal_notifier import _log_alert
+    except Exception:
+        return  # signal_notifier not available -- don't let logging failure break the scan itself
+
+    trade_type = row.get("strategy_type") or "SCAN"
+    opp = {
+        "trade_type": trade_type,
+        "grade": row.get("grade"),
+        "score": row.get("confidence") if row.get("confidence") is not None else row.get("score"),
+        "rationale": row.get("rationale"),
+        "spot": row.get("spot"),
+        "expiry": row.get("expiry"),
+        "dte": row.get("dte"),
+    }
+    opp.update(row.get("strikes") or {})
+
+    bucket = f"AGENTIC_{(row.get('direction') or 'NEUTRAL').upper()}"
+    rationale = row.get("rationale") or ""
+    # Matches the "Why:"/"Caution:" convention the backtest calibration
+    # engine parses -- reuses the rationale text this scanner already
+    # generates (built from its own market/sector/RS/options agents)
+    # rather than writing a second, separate explanation.
+    message = f"🤖 Agentic AI Scanner: {row.get('symbol')} {trade_type}\nWhy: {rationale}"
+    if row.get("suggested_actions"):
+        message += f"\nCaution: {row.get('suggested_actions')}"
+
+    try:
+        _log_alert(
+            row.get("symbol"), bucket, opp, telegram_ok,
+            source_kind="agentic_ai_scanner", source_label="Agentic AI Scanner", message=message,
+        )
+    except Exception as e:
+        print(f"[agentic_ai_scanner] failed to log alert for backtest tracking: {e}")
+
+
+def _persist_findings(findings: List[Dict[str, Any]], max_alerts: int, source: str) -> Dict[str, Any]:
+    con = _conn()
+    new_rows: List[Dict[str, Any]] = []
+    repeated = 0
+    alerts_attempted = 0
+    alerts_sent = 0
+    try:
+        for row in findings:
+            row["signature"] = row.get("signature") or _make_signature(row)
+            row["found_at"] = row.get("found_at") or _now()
+            strikes = row.get("strikes") or {}
+            params = (
+                row["signature"], row["found_at"], row["found_at"], source, row.get("status", "NEW"),
+                row.get("symbol"), row.get("sector"), row.get("sector_etf"), row.get("direction"),
+                row.get("recommendation"), _safe_int(row.get("confidence")), _safe_int(row.get("score")), row.get("grade"),
+                row.get("market_regime"), row.get("sector_regime"), row.get("strategy_type"), row.get("expiry"),
+                _safe_int(row.get("dte")), _safe_float(row.get("spot")), row.get("legs"),
+                _json_dumps(strikes), row.get("rationale"), row.get("suggested_actions"),
+                _json_dumps(row.get("strategy") or {}), _json_dumps(row.get("metrics") or {}),
+                _json_dumps(row.get("checklist") or []), _json_dumps(row.get("market_context") or {}),
+                _json_dumps(row.get("sector_context") or {}),
+            )
+            try:
+                con.execute(
+                    """
+                    INSERT INTO agentic_ai_findings
+                    (signature, found_at, last_seen_at, source, status, symbol, sector, sector_etf,
+                     direction, recommendation, confidence, score, grade, market_regime, sector_regime,
+                     strategy_type, expiry, dte, spot, legs, strikes_json, rationale, suggested_actions,
+                     strategy_json, metrics_json, checklist_json, market_context_json, sector_context_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    params,
+                )
+                new_rows.append(row)
+            except sqlite3.IntegrityError:
+                repeated += 1
+                con.execute(
+                    """
+                    UPDATE agentic_ai_findings
+                    SET last_seen_at=?, seen_count=COALESCE(seen_count,1)+1, confidence=?, score=?, grade=?,
+                        recommendation=?, spot=?, rationale=?, suggested_actions=?, strategy_json=?, metrics_json=?,
+                        checklist_json=?, market_context_json=?, sector_context_json=?, updated_at=datetime('now')
+                    WHERE signature=?
+                    """,
+                    (
+                        _now(), _safe_int(row.get("confidence")), _safe_int(row.get("score")), row.get("grade"),
+                        row.get("recommendation"), _safe_float(row.get("spot")), row.get("rationale"),
+                        row.get("suggested_actions"), _json_dumps(row.get("strategy") or {}),
+                        _json_dumps(row.get("metrics") or {}), _json_dumps(row.get("checklist") or []),
+                        _json_dumps(row.get("market_context") or {}), _json_dumps(row.get("sector_context") or {}),
+                        row["signature"],
+                    ),
+                )
+        con.commit()
+
+        for row in new_rows[:max_alerts]:
+            alerts_attempted += 1
+            result = _send_finding_alert(row)
+            telegram_ok = bool((result.get("telegram") or {}).get("ok") or result.get("local_notification"))
+            if telegram_ok:
+                alerts_sent += 1
+            con.execute(
+                "UPDATE agentic_ai_findings SET alert_sent_at=?, alert_result_json=?, updated_at=datetime('now') WHERE signature=?",
+                (_now(), _json_dumps(result), row["signature"]),
+            )
+            _log_to_signal_notifier(row, telegram_ok)
+        con.commit()
+    finally:
+        con.close()
+    return {
+        "new_findings": len(new_rows),
+        "repeated_findings": repeated,
+        "alerts_attempted": alerts_attempted,
+        "alerts_sent": alerts_sent,
+        "new_signatures": [r.get("signature") for r in new_rows],
+    }
+
+
+def _row_from_db(r: sqlite3.Row) -> Dict[str, Any]:
+    d = dict(r)
+    for key in [
+        "strikes_json", "strategy_json", "metrics_json", "checklist_json",
+        "market_context_json", "sector_context_json", "alert_result_json",
+    ]:
+        d[key.replace("_json", "")] = _json_loads(d.get(key), {} if key != "checklist_json" else [])
+    return d
+
+
+def _start_run_record(params: Dict[str, Any], source: str) -> int:
+    result = {}
+    def _op():
+        con = _conn()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            cur = con.execute(
+                "INSERT INTO agentic_ai_scanner_runs(started_at, source, params_json) VALUES (?,?,?)",
+                (_now(), source, _json_dumps(params)),
+            )
+            con.commit()
+            result["id"] = int(cur.lastrowid)
+        finally:
+            con.close()
+    _retry_write(_op)
+    return result["id"]
+
+
+def _load_scanned_symbols_for_date(scan_date: str) -> set[str]:
+    _ensure_tables()
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT symbol FROM agentic_ai_scan_ledger WHERE scan_date=?",
+            (scan_date,),
+        ).fetchall()
+        return {str(r[0]).upper() for r in rows if r and r[0]}
+    finally:
+        con.close()
+
+
+def _upsert_scan_ledger(con: sqlite3.Connection, scan_date: str, symbol: str, run_id: int, source: str, status: str, signature: Optional[str] = None) -> None:
+    con.execute(
+        """
+        INSERT OR REPLACE INTO agentic_ai_scan_ledger
+        (scan_date, symbol, run_id, source, status, signature, scanned_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT scanned_at FROM agentic_ai_scan_ledger WHERE scan_date=? AND symbol=?), datetime('now')), datetime('now'))
+        """,
+        (scan_date, symbol, run_id, source, status, signature, scan_date, symbol),
+    )
+
+
+def _upsert_scan_ledger_safe(scan_date: str, symbol: str, run_id: int, source: str, status: str, signature: Optional[str] = None) -> None:
+    def _op():
+        con = _conn()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            _upsert_scan_ledger(con, scan_date, symbol, run_id, source, status, signature)
+            con.commit()
+        finally:
+            con.close()
+    _retry_write(_op, attempts=8, base_delay=0.08)
+
+
+def _finish_run_record(run_id: int, status: str, summary: Dict[str, Any], error: str = "") -> None:
+    def _op():
+        con = _conn()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                """
+                UPDATE agentic_ai_scanner_runs
+                SET completed_at=?, status=?, scanned=?, candidates=?, new_findings=?, repeated_findings=?,
+                    alerts_sent=?, alerts_attempted=?, summary_json=?, error_text=?
+                WHERE id=?
+                """,
+                (
+                    _now(), status, _safe_int(summary.get("scanned")), _safe_int(summary.get("candidates")),
+                    _safe_int(summary.get("new_findings")), _safe_int(summary.get("repeated_findings")),
+                    _safe_int(summary.get("alerts_sent")), _safe_int(summary.get("alerts_attempted")),
+                    _json_dumps(summary), error, run_id,
+                ),
+            )
+            con.commit()
+        finally:
+            con.close()
+    _retry_write(_op)
+
+
+def _candidate_from_symbol(
+    sym: str,
+    params: Dict[str, Any],
+    plan: Dict[str, Any],
+    indicators_by_symbol: Dict[str, Dict[str, Any]],
+    errors_by_symbol: Dict[str, Dict[str, str]],
+    frames_by_symbol: Dict[str, Dict[str, Any]],
+    market_ctx: Dict[str, Any],
+    sector_ctx_map: Dict[str, Any],
+    sector_info: Optional[Tuple[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    from .uae_trade_scanner import _scan_one_fast
+
+    indicators = indicators_by_symbol.get(sym, {})
+    frames = frames_by_symbol.get(sym, {})
+    tf_errors = errors_by_symbol.get(sym, {})
+    opp = _scan_one_fast(sym, params, indicators, tf_errors, frames)
+    if not opp or opp.get("filtered"):
+        return None
+
+    # Second-pass exact option-chain enrichment.  The fast pass is used to keep
+    # the universe scan responsive; alerts/history should contain the best
+    # available expiry, strikes, OI and RR detail.  If yfinance option chains are
+    # unavailable, the fast preview remains as the fallback.
+    try:
+        from .uae_trade_scanner import (
+            _choose_direction, _suggest_trade, _wall_proxy_from_chain,
+            _spy_gex_context, _checklist_score,
+        )
+        spot_for_exact = _safe_float(opp.get("spot"), None)
+        if spot_for_exact and spot_for_exact > 0:
+            exact_direction, exact_reason = _choose_direction(indicators, plan, params.get("trade_type") or "AUTO")
+            exact_trade, opt_meta = _suggest_trade(
+                sym, spot_for_exact, _safe_int(params.get("dte"), 45), exact_direction,
+                params.get("trade_type") or "AUTO",
+                _resolve_agentic_strike_width(params.get("strike_width"), sym=sym, opp=opp, market_ctx=market_ctx, sector_ctx=sector_ctx_map.get((symbol_sector_map.get(sym.upper()) or ("", ""))[0], {}), plan=plan),
+                _safe_float(params.get("short_delta"), 0.45) or 0.45,
+                _safe_float(params.get("target_rr"), 1.0) or 1.0, _safe_float(params.get("min_rr"), 0.70) or 0.70,
+            )
+            if exact_trade:
+                walls_exact = _wall_proxy_from_chain(sym, exact_trade["expiry"])
+                gex_exact = _spy_gex_context(
+                    sym, exact_trade["expiry"], int(exact_trade.get("actual_dte") or params.get("dte") or 45),
+                    spot_for_exact, exact_trade.get("iv_proxy") or 25.0,
+                )
+                checks_exact, score_exact, grade_exact = _checklist_score(
+                    sym, exact_trade.get("direction") or exact_direction, exact_trade, indicators, plan,
+                    _safe_int(opp.get("earn_days"), 999), _safe_int(params.get("earn_guard"), 14), walls_exact, gex_exact,
+                )
+                rr_exact = _safe_float(exact_trade.get("rr"), 0.0) or 0.0
+                if exact_trade.get("trade_type") in {"PS", "CS", "IC"} and rr_exact < (_safe_float(params.get("min_rr"), 0.70) or 0.70):
+                    return None
+                if score_exact < _safe_int(params.get("min_score"), 65):
+                    return None
+                passed_exact = sum(1 for c in checks_exact if c.get("status") == "pass")
+                failed_exact = sum(1 for c in checks_exact if c.get("status") == "fail")
+                exact_rationale = (
+                    f"{sym} {exact_trade.get('trade_type')} exact chain selected from {plan.get('style')} plan. "
+                    f"{exact_reason} Score {score_exact}/100 ({grade_exact}); checklist "
+                    f"{passed_exact}/8 pass, {failed_exact}/8 fail. RR {rr_exact:.2f}:1."
+                )
+                if exact_trade.get("short_oi") is not None:
+                    exact_rationale += (
+                        f" Suggested short strike OI {exact_trade.get('short_oi')}; "
+                        f"OI change {exact_trade.get('short_oi_change') if exact_trade.get('short_oi_change') is not None else 'n/a'}."
+                    )
+                opp.update(exact_trade)
+                opp.update({
+                    "direction": exact_trade.get("direction") or exact_direction,
+                    "direction_reason": exact_reason,
+                    "score": score_exact,
+                    "grade": grade_exact,
+                    "recommendation": "OPEN" if score_exact >= 75 else "OPEN_SMALL",
+                    "checks_passed": passed_exact,
+                    "checks_failed": failed_exact,
+                    "checklist": checks_exact,
+                    "walls": walls_exact,
+                    "gex": gex_exact,
+                    "rationale": exact_rationale,
+                    "exact_options": True,
+                    "option_meta": opt_meta,
+                })
+            else:
+                opp["option_meta"] = opt_meta
+    except Exception as exact_exc:
+        opp["exact_options_error"] = str(exact_exc)[:160]
+
+    direction = (opp.get("direction") or "neutral").lower()
+    if sector_info is None:
+        sector, sector_etf = _sector_for_symbol(sym)
+    else:
+        sector, sector_etf = sector_info
+    sector_ctx = sector_ctx_map.get(sector_etf) or {"bias": "neutral", "bias_label": "Neutral", "score": 0, "confidence": 0}
+    stock_df = frames.get("1d")
+    spy_df = (frames_by_symbol.get("SPY") or {}).get("1d")
+    sector_df = (frames_by_symbol.get(sector_etf) or {}).get("1d")
+    daily = _daily_metrics(stock_df)
+    rs = _relative_strength(stock_df, spy_df, sector_df)
+    oi = _options_oi_buildup(sym, params.get("dte") or 45)
+    pressure = _pressure_context(sym, _safe_float(opp.get("spot"), None), params.get("dte") or 45)
+
+    preliminary_trade = {k: v for k, v in opp.items() if k not in {"indicators", "checklist", "rationale", "tf_errors"}}
+    price_action_ctx = _price_action_quality_context(frames, direction)
+    option_quality_ctx = _target_option_oi_context(
+        sym, preliminary_trade.get("expiry") or opp.get("expiry"), _safe_float(opp.get("spot"), None), preliminary_trade
+    )
+    quality_gate = _agentic_quality_gate(direction, preliminary_trade, price_action_ctx, option_quality_ctx)
+
+    # V69 stricter seller/price-action guardrail.  The original quality gate
+    # checked aggregate call-vs-put heaviness and weak short-strike OI.  This
+    # additional guard verifies the selected short strike is outside/anchored by
+    # the actual cumulative wall cluster.  Example it catches: bullish ARM PS
+    # selected while weekly price is stretched and the chosen 415P has almost no
+    # OI while aggregate calls dominate overhead.
+    option_setup_guardrail = _option_setup_guardrail(
+        sym, preliminary_trade, _safe_float(opp.get("spot"), None), params.get("dte") or 45
+    )
+    extra_notes = list(option_setup_guardrail.get("notes") or [])
+    extra_penalty = _safe_int(option_setup_guardrail.get("confidence_penalty"), 0)
+    if extra_penalty:
+        quality_gate["penalty"] = int(min(60, _safe_int(quality_gate.get("penalty"), 0) + extra_penalty))
+        quality_gate.setdefault("notes", [])
+        quality_gate["notes"].extend(extra_notes[:4])
+    if option_setup_guardrail.get("hard_block"):
+        quality_gate["block"] = True
+        quality_gate["alternate"] = quality_gate.get("alternate") or "Skip alert: selected short strike is not backed by enough OI."
+    if direction == "bull" and price_action_ctx.get("bullish_extension_risk") and option_setup_guardrail.get("weak_anchor"):
+        if option_setup_guardrail.get("call_overhang") or option_quality_ctx.get("call_side_heavy"):
+            quality_gate["block"] = True
+            quality_gate["alternate"] = "Do not alert bullish PS while weekly price is stretched, call OI is heavy, and short-put OI support is weak."
+    if direction == "bear" and price_action_ctx.get("bearish_extension_risk") and option_setup_guardrail.get("weak_anchor"):
+        if option_setup_guardrail.get("put_overhang") or option_quality_ctx.get("put_side_heavy"):
+            quality_gate["block"] = True
+            quality_gate["alternate"] = "Do not alert bearish CS while price is downside-stretched, put OI support is heavy, and short-call OI support is weak."
+    quality_gate["option_setup_guardrail"] = option_setup_guardrail
+
+    trade_family, family_reason = _classify_trade_family(direction, price_action_ctx, daily, market_ctx, sector_ctx)
+    expected_move = _expected_move_context(_safe_float(opp.get("spot"), None), _safe_float(opp.get("iv_proxy") or (opp.get("option_meta") or {}).get("iv_proxy"), None), _safe_int(params.get("dte"), 45))
+
+    m_align = _alignment_score(direction, market_ctx.get("bias"))
+    s_align = _alignment_score(direction, sector_ctx.get("bias"))
+    rs_sc = _rs_score(direction, rs)
+    pv_sc = _price_volume_score(direction, daily)
+    opt_sc = _options_score(direction, oi, pressure)
+    fut_sc = _futures_alignment_score(direction, market_ctx)
+    uae_sc = _safe_int(opp.get("score"), 0)
+
+    if params.get("require_regime_alignment"):
+        if direction == "bull" and market_ctx.get("bias") == "bear" and sector_ctx.get("bias") == "bear":
+            return None
+        if direction == "bear" and market_ctx.get("bias") == "bull" and sector_ctx.get("bias") == "bull":
+            return None
+
+    base_confidence = round(
+        uae_sc * 0.30 +
+        m_align * 0.15 +
+        s_align * 0.15 +
+        rs_sc * 0.15 +
+        pv_sc * 0.10 +
+        opt_sc * 0.10 +
+        fut_sc * 0.05
+    )
+    quality_penalty = _safe_int(quality_gate.get("penalty"), 0)
+    confidence = int(max(0, min(100, base_confidence - quality_penalty)))
+
+    # Background alerts should be actionable trade finds, not watchlist-only
+    # diagnostics.  If the final gate blocks the setup, skip persistence/alert.
+    if quality_gate.get("block"):
+        return None
+
+    trade = opp
+    strikes = {
+        "sell_strike": trade.get("sell_strike"),
+        "buy_strike": trade.get("buy_strike"),
+        "put_sell": trade.get("put_sell"),
+        "put_buy": trade.get("put_buy"),
+        "call_sell": trade.get("call_sell"),
+        "call_buy": trade.get("call_buy"),
+    }
+    score_detail = {
+        "uae_score": uae_sc,
+        "market_alignment_score": m_align,
+        "sector_alignment_score": s_align,
+        "relative_strength_score": rs_sc,
+        "price_volume_score": pv_sc,
+        "options_pressure_score": opt_sc,
+        "futures_alignment_score": fut_sc,
+        "base_confidence_before_quality_gate": base_confidence,
+        "quality_gate_penalty": quality_penalty,
+        "quality_gate": quality_gate,
+        "option_setup_guardrail": option_setup_guardrail,
+        "trade_family": trade_family,
+        "trade_family_reason": family_reason,
+        "expected_move": expected_move,
+        "weights": {"uae": 0.30, "market": 0.15, "sector": 0.15, "rs": 0.15, "price_volume": 0.10, "options": 0.10, "futures": 0.05, "quality_gate": "subtractive"},
+    }
+    factor_bundle = _factor_scores(direction, trade, daily, rs, market_ctx, sector_ctx, price_action_ctx, option_quality_ctx, quality_gate, exact_trade=trade if trade.get("exact_options") else None, checks_exact=trade.get("checklist") if isinstance(trade.get("checklist"), list) else None, iv_proxy=_safe_float((trade or {}).get("iv_proxy"), None), earn_days=_safe_int(opp.get("earn_days"), 999), earn_guard=_safe_int(params.get("earn_guard"), 14))
+    filters_cfg = params.get("filters") or _load_agentic_filters("{}")
+    weights = {k: _safe_float((filters_cfg.get(k) or {}).get("weight"), DEFAULT_AGENTIC_FILTERS.get(k, {}).get("weight", 1.0)) or 1.0 for k in DEFAULT_AGENTIC_FILTERS.keys()}
+    enabled = {k: bool((filters_cfg.get(k) or {}).get("enabled", True)) for k in DEFAULT_AGENTIC_FILTERS.keys()}
+    active_pairs = [(k, factor_bundle["factors"].get(k, 50), weights.get(k, 1.0)) for k in DEFAULT_AGENTIC_FILTERS.keys() if enabled.get(k, True)]
+    if active_pairs:
+        total_w = sum(w for _, _, w in active_pairs) or 1.0
+        weighted_factor_score = sum(score * w for _, score, w in active_pairs) / total_w
+    else:
+        weighted_factor_score = base_confidence
+    risk_penalty = max(0.0, 100.0 - float(factor_bundle["factors"].get("risk", 70)))
+    weighted_base = (base_confidence * 0.35) + (weighted_factor_score * 0.55) + (factor_bundle["factors"].get("market", 50) * 0.05)
+    weighted_base -= risk_penalty * 0.25
+    adjusted_confidence = int(max(0, min(100, round(weighted_base))))
+    if adjusted_confidence < _safe_int(params.get("min_confidence"), 72):
+        return None
+
+    rationale_parts = [
+        f"Market agent: {_bias_label(market_ctx.get('bias'))} regime, confidence {market_ctx.get('confidence')}.",
+        f"Sector agent: {sector} via {sector_etf} is {_bias_label(sector_ctx.get('bias'))}.",
+        f"Stock agent: RS vs market 20d {rs.get('rs_vs_market_20d')}, RS vs sector 20d {rs.get('rs_vs_sector_20d')}; RSI {daily.get('rsi14')}, RSIDiff90 {daily.get('rsi_diff90')}, MACD hist {daily.get('macd_hist')}.",
+        f"UAE agent: {opp.get('rationale')}",
+        f"Options agent: {oi.get('note') if isinstance(oi, dict) else 'n/a'} Wall/GEX: {' '.join((pressure.get('notes') or [])[:2])}.",
+        f"Cumulative OI agent: {option_quality_ctx.get('summary') or 'n/a'}",
+        f"Price-action agent: {price_action_ctx.get('summary') or 'n/a'}",
+        f"Trade family agent: {trade_family} — {family_reason}",
+        f"Quality gate: {' '.join((quality_gate.get('notes') or [])[:4])}",
+        f"Setup guardrail: {option_setup_guardrail.get('summary') or 'n/a'}",
+        f"Decision agent: combined confidence {adjusted_confidence}/100 from score components {score_detail}.",
+    ]
+    finding = {
+        "symbol": sym,
+        "sector": sector,
+        "sector_etf": sector_etf,
+        "direction": direction,
+        "recommendation": "OPEN" if adjusted_confidence >= 82 and opp.get("recommendation") == "OPEN" and quality_penalty < 12 else "OPEN_SMALL" if adjusted_confidence >= 72 else "WATCH",
+        "confidence": int(adjusted_confidence),
+        "score": int(adjusted_confidence),
+        "grade": opp.get("grade"),
+        "market_regime": market_ctx.get("bias"),
+        "sector_regime": sector_ctx.get("bias"),
+        "strategy_type": trade.get("trade_type"),
+        "expiry": trade.get("expiry"),
+        "dte": trade.get("dte") or trade.get("actual_dte"),
+        "spot": _safe_float(opp.get("spot"), None, 2),
+        "legs": trade.get("legs"),
+        "strikes": strikes,
+        "strategy": {**trade, "trade_family": trade_family, "trade_family_reason": family_reason, "strategy_fit": _strategy_fit_label(trade_family, trade.get("trade_type"), trade.get("iv_proxy")), "pop": _estimate_pop(trade), "expected_move": expected_move, "filters_used": {k: {"enabled": enabled.get(k, True), "weight": weights.get(k, 1.0)} for k in DEFAULT_AGENTIC_FILTERS.keys()}},
+        "checklist": opp.get("checklist") or [],
+        "metrics": {
+            "daily": daily,
+            "relative_strength": rs,
+            "option_oi_buildup_45d": oi,
+            "option_pressure": pressure,
+            "option_oi_quality": option_quality_ctx,
+            "price_action_quality": price_action_ctx,
+            "quality_gate": quality_gate,
+            "option_setup_guardrail": option_setup_guardrail,
+            "score_detail": score_detail,
+            "factor_bundle": factor_bundle,
+            "uae_indicators": indicators,
+            "tf_errors": tf_errors,
+        },
+        "trade_family": trade_family,
+        "trade_family_reason": family_reason,
+        "expected_move": expected_move,
+        "market_context": market_ctx,
+        "sector_context": sector_ctx,
+        "rationale": " ".join(str(x) for x in rationale_parts if x),
+        "found_at": _now(),
+        "status": "NEW",
+    }
+    # Final reusable guardrail pass shared by future Agentic/AI-Hub paths.
+    # It caps confidence or suppresses alerts when price is extended, OI is
+    # opposite-heavy, selected short strikes are thin, or earnings conflict.
+    try:
+        from .agentic_guardrails import evaluate_agentic_guardrails, apply_agentic_guardrails
+        guard2 = evaluate_agentic_guardrails(
+            sym, direction, trade, frames, _safe_float(opp.get("spot"), None), _safe_int(opp.get("earn_days"), 999)
+        )
+        finding = apply_agentic_guardrails(finding, guard2, _safe_int(params.get("min_confidence"), 72))
+        if finding.get("filtered_by_guardrails") or str(finding.get("recommendation") or "").upper() in {"WATCH", "AVOID"}:
+            return None
+    except Exception as guard_exc:
+        finding.setdefault("metrics", {})["agentic_guardrails_error"] = str(guard_exc)[:180]
+
+    finding["suggested_actions"] = _build_actions(finding)
+    finding["signature"] = _make_signature(finding)
+    return finding
+
+
+def run_agentic_scan(source: str = "manual", overrides: Optional[Dict[str, Any]] = None, acquire_lock: bool = True) -> Dict[str, Any]:
+    global _LAST_RUN_CACHE
+    _ensure_tables()
+    locked_here = False
+    if acquire_lock:
+        if not _RUN_LOCK.acquire(blocking=False):
+            return {"ok": False, "error": "Agentic scanner is already running."}
+        locked_here = True
+    try:
+        settings = _settings()
+        if overrides:
+            settings.update({k: v for k, v in overrides.items() if v is not None})
+            if overrides.get("filters_json") is not None:
+                settings["filters"] = _load_agentic_filters(overrides.get("filters_json"))
+            elif isinstance(overrides.get("filters"), dict):
+                settings["filters"] = _load_agentic_filters(overrides.get("filters"))
+        incremental = _as_bool(settings.get("incremental_enabled"), True)
+        if overrides and "incremental" in overrides:
+            incremental = _as_bool(overrides.get("incremental"), incremental)
+        force_full_run = _as_bool(overrides.get("force_full_run"), False) if overrides else False
+        params = {
+            "dte": _safe_int(settings.get("target_dte"), 45),
+            "trade_type": (settings.get("trade_type") or "AUTO").upper(),
+            "min_score": _safe_int(settings.get("min_uae_score"), 65),
+            "min_confidence": _safe_int(settings.get("min_confidence"), 72),
+            "earn_guard": _safe_int(settings.get("earn_guard"), 14),
+            "strike_width": settings.get("strike_width"),
+            "short_delta": _safe_float(settings.get("short_delta"), 0.45),
+            "target_rr": _safe_float(settings.get("target_rr"), 1.0),
+            "min_rr": _safe_float(settings.get("min_rr"), 0.70),
+            "require_regime_alignment": bool(settings.get("require_regime_alignment")),
+            "filters": _load_agentic_filters(settings.get("filters")) if isinstance(settings.get("filters"), str) else settings.get("filters") or _load_agentic_filters(settings.get("raw", {}).get("agentic_ai_filters_json", "{}")),
+            "incremental": incremental,
+            "force_full_run": force_full_run,
+            "max_workers": _safe_int(settings.get("max_workers"), 6),
+        }
+        run_id = _start_run_record({**settings, **params}, source)
+        started_at = _now()
+        symbols, universe_meta = _resolve_symbols(settings.get("watchlist_id"), _safe_int(settings.get("max_symbols"), 80))
+        scan_date = _today_key()
+        skipped_today = 0
+        if incremental and not force_full_run:
+            scanned_today = _load_scanned_symbols_for_date(scan_date)
+            original_count = len(symbols)
+            symbols = [s for s in symbols if s.upper() not in scanned_today]
+            skipped_today = original_count - len(symbols)
+            if skipped_today:
+                universe_meta = dict(universe_meta)
+                universe_meta["skipped_today"] = skipped_today
+                universe_meta["scan_date"] = scan_date
+        _update_run_progress(running=True, source=source, started_at=started_at, completed_at=None, total=len(symbols), scanned=0, candidates=0, current_symbol=None, message=(f"Preparing {len(symbols)} symbols (skipped {skipped_today} already scanned today)" if skipped_today else f"Preparing {len(symbols)} symbols"), percent=0, suggestions=[])
+        if not symbols:
+            summary = {"scanned": 0, "candidates": 0, "new_findings": 0, "skipped_today": skipped_today, "incremental": incremental, "force_full_run": force_full_run, "message": "No symbols to scan.", "suggestions": _build_zero_result_suggestions(settings, _get_run_progress(), {"scanned": 0, "candidates": 0})}
+            _finish_run_record(run_id, "OK", summary)
+            _LAST_RUN_CACHE = {"ok": True, "run_id": run_id, "summary": summary, "started_at": started_at, "completed_at": _now()}
+            _update_run_progress(running=False, completed_at=_now(), message="No symbols to scan.", total=0, scanned=0, candidates=0, current_symbol=None, percent=0, suggestions=summary["suggestions"], auto_tune={"mode": settings.get("autotune_mode", "AUTO"), "saved": False, "changes": [], "summary": "No symbols to scan."})
+            return _LAST_RUN_CACHE
+
+        sector_pairs = [_sector_for_symbol(s) for s in symbols]
+        symbol_sector_map = {sym.upper(): (sector, etf) for sym, (sector, etf) in zip(symbols, sector_pairs)}
+        symbols = sorted(symbols, key=lambda s: (symbol_sector_map.get(s.upper(), ("ZZZ", "ZZZ"))[0], s))
+        sector_etfs = sorted({etf for _, etf in sector_pairs if etf})
+        plan = _scan_plan(params["dte"])
+        fetch_symbols = sorted(set(symbols + MARKET_PROXIES + sector_etfs))
+
+        from .uae_trade_scanner import _build_indicator_cache
+        indicators_by_symbol, errors_by_symbol, frames_by_symbol = _build_indicator_cache(fetch_symbols, plan)
+
+        cached_ctx = _load_daily_context_cache(scan_date, params["dte"], sector_etfs)
+        if cached_ctx:
+            market_ctx = cached_ctx.get("market_context") or _market_context(indicators_by_symbol, frames_by_symbol, params["dte"])
+            sector_ctx_map = cached_ctx.get("sector_contexts") or _sector_contexts(sector_etfs, indicators_by_symbol, frames_by_symbol)
+        else:
+            market_ctx = _market_context(indicators_by_symbol, frames_by_symbol, params["dte"])
+            sector_ctx_map = _sector_contexts(sector_etfs, indicators_by_symbol, frames_by_symbol)
+            _store_daily_context_cache(scan_date, params["dte"], sector_etfs, run_id, market_ctx, sector_ctx_map, symbol_sector_map)
+        _update_run_progress(market_bias=market_ctx.get("bias"), market_confidence=market_ctx.get("confidence"), sector_count=len(sector_ctx_map))
+
+        findings: List[Dict[str, Any]] = []
+        errors: List[Dict[str, str]] = []
+        total_syms = max(1, len(symbols))
+        max_workers = max(2, min(_safe_int(settings.get("max_workers"), 6), total_syms))
+
+        def _score_symbol(item: Tuple[int, str]) -> Tuple[int, str, Optional[Dict[str, Any]], Optional[Dict[str, str]]]:
+            idx, sym = item
+            try:
+                cand = _candidate_from_symbol(sym, params, plan, indicators_by_symbol, errors_by_symbol, frames_by_symbol, market_ctx, sector_ctx_map, symbol_sector_map.get(sym.upper()))
+                return idx, sym, cand, None
+            except Exception as exc:
+                return idx, sym, None, {"symbol": sym, "error": str(exc)[:180]}
+
+        try:
+            ex = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="agentic-ai")
+            futures = [ex.submit(_score_symbol, item) for item in enumerate(symbols, start=1)]
+            done = 0
+            from ..services.bounded_wait import bounded_as_completed
+            fut_map = {f: f for f in futures}
+            for fut, _key in bounded_as_completed(fut_map, timeout=120,
+                    on_timeout=lambda ks: print(f"[agentic_ai_scanner] {len(ks)} task(s) timed out")):
+                if fut is None:
+                    continue
+                idx, sym, cand, err = fut.result()
+                done += 1
+                ledger_status = "ERROR" if err else "OK"
+                ledger_sig = None
+                if cand:
+                    findings.append(cand)
+                    ledger_sig = cand.get("signature")
+                if err:
+                    errors.append(err)
+                try:
+                    _upsert_scan_ledger_safe(scan_date, sym.upper(), run_id, source, ledger_status, ledger_sig)
+                except Exception:
+                    pass
+                _update_run_progress(
+                    running=True,
+                    source=source,
+                    started_at=started_at,
+                    completed_at=None,
+                    total=total_syms,
+                    scanned=done,
+                    current_symbol=sym,
+                    candidates=len(findings),
+                    message=f"Processed {sym} ({done}/{total_syms})",
+                    percent=int((done / total_syms) * 100),
+                )
+        finally:
+            try:
+                ex.shutdown(wait=False)
+            except Exception:
+                pass
+        findings.sort(key=lambda r: (r.get("confidence") or 0, r.get("symbol") or ""), reverse=True)
+        persist = _persist_findings(findings, _safe_int(settings.get("max_alerts_per_run"), 8), source)
+        summary_base = {
+            "run_id": run_id,
+            "started_at": started_at,
+            "completed_at": _now(),
+            "source": source,
+            "watchlist": universe_meta,
+            "universe_count": len(universe_meta.get("symbols") or symbols) if isinstance(universe_meta, dict) else len(symbols),
+            "scanned": len(symbols),
+            "skipped_today": skipped_today,
+            "incremental": incremental,
+            "force_full_run": force_full_run,
+            "fetch_symbols": len(fetch_symbols),
+            "candidates": len(findings),
+            "errors": errors[:25],
+            "market_context": market_ctx,
+            "sector_contexts": sector_ctx_map,
+            **persist,
+        }
+        zero_suggestions = _build_zero_result_suggestions(settings, _get_run_progress(), {"scanned": len(symbols), "candidates": len(findings)}) if len(findings) == 0 else []
+        auto_tune = _auto_tune_settings(settings, market_ctx=market_ctx, summary=summary_base, findings=findings)
+        if auto_tune.get("saved") and auto_tune.get("settings"):
+            settings.update(auto_tune.get("settings") or {})
+        tune_msg = auto_tune.get("summary") if auto_tune.get("changes") else ""
+        summary = {
+            **summary_base,
+            "suggestions": zero_suggestions if not auto_tune.get("changes") else (auto_tune.get("suggestions") or zero_suggestions),
+            "auto_tune": auto_tune,
+            "tuning_summary": tune_msg,
+        }
+        _store_daily_context_cache(scan_date, params["dte"], sector_etfs, run_id, market_ctx, sector_ctx_map, symbol_sector_map, summary=summary)
+        final_progress_msg = "Completed."
+        final_suggestions = summary.get("suggestions") or []
+        if auto_tune.get("saved") and auto_tune.get("changes"):
+            change_txt = "; ".join([f"{c['key']} {c['from']}→{c['to']}" for c in auto_tune.get("changes", [])[:8]])
+            final_progress_msg = f"Completed; auto-tuned and saved profile v{auto_tune.get('profile_version')}: {change_txt}"
+            final_suggestions = [f"Auto-tune saved: {change_txt}"] + (auto_tune.get("suggestions") or [])
+        elif auto_tune.get("changes"):
+            change_txt = "; ".join([f"{c['key']} {c['from']}→{c['to']}" for c in auto_tune.get("changes", [])[:8]])
+            final_progress_msg = f"Completed; tuning suggested: {change_txt}"
+            final_suggestions = [f"Auto-tune suggestion: {change_txt}"] + (auto_tune.get("suggestions") or [])
+        elif zero_suggestions:
+            final_progress_msg = "Completed; no results found. Review the tuning suggestions below."
+        _finish_run_record(run_id, "OK", summary)
+        _update_run_progress(
+            running=False,
+            completed_at=_now(),
+            current_symbol=None,
+            percent=100,
+            message=final_progress_msg,
+            suggestions=final_suggestions[:8],
+            auto_tune=auto_tune,
+        )
+        _LAST_RUN_CACHE = {"ok": True, "run_id": run_id, "summary": summary, "findings": findings[:25], "progress": _get_run_progress()}
+        return _LAST_RUN_CACHE
+    except Exception as exc:
+        tb = traceback.format_exc()
+        error = f"{exc}\n{tb[-2000:]}"
+        try:
+            if 'run_id' in locals():
+                _finish_run_record(run_id, "ERROR", {"scanned": 0, "candidates": 0}, error)
+        except Exception:
+            pass
+        _LAST_RUN_CACHE = {"ok": False, "error": str(exc), "trace": tb[-2000:]}
+        return _LAST_RUN_CACHE
+    finally:
+        _RUN_LOCK.release()
+
+
+def _watcher_loop(interval_seconds: int = 3600) -> None:
+    from ..services.job_registry import register_job, mark_run, is_enabled
+    register_job(
+        "agentic_ai_scanner", "Agentic AI Scanner", "Runs the regime/RS/OI multi-factor scanner sweep.",
+        kind="interval", default_schedule={"interval_min": max(1, int((interval_seconds or 3600) / 60))},
+        group="Alert Watchers", run_now_fn=lambda: run_agentic_scan(source="manual"), editable=False,
+    )
+    # Small startup pause lets the Flask app finish registering routes before the first scan.
+    time.sleep(5)
+    while not _WATCHER_STOP_EVENT.is_set():
+        try:
+            settings = _settings()
+            if settings.get("enabled") and is_enabled("agentic_ai_scanner"):
+                run_agentic_scan(source="watcher")
+                mark_run("agentic_ai_scanner", True, "Ran on its own schedule (configure in Agentic AI Scanner page)")
+            sleep_for = _safe_int(settings.get("interval_seconds"), interval_seconds or 1800)
+        except Exception as e:
+            mark_run("agentic_ai_scanner", False, str(e))
+            sleep_for = interval_seconds or 1800
+        _WATCHER_STOP_EVENT.wait(max(300, int(sleep_for)))
+
+
+def start_agentic_ai_scanner(interval_seconds: int = 3600) -> bool:
+    global _WATCHER_STARTED
+    with _WATCHER_LOCK:
+        if _WATCHER_STARTED:
+            return False
+        _WATCHER_STOP_EVENT.clear()
+        t = threading.Thread(target=_watcher_loop, kwargs={"interval_seconds": interval_seconds}, name="agentic-ai-scanner", daemon=True)
+        t.start()
+        _WATCHER_STARTED = True
+        return True
+
+
+def stop_agentic_ai_scanner() -> bool:
+    global _WATCHER_STARTED
+    with _WATCHER_LOCK:
+        if not _WATCHER_STARTED:
+            return False
+        _WATCHER_STOP_EVENT.set()
+        _WATCHER_STARTED = False
+        return True
+
+
+@agentic_ai_bp.route("/")
+def page():
+    return render_template("agentic_ai_scanner.html")
+
+
+@agentic_ai_bp.route("/clean")
+def page_clean():
+    return render_template("agentic_ai_scanner_clean.html")
+
+
+@agentic_ai_bp.route("/api/status")
+def api_status():
+    _ensure_tables()
+    con = _conn()
+    try:
+        last_run = con.execute(
+            "SELECT * FROM agentic_ai_scanner_runs ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        counts = con.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN alert_sent_at IS NOT NULL THEN 1 ELSE 0 END) AS alerted,
+                   SUM(CASE WHEN date(found_at)=date('now') THEN 1 ELSE 0 END) AS today
+            FROM agentic_ai_findings
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    try:
+        from ..services.telegram_alerts import telegram_configured
+        telegram_ok = telegram_configured()
+    except Exception:
+        telegram_ok = False
+    progress = _get_run_progress()
+    settings = _settings()
+    summary = (_LAST_RUN_CACHE.get("summary") or {}) if isinstance(_LAST_RUN_CACHE, dict) else {}
+    if not progress.get("suggestions"):
+        progress["suggestions"] = _build_zero_result_suggestions(settings, progress, summary if summary else None)
+    return jsonify({
+        "ok": True,
+        "settings": settings,
+        "watchlists": _watchlists(),
+        "watcher_started": _WATCHER_STARTED,
+        "telegram_configured": telegram_ok,
+        "last_run": dict(last_run) if last_run else None,
+        "counts": dict(counts) if counts else {"total": 0, "alerted": 0, "today": 0},
+        "last_run_cache": _LAST_RUN_CACHE,
+        "progress": progress,
+        "autoloop": _get_autoloop_status(),
+        "suggestions": progress.get("suggestions") or [],
+    })
+
+
+@agentic_ai_bp.route("/api/start", methods=["POST"])
+def api_start():
+    started = start_agentic_ai_scanner(interval_seconds=_safe_int(_settings().get("interval_seconds"), 3600))
+    return jsonify({"ok": True, "started": started, "watcher_started": _WATCHER_STARTED, "message": "Scanner watcher started." if started else "Scanner watcher is already running."})
+
+
+@agentic_ai_bp.route("/api/stop", methods=["POST"])
+def api_stop():
+    stopped = stop_agentic_ai_scanner()
+    return jsonify({"ok": True, "stopped": stopped, "watcher_started": _WATCHER_STARTED, "message": "Scanner watcher stopped." if stopped else "Scanner watcher was not running."})
+
+
+@agentic_ai_bp.route("/api/settings", methods=["POST"])
+def api_settings_post():
+    data = request.get_json(silent=True) or {}
+    mapping = {
+        "enabled": "agentic_ai_scanner_enabled",
+        "interval_seconds": "agentic_ai_interval_seconds",
+        "watchlist_id": "agentic_ai_watchlist_id",
+        "max_symbols": "agentic_ai_max_symbols",
+        "target_dte": "agentic_ai_target_dte",
+        "min_confidence": "agentic_ai_min_confidence",
+        "min_uae_score": "agentic_ai_min_uae_score",
+        "require_regime_alignment": "agentic_ai_require_regime_alignment",
+        "max_alerts_per_run": "agentic_ai_max_alerts_per_run",
+        "trade_type": "agentic_ai_trade_type",
+        "strike_width": "agentic_ai_strike_width",
+        "short_delta": "agentic_ai_short_delta",
+        "target_rr": "agentic_ai_target_rr",
+        "min_rr": "agentic_ai_min_rr",
+        "earn_guard": "agentic_ai_earn_guard",
+        "autotune_mode": "agentic_ai_autotune_mode",
+        "profile_version": "agentic_ai_profile_version",
+        "last_autotune_json": "agentic_ai_last_autotune_json",
+        "incremental_enabled": "agentic_ai_incremental_enabled",
+        "max_workers": "agentic_ai_max_workers",
+        "autoloop_max_iterations": "agentic_ai_autoloop_max_iterations",
+        "autoloop_target_candidates": "agentic_ai_autoloop_target_candidates",
+        "autoloop_target_confidence": "agentic_ai_autoloop_target_confidence",
+    }
+    updates: Dict[str, Any] = {}
+    for src, key in mapping.items():
+        if src in data:
+            updates[key] = data[src]
+
+    if "filters_json" in data:
+        filters = _load_agentic_filters(data.get("filters_json"))
+        updates["agentic_ai_filters_json"] = json.dumps(filters, default=str)
+    elif isinstance(data.get("filters"), dict):
+        filters = _load_agentic_filters(data.get("filters"))
+        updates["agentic_ai_filters_json"] = json.dumps(filters, default=str)
+
+    _set_settings_bulk(updates)
+    return jsonify({"ok": True, "settings": _settings()})
+
+
+@agentic_ai_bp.route("/api/run", methods=["POST"])
+def api_run():
+    data = request.get_json(silent=True) or {}
+    overrides = {}
+    for k in [
+        "watchlist_id", "max_symbols", "target_dte", "min_confidence", "min_uae_score",
+        "require_regime_alignment", "trade_type", "strike_width", "short_delta", "target_rr",
+        "min_rr", "earn_guard", "max_alerts_per_run", "autotune_mode", "filters_json",
+        "incremental", "force_full_run", "incremental_enabled", "max_workers",
+    ]:
+        if k in data:
+            overrides[k] = data[k]
+    if not _RUN_LOCK.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "Agentic scanner is already running."}), 409
+    _update_run_progress(running=True, source="manual", started_at=_now(), completed_at=None, total=0, scanned=0, candidates=0, current_symbol=None, message="Queued", percent=0, suggestions=[])
+    t = threading.Thread(target=run_agentic_scan, kwargs={"source": "manual", "overrides": overrides, "acquire_lock": False}, name="agentic-ai-run", daemon=True)
+    t.start()
+    return jsonify({"ok": True, "started": True, "message": "Agentic AI scanner started in background."})
+
+
+
+@agentic_ai_bp.route("/api/autotune/start", methods=["POST"])
+def api_autotune_start():
+    _ensure_tables()
+    data = request.get_json(silent=True) or {}
+    if not _AUTOLOOP_LOCK.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "Agentic AI auto-loop is already running.", "autoloop": _get_autoloop_status()}), 409
+    try:
+        if _get_run_progress().get("running"):
+            _AUTOLOOP_LOCK.release()
+            return jsonify({"ok": False, "error": "A scanner run is already active. Stop/wait before starting auto-loop."}), 409
+        base = _settings()
+        if data:
+            for k in [
+                "watchlist_id", "max_symbols", "target_dte", "min_confidence", "min_uae_score",
+                "require_regime_alignment", "max_alerts_per_run", "trade_type", "strike_width",
+                "short_delta", "target_rr", "min_rr", "earn_guard", "autotune_mode",
+                "incremental_enabled", "max_workers", "autoloop_max_iterations",
+                "autoloop_target_candidates", "autoloop_target_confidence",
+            ]:
+                if k in data:
+                    base[k] = data[k]
+            if "filters_json" in data:
+                base["filters"] = _load_agentic_filters(data.get("filters_json"))
+            elif isinstance(data.get("filters"), dict):
+                base["filters"] = _load_agentic_filters(data.get("filters"))
+        controls = {
+            "session_id": datetime.now().strftime("autoloop_%Y%m%d_%H%M%S"),
+            "max_iterations": data.get("max_iterations") or data.get("autoloop_max_iterations") or base.get("autoloop_max_iterations"),
+            "target_candidates": data.get("target_candidates") or data.get("autoloop_target_candidates") or base.get("autoloop_target_candidates"),
+            "target_confidence": data.get("target_confidence") or data.get("autoloop_target_confidence") or base.get("autoloop_target_confidence"),
+        }
+        # Persist the user's auto-loop controls immediately; trial weights are saved only after the best profile is selected.
+        _set_settings_bulk({
+            "agentic_ai_autoloop_max_iterations": controls["max_iterations"],
+            "agentic_ai_autoloop_target_candidates": controls["target_candidates"],
+            "agentic_ai_autoloop_target_confidence": controls["target_confidence"],
+        })
+        t = threading.Thread(target=_run_agentic_autoloop, args=(base, controls), name="agentic-ai-autoloop", daemon=True)
+        t.start()
+        return jsonify({"ok": True, "started": True, "message": "Agentic AI auto-loop started.", "autoloop": _get_autoloop_status()})
+    except Exception:
+        try:
+            _AUTOLOOP_LOCK.release()
+        except RuntimeError:
+            pass
+        raise
+
+
+@agentic_ai_bp.route("/api/autotune/stop", methods=["POST"])
+def api_autotune_stop():
+    status = _get_autoloop_status()
+    if not status.get("running"):
+        return jsonify({"ok": True, "stopped": False, "message": "Auto-loop is not running.", "autoloop": status})
+    _AUTOLOOP_STOP_EVENT.set()
+    _update_autoloop_status(stop_requested=True, message="Stop requested. The current trial will finish first.")
+    return jsonify({"ok": True, "stopped": True, "message": "Stop requested; current trial will finish first.", "autoloop": _get_autoloop_status()})
+
+
+@agentic_ai_bp.route("/api/autotune/status")
+def api_autotune_status():
+    return jsonify({"ok": True, "autoloop": _get_autoloop_status()})
+
+
+@agentic_ai_bp.route("/api/history")
+def api_history():
+    _ensure_tables()
+    limit = max(1, min(500, _safe_int(request.args.get("limit"), 100)))
+    symbol = (request.args.get("symbol") or "").upper().strip()
+    status = (request.args.get("status") or "").upper().strip()
+    con = _conn()
+    try:
+        where = []
+        params: List[Any] = []
+        if symbol:
+            where.append("symbol=?")
+            params.append(symbol)
+        if status:
+            where.append("upper(status)=?")
+            params.append(status)
+        sql = "SELECT * FROM agentic_ai_findings"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY found_at DESC, confidence DESC LIMIT ?"
+        params.append(limit)
+        rows = con.execute(sql, params).fetchall()
+        return jsonify({"ok": True, "items": [_row_from_db(r) for r in rows]})
+    finally:
+        con.close()
+
+
+@agentic_ai_bp.route("/api/finding/<int:finding_id>")
+def api_finding(finding_id: int):
+    _ensure_tables()
+    con = _conn()
+    try:
+        row = con.execute("SELECT * FROM agentic_ai_findings WHERE id=?", (finding_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "finding not found"}), 404
+        return jsonify({"ok": True, "finding": _row_from_db(row)})
+    finally:
+        con.close()
+
+
+@agentic_ai_bp.route("/api/finding/<int:finding_id>/status", methods=["POST"])
+def api_finding_status(finding_id: int):
+    data = request.get_json(silent=True) or {}
+    status = (data.get("status") or "REVIEWED").upper().strip()
+    if status not in {"NEW", "REVIEWED", "WATCH", "TAKEN", "DISMISSED"}:
+        return jsonify({"ok": False, "error": "invalid status"}), 400
+    def _op():
+        con = _conn()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("UPDATE agentic_ai_findings SET status=?, updated_at=datetime('now') WHERE id=?", (status, finding_id))
+            con.commit()
+        finally:
+            con.close()
+    _retry_write(_op)
+    return jsonify({"ok": True, "status": status})

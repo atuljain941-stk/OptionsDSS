@@ -1,0 +1,1579 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Schwab Auto-Trading</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root {
+      --dte-bg:#0f1424; --dte-panel:#1b2235; --dte-border:rgba(148,163,184,.16);
+      --dte-text:#e5eefc; --dte-muted:#7b8ab5; --dte-accent:#7c9df8;
+      --dte-good:#22c55e; --dte-warn:#f59e0b; --dte-bad:#ef4444;
+    }
+    html,body{height:100%;}
+    body{margin:0;background:linear-gradient(180deg,#0c1120 0%,#0f1424 100%);color:var(--dte-text);
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;}
+    *{box-sizing:border-box;}
+    .shell{min-height:100vh;padding:16px;max-width:1300px;margin:0 auto;}
+    .top{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;
+      background:rgba(28,36,56,.88);border:1px solid var(--dte-border);border-radius:14px;padding:12px 14px;margin-bottom:12px;}
+    .brand{font-weight:900;font-size:19px;}
+    .sub{color:var(--dte-muted);font-size:12.5px;margin-top:2px;}
+    .panel{background:rgba(20,26,42,.75);border:1px solid var(--dte-border);border-radius:14px;
+      padding:14px;margin-bottom:14px;}
+    .panel h3{margin:0 0 10px 0;font-size:14px;}
+    input,select{background:rgba(15,20,36,.9);color:var(--dte-text);border:1px solid var(--dte-border);
+      border-radius:8px;padding:7px 10px;font-size:13px;}
+    label{font-size:11.5px;color:var(--dte-muted);font-weight:700;display:block;margin-bottom:3px;}
+    .btn{cursor:pointer;border-radius:10px;border:1px solid var(--dte-border);
+      background:linear-gradient(180deg,rgba(124,157,248,.32),rgba(124,157,248,.16));
+      color:var(--dte-text);padding:9px 14px;font-weight:700;font-size:13px;}
+    .btn:hover{filter:brightness(1.1);}
+    .btn.danger{background:linear-gradient(180deg,rgba(239,68,68,.32),rgba(239,68,68,.16));}
+    .btn.good{background:linear-gradient(180deg,rgba(34,197,94,.32),rgba(34,197,94,.16));}
+    .row{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px;}
+    .row > div{min-width:140px;}
+    .legs-table{width:100%;border-collapse:collapse;margin:8px 0;}
+    .legs-table th{text-align:left;font-size:10.5px;color:var(--dte-muted);padding:4px 6px;}
+    .legs-table td{padding:4px 6px;}
+    .legs-table input,.legs-table select{width:100%;}
+    table.pos-table{width:100%;border-collapse:collapse;font-size:12.5px;}
+    table.pos-table th{text-align:left;padding:6px 8px;color:var(--dte-muted);font-weight:700;font-size:11px;
+      text-transform:uppercase;border-bottom:1px solid var(--dte-border);}
+    table.pos-table td{padding:6px 8px;border-bottom:1px solid rgba(148,163,184,.08);}
+    .pnl-pos{color:var(--dte-good);font-weight:700;}
+    .pnl-neg{color:var(--dte-bad);font-weight:700;}
+    .status-chip{padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:700;}
+    .status-OPEN{background:rgba(34,197,94,.18);color:var(--dte-good);}
+    .status-CLOSING{background:rgba(245,158,11,.18);color:var(--dte-warn);}
+    .status-PENDING_ENTRY{background:rgba(124,157,248,.18);color:var(--dte-accent);}
+    .status-CLOSED{background:rgba(148,163,184,.14);color:var(--dte-muted);}
+    .status-ERROR{background:rgba(239,68,68,.18);color:var(--dte-bad);}
+    .empty{color:var(--dte-muted);padding:16px;text-align:center;}
+    .session-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;}
+    .dot-active{background:var(--dte-good);}
+    .dot-inactive{background:var(--dte-bad);}
+    .warn-banner{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);border-radius:10px;
+      padding:10px 12px;font-size:12px;color:var(--dte-warn);margin-bottom:12px;}
+    .dte-tab{padding:9px 16px;border-radius:10px;border:1px solid var(--dte-border);
+      background:rgba(20,26,42,.7);cursor:pointer;font-weight:700;font-size:13px;color:var(--dte-muted);}
+    .dte-tab.active{background:linear-gradient(180deg,rgba(124,157,248,.4),rgba(124,157,248,.2));color:var(--dte-text);}
+    .tab-page{display:none;}
+    .tab-page.active{display:block;}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="top">
+    <div>
+      <div class="brand">Schwab Auto-Trading</div>
+      <div class="sub">Multi-leg options (safe sequencing, LONG legs open first / SHORT legs close first) AND stock buy/sell, on the same tracking + P&amp;L + strategy engine built for ICICI. Built on your existing Schwab OAuth connection -- no new auth flow.</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div id="liveTradingToggleWrap" style="display:flex;align-items:center;gap:8px;">
+        <span style="font-size:12.5px;font-weight:700;color:var(--dte-muted);">Live Trading</span>
+        <button class="btn" id="liveTradingBtn" onclick="toggleLiveTrading()" style="padding:6px 14px;">checking&hellip;</button>
+      </div>
+      <div>
+        <span class="session-dot" id="connDot"></span>
+        <span id="connStatus" style="font-size:12.5px;color:var(--dte-muted);">checking connection&hellip;</span>
+      </div>
+    </div>
+  </div>
+  <div class="sub" id="liveTradingSub" style="margin-bottom:10px;"></div>
+
+  <div class="warn-banner">
+    &#9888; Live-capable by default. Double-check symbols/quantities before opening. Use the "Dry Run" checkbox to test the sequencing/UI without sending real orders, or switch Live Trading to PAPER at the top.
+  </div>
+
+  <div class="dte-tabs" id="pageTabs" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
+    <div class="dte-tab" data-tab="connection" onclick="showTab('connection')">Connection</div>
+    <div class="dte-tab" data-tab="positions" onclick="showTab('positions')">Positions</div>
+    <div class="dte-tab" data-tab="newposition" onclick="showTab('newposition')">New Position</div>
+    <div class="dte-tab" data-tab="strategy" onclick="showTab('strategy')">Strategy</div>
+    <div class="dte-tab" data-tab="paper" onclick="showTab('paper')">Paper Trades</div>
+    <div class="dte-tab" data-tab="diagnostics" onclick="showTab('diagnostics')">Diagnostics</div>
+  </div>
+
+  <div data-tabgroup="connection" class="tab-page">
+  <div class="panel">
+    <h3>Schwab Connection <span id="schwab-conn-badge" style="float:right;font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(100,116,139,.2);color:var(--dte-muted);">Checking&hellip;</span></h3>
+    <div class="sub" style="margin-bottom:8px;">Same Schwab connection used by Futures OI / live options volume elsewhere in the app -- moved here so you can manage it directly from the trading page instead of hunting for the Scheduler tab.</div>
+    <div class="row" style="margin-bottom:8px;">
+      <div style="flex:1;min-width:220px;">
+        <label>App Key (Client ID)</label>
+        <input id="schwab-app-key" type="text" placeholder="Paste App Key…" style="width:100%;font-family:monospace;font-size:12px;">
+      </div>
+      <div style="flex:1;min-width:220px;">
+        <label>App Secret</label>
+        <input id="schwab-app-secret" type="password" placeholder="Paste App Secret…" style="width:100%;font-family:monospace;font-size:12px;">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+      <button class="btn" onclick="_schwabSaveCreds()">💾 Save Credentials</button>
+      <button class="btn" onclick="_schwabGetAuthUrl()">🔑 Get Auth URL</button>
+      <button class="btn" onclick="_schwabRefreshToken()">🔄 Preview / Refresh Token</button>
+    </div>
+    <div id="schwab-redirect-row" style="display:none;margin-bottom:8px;">
+      <label style="color:var(--dte-warn);">📋 After authorizing, paste the full redirect URL from your browser here:</label>
+      <div style="display:flex;gap:6px;margin-top:4px;">
+        <input id="schwab-redirect-url" type="text" placeholder="https://127.0.0.1?code=XXXX" style="flex:1;font-family:monospace;font-size:12px;">
+        <button class="btn good" onclick="_schwabExchangeCode()">✅ Connect</button>
+      </div>
+    </div>
+    <span id="schwab-status" style="font-size:12px;color:var(--dte-muted);"></span>
+  </div>
+  <div class="panel">
+    <h3>Trading Account</h3>
+    <div class="sub" style="margin-bottom:8px;">Separate from the OAuth connection above -- Schwab's trading/positions endpoints need an account_hash specifically. OAuth can succeed with this still unset.</div>
+    <div id="accountHashLine" style="font-size:13px;margin-bottom:8px;">checking&hellip;</div>
+    <button class="btn" onclick="fetchSchwabAccounts()">🔎 Fetch Accounts</button>
+    <div id="accountPickerWrap" style="margin-top:10px;"></div>
+    <div class="sub" style="margin-top:10px;">If fetching doesn't work (or you'd rather set it directly), paste it manually:</div>
+    <div style="display:flex;gap:8px;margin-top:4px;">
+      <input id="manualAccountHash" type="text" placeholder="account_hash" style="flex:1;font-family:monospace;font-size:12px;">
+      <button class="btn" onclick="saveManualAccountHash()">Save</button>
+    </div>
+    <div class="sub" style="margin-top:14px;">Or get it manually, straight from Schwab (bypasses this app's code entirely if the fetch above is broken):</div>
+    <button class="btn" style="margin-top:4px;" onclick="revealTokenForManualCurl()">🔑 Show curl command</button>
+    <div id="manualCurlWrap" style="margin-top:8px;"></div>
+  </div>
+  <div class="panel">
+    <h3>Background Monitor Status</h3>
+    <div id="monitorStatusLine" style="margin-top:8px;font-size:13px;">checking&hellip;</div>
+    <div id="marketHoursLine" style="margin-top:6px;font-size:12px;color:var(--dte-muted);">checking market hours&hellip;</div>
+    <button class="btn" style="margin-top:8px;padding:6px 12px;font-size:12px;" onclick="checkMonitorStatus()">Refresh Status</button>
+  </div>
+  </div>
+
+
+  <div data-tabgroup="positions" class="tab-page">
+  <div class="panel">
+    <h3>Broker Positions (live from Schwab) <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="loadBrokerPositions()">Refresh</button></h3>
+    <div class="sub" style="margin-bottom:8px;">Everything currently held in the account. Untracked equity positions can be adopted for monitoring (options positions from Schwab's raw feed don't carry strike/expiry cleanly enough to auto-adopt yet -- open those fresh via New Position instead).</div>
+    <div id="brokerPositionsWrap"><div class="empty">Click Refresh to load.</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Open Positions <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="checkPnlNow()">Check P&amp;L Now</button></h3>
+    <div class="sub" style="margin-bottom:8px;">A background job polls combined P&amp;L for every OPEN position every 30 seconds and auto-closes on target/stop-loss hit using the same safe sequencing as a manual close.</div>
+    <div id="openPositionsWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Pending Orders (live from Schwab) <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="loadPendingOrders()">Refresh</button></h3>
+    <div class="sub" style="margin-bottom:8px;">Every order still working at the broker -- GTC limits sitting unfilled, queued/pending-activation orders, anything not yet filled/canceled/rejected. A background job checks these every minute; when one fills, the matching position flips to OPEN and gets logged to the Journal automatically.</div>
+    <div id="pendingOrdersWrap"><div class="empty">Click Refresh to load.</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Closed / Error Positions</h3>
+    <div id="closedPositionsWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+  </div>
+
+  <div data-tabgroup="newposition" class="tab-page">
+  <div class="panel">
+    <h3>Option Chain</h3>
+    <div class="row">
+      <div><label>Symbol</label><input id="chain-symbol" placeholder="e.g. AAPL" onblur="fetchExpiriesFor('chain-symbol','chain-expiry')"></div>
+      <div><label>Expiry Date</label><select id="chain-expiry"><option value="">-- enter symbol, tab out --</option></select></div>
+      <div><label>Strikes each side of spot</label><input id="chain-strikecount" type="number" value="12" min="1" max="60" style="width:80px;"></div>
+      <div style="align-self:flex-end;"><button class="btn" onclick="loadOptionChain()">Load Chain</button></div>
+      <div id="chainSpotLine" style="align-self:flex-end;font-size:14px;font-weight:700;color:var(--dte-accent);"></div>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;color:var(--dte-muted);align-items:center;">
+      <span>Columns:</span>
+      <label><input type="checkbox" class="chain-col-toggle" data-col="vol" checked onchange="_applyChainColumnVisibility()"> Volume</label>
+      <label><input type="checkbox" class="chain-col-toggle" data-col="iv" checked onchange="_applyChainColumnVisibility()"> IV</label>
+      <label><input type="checkbox" class="chain-col-toggle" data-col="delta" checked onchange="_applyChainColumnVisibility()"> Delta</label>
+      <label><input type="checkbox" class="chain-col-toggle" data-col="gamma" checked onchange="_applyChainColumnVisibility()"> Gamma</label>
+      <label><input type="checkbox" class="chain-col-toggle" data-col="oi" checked onchange="_applyChainColumnVisibility()"> OI</label>
+      <label><input type="checkbox" class="chain-col-toggle" data-col="bidask" checked onchange="_applyChainColumnVisibility()"> Bid/Ask</label>
+      <label><input type="checkbox" class="chain-col-toggle" data-col="ltp" checked onchange="_applyChainColumnVisibility()"> LTP</label>
+    </div>
+    <div id="chainWrap"><div class="empty">Enter a symbol + expiry and click Load Chain.</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Open New Position</h3>
+    <div class="row">
+      <div><label>Strategy Name</label><input id="f-strategy" placeholder="e.g. AAPL covered call"></div>
+      <div><label>Strategy Type</label>
+        <select id="f-strategytype" onchange="_applyStrategyTemplate()">
+          <option value="">-- Custom (build legs manually) --</option>
+          <option value="PS">Put Spread (PS)</option>
+          <option value="CS">Call Spread (CS)</option>
+          <option value="IC">Iron Condor (IC)</option>
+          <option value="PB">Put Butterfly-style Call Debit (PB)</option>
+          <option value="CB">Call Debit / Put Credit (CB)</option>
+          <option value="CC">Covered Call (CC)</option>
+          <option value="CP">Cash-Secured Put (CP)</option>
+          <option value="Straddle">Straddle</option>
+          <option value="Strangle">Strangle</option>
+          <option value="Butterfly">Butterfly</option>
+        </select>
+      </div>
+      <div><label>Symbol</label><input id="f-stockcode" placeholder="e.g. AAPL" onblur="fetchExpiriesFor('f-stockcode','f-expiry')"></div>
+      <div><label>Expiry Date (options only)</label><select id="f-expiry"><option value="">-- n/a for stock-only --</option></select></div>
+      <div><label>Order Type</label>
+        <select id="f-ordertype"><option value="MARKET">Market</option><option value="LIMIT">Limit</option></select>
+      </div>
+      <div>
+        <label>Duration</label>
+        <select id="f-duration" onchange="_toggleCancelTimeField()">
+          <option value="DAY">Day</option>
+          <option value="GOOD_TILL_CANCEL">Good-Til-Cancel (GTC) -- set an end date below for GTD</option>
+          <option value="FILL_OR_KILL">Fill-or-Kill (all or nothing, immediately)</option>
+          <option value="IMMEDIATE_OR_CANCEL">Immediate-or-Cancel (fill what you can, cancel rest)</option>
+        </select>
+      </div>
+      <div id="cancelTimeField" style="display:none;">
+        <label>GTC valid until</label>
+        <input id="f-cancel-time" type="date">
+      </div>
+      <div style="min-width:260px;">
+        <label>Execution Mode</label>
+        <select id="f-execmode" onchange="_toggleComboFields()">
+          <option value="native_combo" selected>Native Combo (Schwab fills the whole spread as ONE order)</option>
+          <option value="safe_sequential">Safe Sequential (wait for each fill)</option>
+          <option value="simultaneous_market">Simultaneous Market (fire all legs together)</option>
+        </select>
+      </div>
+      <div><label>Dry Run</label>
+        <select id="f-dryrun"><option value="false">No</option><option value="true">Yes</option></select>
+      </div>
+    </div>
+    <div class="row">
+      <div><label>Target P&L ($, close when P&L &ge; this)</label><input id="f-target" type="number" placeholder="e.g. 300"></div>
+      <div><label>Stop Loss P&L ($, close when P&L &le; -this)</label><input id="f-stoploss" type="number" placeholder="e.g. 500"></div>
+    </div>
+    <div class="row" id="comboFieldsRow" style="display:none;">
+      <div><label>Combo Net Price ($, credit=positive/debit=negative, blank=market)</label><input id="f-combo-net-price" type="number" step="0.05" placeholder="e.g. 1.50"></div>
+      <div><label>OCO Target (net close price, optional)</label><input id="f-oco-target" type="number" step="0.05" placeholder="e.g. 0.50"></div>
+      <div><label>OCO Stop (net close price, optional)</label><input id="f-oco-stop" type="number" step="0.05" placeholder="e.g. 3.00"></div>
+      <div><label><input type="checkbox" id="f-oco-trailing"> Trailing instead of fixed stop</label>
+        <input id="f-oco-trail-amount" type="number" step="0.01" placeholder="trail amount" style="width:110px;">
+        <select id="f-oco-trail-unit" style="width:70px;"><option value="value">$</option><option value="percent">%</option></select>
+      </div>
+      <div style="flex:1;min-width:280px;"><span class="sub" style="font-size:11px;">If both OCO fields are set, an exit bracket is placed with Schwab immediately after entry fills -- Schwab manages the exit itself instead of relying purely on this app's 30s poller. Leave blank to rely on the poller only.</span></div>
+    </div>
+
+    <table class="legs-table" id="legsTable">
+      <thead><tr><th>Type</th><th>Right (option)</th><th>Strike (option)</th><th>Side</th><th>Qty</th><th>Live Price</th><th>Limit Price (optional)</th><th></th></tr></thead>
+      <tbody id="legsBody"></tbody>
+    </table>
+    <button class="btn" onclick="addLegRow()">+ Add Leg</button>
+    <span style="font-size:11px;color:var(--dte-muted);margin-left:10px;">1 leg = straight single order. 2+ legs = sequenced automatically (LONG first on open, SHORT first on close). Stock legs ignore Right/Strike.</span>
+
+    <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--dte-border);display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+      <div>
+        <label>Strategy Net Premium ($, credit=positive)</label>
+        <input id="f-net-premium" type="number" step="0.01" placeholder="auto-calculated" oninput="this.dataset.manualEdit='1'; _syncNetPremiumToCombo();">
+      </div>
+      <button class="btn" style="align-self:flex-end;" onclick="_recalcNetPremium(true)">🔄 Recalc from Live Prices</button>
+      <span class="sub" style="align-self:flex-end;">Sums each leg's live price (SHORT=credit, LONG=debit) automatically as legs/prices change -- edit the field directly to override, "Recalc" clears your override and goes back to auto.</span>
+    </div>
+    <div style="margin-top:10px;">
+      <button class="btn" onclick="_scoreThisTrade()">🎯 Score This Trade</button>
+      <span id="tradeScorePreview" style="margin-left:10px;"></span>
+    </div>
+
+    <div style="margin-top:14px;">
+      <button class="btn good" onclick="openPosition()">Open Position</button>
+      <span id="openStatus" style="margin-left:10px;font-size:12.5px;color:var(--dte-muted);"></span>
+    </div>
+  </div>
+  </div>
+
+  <div data-tabgroup="strategy" class="tab-page">
+  <div class="panel">
+    <h3>Strategies <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="evaluateStrategiesNow()">Evaluate Now</button></h3>
+    <div class="sub" style="margin-bottom:8px;">Enabled strategies are checked automatically every minute during US market hours (9:30 AM - 4:00 PM ET, Mon-Fri).</div>
+    <div id="strategiesWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>New Strategy</h3>
+    <div class="row">
+      <div><label>Strategy Name</label><input id="s-name" placeholder="e.g. AAPL momentum call"></div>
+      <div><label>Symbol</label><input id="s-stockcode" placeholder="e.g. AAPL"></div>
+      <div><label>Execution Mode</label>
+        <select id="s-execmode">
+          <option value="safe_sequential">Safe Sequential</option>
+          <option value="simultaneous_market">Simultaneous Market</option>
+        </select>
+      </div>
+      <div><label>Enabled</label><select id="s-enabled"><option value="false">No (saved, inactive)</option><option value="true">Yes (starts evaluating)</option></select></div>
+    </div>
+
+    <table class="legs-table" id="strategyLegsTable">
+      <thead><tr><th>Type</th><th>Right (option)</th><th>Strike Mode (option)</th><th>Offset pts (option)</th><th>Side</th><th>Qty</th><th></th></tr></thead>
+      <tbody id="strategyLegsBody"></tbody>
+    </table>
+    <button class="btn" onclick="addStrategyLegRow()">+ Add Leg</button>
+    <span style="font-size:11px;color:var(--dte-muted);margin-left:10px;">Option strikes/expiry are resolved fresh from live spot + chain each time the strategy fires. Stock legs just buy/sell the symbol.</span>
+
+    <div class="row" style="margin-top:14px;">
+      <div style="flex:1;min-width:260px;">
+        <label>Opening Condition</label>
+        <select id="s-open-type" onchange="toggleConditionHint('open')" style="margin-bottom:6px;">
+          <option value="price">Price (e.g. "&gt; 195")</option>
+          <option value="scanner">Scanner query (reuses Scanner Builder)</option>
+        </select>
+        <input id="s-open-expr" placeholder="&gt; 195" style="width:100%;">
+        <div id="s-open-hint" class="sub" style="margin-top:4px;"></div>
+      </div>
+      <div>
+        <label>Eval every (minutes)</label>
+        <input id="s-eval-interval" type="number" value="5" min="1" style="width:100px;">
+      </div>
+      <div>
+        <label>Opening time window (optional, ET)</label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="s-open-time-start" type="time" style="width:110px;">
+          <span style="color:var(--dte-muted);">to</span>
+          <input id="s-open-time-end" type="time" style="width:110px;">
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div><label>Target P&L ($)</label><input id="s-target" type="number" placeholder="e.g. 300"></div>
+      <div><label>Stop Loss P&L ($)</label><input id="s-stoploss" type="number" placeholder="e.g. 500"></div>
+      <div><label>Max Re-entries (intraday)</label><input id="s-max-reentries" type="number" value="0" min="0" style="width:100px;"></div>
+    </div>
+
+    <div class="row">
+      <div style="flex:1;min-width:260px;">
+        <label>Closing Condition (optional)</label>
+        <select id="s-close-type" onchange="toggleConditionHint('close')" style="margin-bottom:6px;">
+          <option value="none">None -- target/stop only</option>
+          <option value="price">Price</option>
+          <option value="scanner">Scanner query</option>
+        </select>
+        <input id="s-close-expr" placeholder="&lt; 190" style="width:100%;">
+        <div id="s-close-hint" class="sub" style="margin-top:4px;"></div>
+      </div>
+      <div>
+        <label>Hard close time (optional, ET)</label>
+        <input id="s-close-time" type="time" style="width:110px;">
+      </div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <button class="btn good" onclick="createStrategy()">Create Strategy</button>
+      <span id="strategyStatus" style="margin-left:10px;font-size:12.5px;color:var(--dte-muted);"></span>
+    </div>
+  </div>
+  </div>
+
+  <div data-tabgroup="paper" class="tab-page">
+  <div class="panel">
+    <h3>Paper Trades <button class="btn" style="float:right;padding:5px 10px;font-size:11px;" onclick="loadPositions()">Refresh</button></h3>
+    <div class="sub" style="margin-bottom:8px;">Positions opened while Live Trading was OFF -- real live-sourced entry prices, monitored exactly like real positions, no real orders placed.</div>
+    <div id="paperOpenWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+  <div class="panel">
+    <h3>Paper Trades -- Closed</h3>
+    <div id="paperClosedWrap"><div class="empty">Loading&hellip;</div></div>
+  </div>
+  </div>
+
+  <div data-tabgroup="diagnostics" class="tab-page">
+  <div class="panel">
+    <h3>Diagnostics</h3>
+    <div class="sub" style="margin-bottom:10px;">Tests every integration point -- spot price, option chain, expiries, quotes, account positions, scanner-condition integration, background jobs. Read-only.</div>
+    <div class="row" style="margin-bottom:10px;">
+      <div><label>Test Symbol</label><input id="diag-symbol" value="AAPL" style="width:140px;"></div>
+      <div style="align-self:flex-end;"><button class="btn good" onclick="runDiagnostics()">Run All Checks</button></div>
+      <div id="diagSummary" style="align-self:flex-end;font-weight:700;"></div>
+    </div>
+    <div id="diagnosticsWrap"><div class="empty">Click "Run All Checks" to test the live integration.</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Order Audit Log</h3>
+    <div class="sub" style="margin-bottom:8px;">Every order this app has submitted, across every position, newest first -- for auditing exactly what went out and when (e.g. after an unexpected fill or close).</div>
+    <div class="row" style="margin-bottom:8px;">
+      <div><label>Since (optional, YYYY-MM-DD)</label><input id="order-log-since" type="date" style="width:160px;"></div>
+      <div style="align-self:flex-end;"><button class="btn good" onclick="loadOrderAuditLog()">Load Log</button></div>
+    </div>
+    <div id="orderAuditLogWrap"><div class="empty">Click "Load Log" to view.</div></div>
+  </div>
+  </div>
+</div>
+
+<script>
+let legCounter = 0;
+
+function esc(s){ return String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function addLegRow(prefill){
+  prefill = prefill || {};
+  const tbody = document.getElementById('legsBody');
+  const idx = legCounter++;
+  const tr = document.createElement('tr');
+  tr.id = 'leg-row-' + idx;
+  const instrumentType = prefill.instrument_type || 'option';
+  const right = prefill.right || 'call';
+  const side = prefill.side || 'LONG';
+  const strike = prefill.strike_price != null ? prefill.strike_price : '';
+  tr.innerHTML = `
+    <td><select data-field="instrument_type" onchange="toggleLegRowFields(${idx})"><option value="option" ${instrumentType==='option'?'selected':''}>Option</option><option value="stock" ${instrumentType==='stock'?'selected':''}>Stock</option></select></td>
+    <td><select data-field="right" onchange="fetchLegLivePrice(${idx})"><option value="call" ${right==='call'?'selected':''}>Call</option><option value="put" ${right==='put'?'selected':''}>Put</option></select></td>
+    <td><input data-field="strike_price" type="number" step="0.5" placeholder="strike" value="${strike}" onblur="fetchLegLivePrice(${idx})"></td>
+    <td><select data-field="side" onchange="_recalcNetPremium(false)"><option value="LONG" ${side==='LONG'?'selected':''}>LONG</option><option value="SHORT" ${side==='SHORT'?'selected':''}>SHORT</option></select></td>
+    <td><input data-field="quantity" type="number" value="1" min="1" onchange="_syncLegQuantities(this.value)"></td>
+    <td id="leg-liveprice-${idx}" style="font-size:12px;color:var(--dte-muted);">&mdash;</td>
+    <td><input data-field="limit_price" type="number" step="0.05" placeholder="blank = market"></td>
+    <td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="document.getElementById('leg-row-${idx}').remove(); _recalcNetPremium(false);">Remove</button></td>
+  `;
+  tbody.appendChild(tr);
+  toggleLegRowFields(idx);
+  if (strike) fetchLegLivePrice(idx);
+}
+addLegRow();
+
+function toggleLegRowFields(idx){
+  const row = document.getElementById('leg-row-' + idx);
+  if (!row) return;
+  const type = row.querySelector('[data-field="instrument_type"]').value;
+  const rightCell = row.querySelector('[data-field="right"]');
+  const strikeCell = row.querySelector('[data-field="strike_price"]');
+  rightCell.disabled = (type === 'stock');
+  strikeCell.disabled = (type === 'stock');
+  if (type === 'stock') fetchLegLivePrice(idx);
+}
+
+async function fetchLegLivePrice(idx){
+  const row = document.getElementById('leg-row-' + idx);
+  if (!row) return;
+  const cell = document.getElementById('leg-liveprice-' + idx);
+  const stockCode = document.getElementById('f-stockcode').value.trim();
+  const instrumentType = row.querySelector('[data-field="instrument_type"]').value;
+  if (!stockCode){ cell.textContent = '—'; return; }
+  cell.textContent = 'fetching…';
+  try{
+    let url;
+    if (instrumentType === 'stock'){
+      url = `/api/schwab-auto/leg_price?symbol=${stockCode}&instrument_type=stock`;
+    } else {
+      const expiry = document.getElementById('f-expiry').value;
+      const right = row.querySelector('[data-field="right"]').value;
+      const strike = parseFloat(row.querySelector('[data-field="strike_price"]').value);
+      if (!expiry || !strike){ cell.textContent = '—'; return; }
+      url = `/api/schwab-auto/leg_price?symbol=${stockCode}&instrument_type=option&expiry_date=${expiry}&right=${right}&strike_price=${strike}`;
+    }
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.ok && data.ltp != null) cell.innerHTML = `<span class="pnl-pos">$${data.ltp}</span>`;
+    else cell.innerHTML = `<span class="pnl-neg" style="font-size:10.5px;">${esc(data.error||'no quote')}</span>`;
+  }catch(e){ cell.textContent = 'failed'; }
+  _recalcNetPremium(false);
+}
+
+function collectLegs(){
+  const rows = document.querySelectorAll('#legsBody tr');
+  const legs = [];
+  let i = 0;
+  for (const row of rows){
+    const instrument_type = row.querySelector('[data-field="instrument_type"]').value;
+    const side = row.querySelector('[data-field="side"]').value;
+    const qty = parseInt(row.querySelector('[data-field="quantity"]').value, 10);
+    const limitPriceRaw = row.querySelector('[data-field="limit_price"]').value;
+    const limitPrice = limitPriceRaw ? parseFloat(limitPriceRaw) : null;
+    if (!qty) continue;
+    if (instrument_type === 'stock'){
+      legs.push({leg_index: i++, instrument_type: 'stock', side, quantity: qty, limit_price: limitPrice});
+    } else {
+      const right = row.querySelector('[data-field="right"]').value;
+      const strike = parseFloat(row.querySelector('[data-field="strike_price"]').value);
+      if (!strike) continue;
+      legs.push({leg_index: i++, instrument_type: 'option', right, strike_price: strike,
+        expiry_date: document.getElementById('f-expiry').value, side, quantity: qty, limit_price: limitPrice});
+    }
+  }
+  return legs;
+}
+
+async function fetchExpiriesFor(stockInputId, selectId){
+  const stockCode = document.getElementById(stockInputId).value.trim().toUpperCase();
+  const sel = document.getElementById(selectId);
+  if (!stockCode || !sel || sel.tagName !== 'SELECT') return;
+  sel.innerHTML = '<option value="">Loading expiries&hellip;</option>';
+  try{
+    const res = await fetch(`/api/schwab-auto/expiries?symbol=${stockCode}`);
+    const data = await res.json();
+    if (data.ok && data.expiries && data.expiries.length){
+      sel.innerHTML = data.expiries.map(e => `<option value="${e}">${e}</option>`).join('');
+    } else {
+      const manual = document.createElement('input');
+      manual.type = 'date'; manual.id = selectId;
+      manual.title = 'Could not auto-fetch expiries (' + (data.error || 'no data returned') + ') -- enter manually';
+      manual.style.width = '100%';
+      sel.replaceWith(manual);
+    }
+  }catch(e){
+    sel.innerHTML = `<option value="">Failed to load (${esc(String(e))})</option>`;
+  }
+}
+
+function syncExpirySelect(selectId, value){
+  const el = document.getElementById(selectId);
+  if (!el || !value) return;
+  if (el.tagName === 'SELECT'){
+    if (![...el.options].some(o => o.value === value)){
+      const opt = document.createElement('option');
+      opt.value = value; opt.textContent = value;
+      el.appendChild(opt);
+    }
+  }
+  el.value = value;
+}
+
+function _toggleCancelTimeField(){
+  const isGtc = document.getElementById('f-duration').value === 'GOOD_TILL_CANCEL';
+  const field = document.getElementById('cancelTimeField');
+  if (field) field.style.display = isGtc ? '' : 'none';
+}
+
+function _toggleComboFields(){
+  const isCombo = document.getElementById('f-execmode').value === 'native_combo';
+  const row = document.getElementById('comboFieldsRow');
+  if (row) row.style.display = isCombo ? '' : 'none';
+}
+
+async function openPosition(){
+  const legs = collectLegs();
+  if (!legs.length){ alert('Add at least one leg with quantity (and strike, for options)'); return; }
+  const comboNetPriceRaw = document.getElementById('f-combo-net-price').value;
+  const ocoTargetRaw = document.getElementById('f-oco-target').value;
+  const ocoStopRaw = document.getElementById('f-oco-stop').value;
+  const payload = {
+    strategy_name: document.getElementById('f-strategy').value,
+    stock_code: document.getElementById('f-stockcode').value,
+    order_type: document.getElementById('f-ordertype').value,
+    execution_mode: document.getElementById('f-execmode').value,
+    dry_run: document.getElementById('f-dryrun').value === 'true',
+    target_pnl: parseFloat(document.getElementById('f-target').value) || 0,
+    stop_loss_pnl: parseFloat(document.getElementById('f-stoploss').value) || 0,
+    combo_net_price: comboNetPriceRaw ? parseFloat(comboNetPriceRaw) : null,
+    oco_target_price: ocoTargetRaw ? parseFloat(ocoTargetRaw) : null,
+    oco_stop_price: ocoStopRaw ? parseFloat(ocoStopRaw) : null,
+    oco_trailing: document.getElementById('f-oco-trailing').checked,
+    oco_trail_amount: document.getElementById('f-oco-trail-amount').value ? parseFloat(document.getElementById('f-oco-trail-amount').value) : null,
+    oco_trail_is_percent: document.getElementById('f-oco-trail-unit').value === 'percent',
+    duration: document.getElementById('f-duration').value || 'DAY',
+    cancel_time: document.getElementById('f-cancel-time').value || null,
+    legs,
+  };
+  const st = document.getElementById('openStatus');
+  st.textContent = 'Opening (sequencing ' + legs.length + ' leg(s))...';
+  try{
+    const res = await fetch('/api/schwab-auto/positions/open', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.ok){
+      st.textContent = '✅ Position opened (id ' + data.position_id + ')';
+      loadPositions();
+    } else {
+      st.innerHTML = '❌ ' + (data.error || 'failed') + (data.leg_results ? '<br><small>' + JSON.stringify(data.leg_results) + '</small>' : '');
+    }
+  }catch(e){ st.textContent = '❌ ' + e; }
+}
+
+async function closePosition(id){
+  const pctRaw = prompt(`Close what % of position ${id}? (100 = full close)`, '100');
+  if (pctRaw === null) return;
+  const pct = parseFloat(pctRaw) || 100;
+  if (!confirm(`${pct >= 100 ? 'Fully close' : `Close ${pct}% of`} position ${id}?`)) return;
+  try{
+    const res = await fetch(`/api/schwab-auto/positions/${id}/close`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({reason:'MANUAL', close_pct: pct})});
+    const data = await res.json();
+    if (!data.ok) alert('Close failed: ' + (data.error || JSON.stringify(data.leg_results)));
+    else if (data.partial) alert(`Closed ${pct}% -- position remains OPEN with the reduced quantity.`);
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function deletePosition(id){
+  if (!confirm(`Delete tracked position ${id}? This only removes the tracking record -- it does NOT close any real legs still open at the broker.`)) return;
+  try{
+    const res = await fetch(`/api/schwab-auto/positions/${id}`, {method:'DELETE'});
+    const data = await res.json();
+    if (!data.ok) alert('Delete failed: ' + data.error);
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function retryClose(id){
+  if (!confirm(`Retry closing position ${id}?`)) return;
+  try{
+    const res = await fetch(`/api/schwab-auto/positions/${id}/retry_close`, {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
+    const data = await res.json();
+    if (!data.ok) alert('Retry failed: ' + (data.error || JSON.stringify(data.leg_results)));
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function markClosedManual(id){
+  const note = prompt('Optional note:', '') || '';
+  if (!confirm(`Mark position ${id} as CLOSED without placing any orders?`)) return;
+  try{
+    const res = await fetch(`/api/schwab-auto/positions/${id}/mark_closed`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({note})});
+    const data = await res.json();
+    if (!data.ok) alert('Failed: ' + data.error);
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function checkPnlNow(){
+  try{
+    const res = await fetch('/api/schwab-auto/monitor/tick', {method:'POST'});
+    const data = await res.json();
+    if (data.ok && data.results){
+      const problems = data.results.filter(r => r.status === 'quote_error');
+      if (problems.length){
+        const detail = problems.map(p => {
+          const errs = (p.detail && p.detail.leg_pnls || []).filter(l => l.error).map(l => `leg ${l.leg_index}: ${l.error}`).join('; ');
+          return `Position ${p.position_id}: ${errs || 'quote fetch failed'}`;
+        }).join('\n');
+        alert('⚠️ P&L could not be fully refreshed for ' + problems.length + ' position(s):\n\n' + detail);
+      }
+    } else if (!data.ok){
+      alert('❌ Monitor check failed: ' + (data.error || 'unknown error'));
+    }
+    loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+function pnlClass(v){ return (v||0) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
+function fmtLegs(legs){
+  return legs.map(l => l.instrument_type === 'stock'
+    ? `${l.side} STOCK x${l.quantity}`
+    : `${l.side} ${l.right.toUpperCase()} ${l.strike_price} x${l.quantity}`).join(', ');
+}
+
+function renderPaperTrades(paper){
+  const open = paper.filter(p => ['OPEN','OPENING','CLOSING','PENDING_ENTRY'].includes(p.status));
+  const closed = paper.filter(p => ['CLOSED','ERROR'].includes(p.status));
+  const openWrap = document.getElementById('paperOpenWrap');
+  if (openWrap){
+    if (!open.length){ openWrap.innerHTML = '<div class="empty">No open paper trades.</div>'; }
+    else {
+      let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Strategy</th><th>Legs</th><th>Target</th><th>Stop</th><th>P&L</th><th>Status</th><th></th></tr></thead><tbody>';
+      for (const p of open){
+        html += `<tr><td>${p.id}</td><td>${esc(p.strategy_name||'')}<br><small style="color:var(--dte-muted)">${p.stock_code}</small></td>` +
+          `<td>${fmtLegs(p.legs)}</td><td>$${p.target_pnl}</td><td>$${p.stop_loss_pnl}</td>` +
+          `<td class="${pnlClass(p.current_pnl)}">$${(p.current_pnl||0).toFixed(2)}</td>` +
+          `<td><span class="status-chip status-${p.status}">${p.status}</span></td>` +
+          `<td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="closePosition(${p.id})">Close Now</button></td></tr>`;
+      }
+      html += '</tbody></table>';
+      openWrap.innerHTML = html;
+    }
+  }
+  const closedWrap = document.getElementById('paperClosedWrap');
+  if (closedWrap){
+    if (!closed.length){ closedWrap.innerHTML = '<div class="empty">No closed paper trades yet.</div>'; }
+    else {
+      let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Strategy</th><th>Legs</th><th>Final P&L</th><th>Status</th><th>Reason</th><th>Closed At</th></tr></thead><tbody>';
+      for (const p of closed){
+        html += `<tr><td>${p.id}</td><td>${esc(p.strategy_name||'')}</td><td>${fmtLegs(p.legs)}</td>` +
+          `<td class="${pnlClass(p.current_pnl)}">$${(p.current_pnl||0).toFixed(2)}</td>` +
+          `<td><span class="status-chip status-${p.status}">${p.status}</span></td><td>${esc(p.close_reason||'')}</td><td>${p.closed_at||''}</td></tr>`;
+      }
+      html += '</tbody></table>';
+      closedWrap.innerHTML = html;
+    }
+  }
+}
+
+async function loadPositions(){
+  try{
+    const res = await fetch('/api/schwab-auto/positions');
+    const data = await res.json();
+    if (!data.ok){ return; }
+    const real = data.positions.filter(p => !p.dry_run);
+    const paper = data.positions.filter(p => p.dry_run);
+    const open = real.filter(p => ['OPEN','OPENING','CLOSING','PENDING_ENTRY'].includes(p.status));
+    const closed = real.filter(p => ['CLOSED','ERROR'].includes(p.status));
+    renderPaperTrades(paper);
+
+    const openWrap = document.getElementById('openPositionsWrap');
+    if (!open.length){ openWrap.innerHTML = '<div class="empty">No open positions.</div>'; }
+    else { openWrap.innerHTML = _renderGroupedPositions(open); }
+
+    const closedWrap = document.getElementById('closedPositionsWrap');
+    if (!closed.length){ closedWrap.innerHTML = '<div class="empty">No closed positions yet.</div>'; }
+    else {
+      let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Strategy</th><th>Legs</th><th>Final P&L</th><th>Status</th><th>Reason</th><th>Closed At</th><th></th></tr></thead><tbody>';
+      for (const p of closed){
+        const actions = p.status === 'ERROR'
+          ? `<button class="btn good" style="padding:4px 8px;font-size:11px;" onclick="retryClose(${p.id})">Retry Close</button> ` +
+            `<button class="btn" style="padding:4px 8px;font-size:11px;" onclick="markClosedManual(${p.id})">Mark Closed</button> ` +
+            `<button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="deletePosition(${p.id})">Delete</button>`
+          : `<button class="btn" style="padding:4px 8px;font-size:11px;" onclick="deletePosition(${p.id})">Delete</button>`;
+        html += `<tr><td>${p.id}</td><td>${esc(p.strategy_name||'')}</td><td>${fmtLegs(p.legs)}</td>` +
+          `<td class="${pnlClass(p.current_pnl)}">$${(p.current_pnl||0).toFixed(2)}</td>` +
+          `<td><span class="status-chip status-${p.status}">${p.status}</span></td><td>${esc(p.close_reason||'')}</td><td>${p.closed_at||''}</td>` +
+          `<td style="white-space:nowrap;">${actions}</td></tr>`;
+      }
+      html += '</tbody></table>';
+      closedWrap.innerHTML = html;
+    }
+  }catch(e){}
+}
+
+function _execModeLabel(m){
+  return m === 'native_combo' ? 'Native Combo' : m === 'simultaneous_market' ? 'Simultaneous' : 'Safe Sequential';
+}
+
+function _positionPrimaryExpiry(p){
+  const optLegs = p.legs.filter(l => l.instrument_type === 'option' && l.expiry_date);
+  return optLegs.length ? optLegs[0].expiry_date : null; // stock-only positions have no expiry bucket
+}
+
+function _fmtLegEntry(leg){
+  const label = leg.instrument_type === 'stock' ? 'STOCK' : `${leg.right.toUpperCase()} ${leg.strike_price}`;
+  return `${leg.side} ${label} @ ${leg.entry_price != null ? '$'+Number(leg.entry_price).toFixed(2) : '—'}`;
+}
+
+function _renderGroupedPositions(positions){
+  // Group by stock_code, then by expiry within each stock (stock-only
+  // legs and mixed-expiry positions fall into a "No expiry / mixed" bucket).
+  const byStock = {};
+  for (const p of positions){
+    byStock[p.stock_code] = byStock[p.stock_code] || {};
+    const exp = _positionPrimaryExpiry(p) || 'No expiry (stock)';
+    byStock[p.stock_code][exp] = byStock[p.stock_code][exp] || [];
+    byStock[p.stock_code][exp].push(p);
+  }
+  let html = '';
+  for (const stock of Object.keys(byStock).sort()){
+    html += `<div style="font-size:14px;font-weight:800;margin:14px 0 4px;color:var(--dte-accent);">${esc(stock)}</div>`;
+    const expiries = Object.keys(byStock[stock]).sort();
+    for (const exp of expiries){
+      html += `<div style="font-size:11px;font-weight:700;color:var(--dte-muted);margin:6px 0 4px 10px;">${esc(exp)}</div>`;
+      html += `<table class="pos-table" style="margin-left:10px;width:calc(100% - 10px)"><thead><tr><th>ID</th><th>Strategy</th><th>Legs (entry price)</th><th>Exec Mode</th><th>Target</th><th>Stop</th><th>P&L</th><th>Status</th><th></th></tr></thead><tbody>`;
+      for (const p of byStock[stock][exp]){
+        html += `<tr><td>${p.id}</td><td>${esc(p.strategy_name||'')}${p.dry_run?' <small style="color:var(--dte-muted)">(dry run)</small>':''}</td>` +
+          `<td><small>${p.legs.map(_fmtLegEntry).join('<br>')}</small></td><td><small>${_execModeLabel(p.execution_mode)}</small></td>` +
+          `<td>$${p.target_pnl}</td><td>$${p.stop_loss_pnl}</td>` +
+          `<td class="${pnlClass(p.current_pnl)}">$${(p.current_pnl||0).toFixed(2)}</td>` +
+          `<td><span class="status-chip status-${p.status}">${p.status}</span></td>` +
+          `<td style="white-space:nowrap;"><button class="btn" style="padding:4px 8px;font-size:11px;" onclick="toggleLivePrices(${p.id})">👁 Prices</button> ` +
+          `<button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="closePosition(${p.id})">Close Now</button> ` +
+          `<button class="btn" style="padding:4px 8px;font-size:11px;" onclick="deletePosition(${p.id})">Delete</button></td></tr>` +
+          `<tr id="live-prices-row-${p.id}" style="display:none;"><td colspan="9" style="padding:4px 8px 10px 20px;"><div id="live-prices-${p.id}" style="font-size:11px;color:var(--dte-muted);">Loading&hellip;</div></td></tr>`;
+      }
+      html += '</tbody></table>';
+    }
+  }
+  return html;
+}
+
+async function toggleLivePrices(positionId){
+  const row = document.getElementById('live-prices-row-' + positionId);
+  if (!row) return;
+  if (row.style.display !== 'none'){ row.style.display = 'none'; return; }
+  row.style.display = '';
+  const holder = document.getElementById('live-prices-' + positionId);
+  holder.innerHTML = 'Loading&hellip;';
+  try{
+    const res = await fetch(`/api/schwab-auto/positions/${positionId}/live_legs`);
+    const data = await res.json();
+    if (!data.ok){ holder.innerHTML = `<span class="pnl-neg">${esc(data.error||'failed')}</span>`; return; }
+    let html = '<table style="font-size:11px;border-collapse:collapse;"><thead><tr>' +
+      '<th style="text-align:left;padding:2px 10px 2px 0;">Leg</th><th style="text-align:right;padding:2px 10px;">Entry</th>' +
+      '<th style="text-align:right;padding:2px 10px;">Current</th><th style="text-align:right;padding:2px 10px;">P&L</th></tr></thead><tbody>';
+    for (const lp of (data.leg_pnls||[])){
+      const pnlColor = (lp.pnl||0) >= 0 ? '#22c55e' : '#ef4444';
+      html += `<tr><td style="padding:2px 10px 2px 0;">Leg ${lp.leg_index}</td>` +
+        `<td style="text-align:right;padding:2px 10px;">${lp.entry_price != null ? '$'+Number(lp.entry_price).toFixed(2) : '—'}</td>` +
+        `<td style="text-align:right;padding:2px 10px;">${lp.ltp != null ? '$'+Number(lp.ltp).toFixed(2) : (lp.error ? '<span class="pnl-neg">err</span>' : '—')}</td>` +
+        `<td style="text-align:right;padding:2px 10px;color:${pnlColor};font-weight:700;">${lp.pnl != null ? '$'+Number(lp.pnl).toFixed(2) : '—'}</td></tr>`;
+    }
+    html += `</tbody></table>` + (data.partial ? '<div class="pnl-neg" style="margin-top:4px;">Some legs failed to price -- combined total may be understated.</div>' : '');
+    holder.innerHTML = html;
+  }catch(e){ holder.innerHTML = `<span class="pnl-neg">${esc(e.message)}</span>`; }
+}
+
+let _brokerPositionsCache = [];
+
+async function loadPendingOrders(){
+  const wrap = document.getElementById('pendingOrdersWrap');
+  wrap.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try{
+    const res = await fetch('/api/schwab-auto/orders/open');
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed: ' + esc(data.error||'unknown') + '</div>'; return; }
+    if (!data.orders.length){ wrap.innerHTML = '<div class="empty">No orders currently working at the broker.</div>'; return; }
+    let html = '<table class="pos-table"><thead><tr><th>Order ID</th><th>Symbol(s)</th><th>Type</th><th>Duration</th><th>Price</th><th>Qty</th><th>Status</th><th>Entered</th><th>Valid Until</th><th></th></tr></thead><tbody>';
+    for (const o of data.orders){
+      html += `<tr><td><small>${esc(o.order_id)}</small></td><td>${esc((o.symbols||[]).join(', '))}</td>` +
+        `<td>${esc(o.order_type||'')}</td><td>${esc(o.duration||'')}</td><td>${o.price ?? '—'}</td>` +
+        `<td>${o.filled_quantity ?? 0}/${o.quantity ?? '—'}</td><td><span class="status-chip status-OPEN">${esc(o.status||'')}</span></td>` +
+        `<td><small>${esc((o.entered_time||'').slice(0,16).replace('T',' '))}</small></td><td><small>${esc(o.cancel_time||'—')}</small></td>` +
+        `<td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="cancelPendingOrder('${esc(o.order_id)}')">Cancel</button></td></tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+async function cancelPendingOrder(orderId){
+  if (!confirm(`Cancel order ${orderId}?`)) return;
+  try{
+    const res = await fetch(`/api/schwab-auto/orders/${orderId}/cancel`, {method:'POST'});
+    const data = await res.json();
+    if (!data.ok) alert('Cancel failed: ' + (data.error || 'unknown'));
+    loadPendingOrders();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function loadBrokerPositions(){
+  const wrap = document.getElementById('brokerPositionsWrap');
+  wrap.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try{
+    const res = await fetch('/api/schwab-auto/broker_positions');
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed: ' + esc(data.error||'unknown') + '</div>'; return; }
+    if (!data.positions.length){ wrap.innerHTML = '<div class="empty">No positions held at the broker right now.</div>'; return; }
+    _brokerPositionsCache = data.positions;
+    let html = '<table class="pos-table"><thead><tr><th></th><th>Symbol</th><th>Asset Type</th><th>Qty</th><th>Side</th><th>Avg Price</th><th>Status</th></tr></thead><tbody>';
+    data.positions.forEach((p, i) => {
+      const disabled = p.already_tracked ? 'disabled' : '';
+      html += `<tr><td><input type="checkbox" class="broker-pos-check" data-idx="${i}" ${disabled} onchange="_updateGroupFormVisibility()"></td>` +
+        `<td>${esc(p.symbol)}</td><td>${esc(p.asset_type||'')}</td><td>${p.quantity}</td><td>${p.side}</td><td>${p.average_price}</td>` +
+        `<td>${p.already_tracked ? '<span class="status-chip status-CLOSED">tracked</span>' : '<span class="status-chip status-OPEN">untracked</span>'}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    html += `<div id="groupPositionsForm" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--dte-border);">
+      <h3 style="margin:0 0 8px;">Group Selected into One Tracked Position</h3>
+      <div class="sub" style="margin-bottom:8px;">All checked rows must share the same underlying symbol -- e.g. check an ORCL short put + ORCL long put together to track them as one spread instead of two loose legs.</div>
+      <div class="row">
+        <div><label>Strategy Name</label><input id="group-strategy-name" placeholder="e.g. ORCL put spread"></div>
+        <div><label>Target P&L ($)</label><input id="group-target" type="number" placeholder="e.g. 100"></div>
+        <div><label>Stop Loss P&L ($)</label><input id="group-stoploss" type="number" placeholder="e.g. 200"></div>
+        <div><label>Execution Mode (for closing later)</label>
+          <select id="group-execmode">
+            <option value="native_combo" selected>Native Combo</option>
+            <option value="safe_sequential">Safe Sequential</option>
+            <option value="simultaneous_market">Simultaneous Market</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn good" onclick="groupSelectedPositions()">Group Selected</button>
+      <span id="groupStatus" style="margin-left:10px;font-size:12.5px;color:var(--dte-muted);"></span>
+    </div>`;
+    wrap.innerHTML = html;
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+function _updateGroupFormVisibility(){
+  const anyChecked = document.querySelectorAll('.broker-pos-check:checked').length > 0;
+  const form = document.getElementById('groupPositionsForm');
+  if (form) form.style.display = anyChecked ? '' : 'none';
+}
+
+async function groupSelectedPositions(){
+  const checked = [...document.querySelectorAll('.broker-pos-check:checked')].map(el => _brokerPositionsCache[+el.dataset.idx]);
+  const st = document.getElementById('groupStatus');
+  if (!checked.length){ st.innerHTML = '<span class="pnl-neg">Select at least one row</span>'; return; }
+  st.textContent = 'Parsing legs…';
+  try{
+    const legs = [];
+    let stockCode = null;
+    for (const p of checked){
+      if (p.asset_type === 'EQUITY'){
+        if (stockCode && stockCode !== p.symbol){ st.innerHTML = `<span class="pnl-neg">All selected legs must share one underlying -- got ${stockCode} and ${p.symbol}</span>`; return; }
+        stockCode = p.symbol;
+        legs.push({instrument_type: 'stock', side: p.side, quantity: Math.abs(p.quantity), entry_price: p.average_price});
+      } else {
+        const res = await fetch('/api/schwab-auto/parse_occ', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({symbol: p.symbol})});
+        const parsed = await res.json();
+        if (!parsed.ok){ st.innerHTML = `<span class="pnl-neg">Could not parse ${esc(p.symbol)}: ${esc(parsed.error||'')}</span>`; return; }
+        if (stockCode && stockCode !== parsed.underlying){ st.innerHTML = `<span class="pnl-neg">All selected legs must share one underlying -- got ${stockCode} and ${parsed.underlying}</span>`; return; }
+        stockCode = parsed.underlying;
+        legs.push({instrument_type: 'option', side: p.side, quantity: Math.abs(p.quantity), entry_price: p.average_price,
+          right: parsed.right, strike_price: parsed.strike_price, expiry_date: parsed.expiry_date});
+      }
+    }
+    st.textContent = 'Grouping…';
+    const payload = {
+      strategy_name: document.getElementById('group-strategy-name').value || 'Adopted position',
+      stock_code: stockCode, legs,
+      target_pnl: parseFloat(document.getElementById('group-target').value) || 0,
+      stop_loss_pnl: parseFloat(document.getElementById('group-stoploss').value) || 0,
+      execution_mode: document.getElementById('group-execmode').value || 'native_combo',
+    };
+    const res2 = await fetch('/api/schwab-auto/positions/adopt', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const data2 = await res2.json();
+    if (data2.ok){
+      st.textContent = '✅ Grouped as position ' + data2.position_id;
+      loadBrokerPositions(); loadPositions();
+    } else {
+      st.innerHTML = '❌ ' + esc(data2.error || 'failed');
+    }
+  }catch(e){ st.innerHTML = '❌ ' + e; }
+}
+
+function _schwabAuthLabel(d){
+  const hasToken = !!(d && d.access_token);
+  if (!hasToken) return {ok:false, color:'var(--dte-warn)', html:'⚠ Not connected — save credentials and authorize below'};
+  const exp = Number(d.expires_in_seconds);
+  if (Number.isFinite(exp) && exp <= 0) return {ok:false, color:'var(--dte-warn)', html:'⚠ Access token expired — click Preview/Refresh Token or re-authorize'};
+  if (!d.has_refresh_token) return {ok:false, color:'var(--dte-warn)', html:'⚠ Access token exists but no refresh token stored — re-authorize soon'};
+  const min = Number.isFinite(exp) ? Math.max(0, Math.round(exp/60)) : null;
+  return {ok:true, color:'var(--dte-good)', html:'✅ Connected' + (min!==null ? ` · token ${min}m` : '')};
+}
+
+async function _schwabCheckStatus(){
+  const badge = document.getElementById('schwab-conn-badge');
+  try{
+    const res = await fetch('/schwab/config');
+    const d = await res.json();
+    const lbl = _schwabAuthLabel(d);
+    if (badge){
+      badge.textContent = lbl.ok ? '✅ Connected' : '⚠ Needs auth';
+      badge.style.background = lbl.ok ? 'rgba(34,197,94,.15)' : 'rgba(245,158,11,.15)';
+      badge.style.color = lbl.color;
+    }
+    if (d && d.app_key){
+      const keyEl = document.getElementById('schwab-app-key');
+      if (keyEl && !keyEl.value) keyEl.placeholder = d.app_key.slice(0,8) + '... (already saved)';
+    }
+  }catch(e){ if (badge){ badge.textContent = '❌ Error'; badge.style.color = 'var(--dte-bad)'; } }
+}
+
+async function _schwabSaveCreds(){
+  const key = document.getElementById('schwab-app-key')?.value?.trim();
+  const secret = document.getElementById('schwab-app-secret')?.value?.trim();
+  const st = document.getElementById('schwab-status');
+  if (!key || !secret){ if (st) st.innerHTML = '<span class="pnl-neg">Enter both App Key and App Secret</span>'; return; }
+  try{
+    await fetch('/schwab/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({app_key: key, app_secret: secret})});
+    if (st) st.innerHTML = '<span class="pnl-pos">✅ Credentials saved — now click Get Auth URL</span>';
+    document.getElementById('schwab-app-secret').value = '';
+    _schwabCheckStatus();
+  }catch(e){ if (st) st.innerHTML = '<span class="pnl-neg">❌ ' + e.message + '</span>'; }
+}
+
+async function _schwabGetAuthUrl(){
+  const st = document.getElementById('schwab-status');
+  try{
+    const res = await fetch('/schwab/auth_url');
+    const d = await res.json();
+    if (d.url){
+      window.open(d.url, '_blank');
+      const row = document.getElementById('schwab-redirect-row');
+      if (row) row.style.display = '';
+      if (st) st.innerHTML = '<span style="color:var(--dte-warn);">Browser opened — log in to Schwab, authorize, then paste the redirect URL below</span>';
+    } else {
+      if (st) st.innerHTML = '<span class="pnl-neg">❌ ' + (d.error||'Save credentials first') + '</span>';
+    }
+  }catch(e){ if (st) st.innerHTML = '<span class="pnl-neg">❌ ' + e.message + ' — save credentials first</span>'; }
+}
+
+async function _schwabExchangeCode(){
+  const url = document.getElementById('schwab-redirect-url')?.value?.trim();
+  const st = document.getElementById('schwab-status');
+  if (!url){ if (st) st.innerHTML = '<span class="pnl-neg">Paste the redirect URL first</span>'; return; }
+  let code = '';
+  try{ code = new URL(url).searchParams.get('code') || ''; }catch(e){}
+  if (!code) code = (url.match(/code=([^&]+)/) || [])[1] || '';
+  if (!code){ if (st) st.innerHTML = '<span class="pnl-neg">❌ No code found in URL. Copy the full URL from the browser.</span>'; return; }
+  try{
+    const res = await fetch('/schwab/exchange_code', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({code})});
+    const d = await res.json();
+    if (d.ok || d.access_token){
+      if (st) st.innerHTML = '<span class="pnl-pos">✅ Connected!</span>';
+      document.getElementById('schwab-redirect-row').style.display = 'none';
+      document.getElementById('schwab-redirect-url').value = '';
+      setTimeout(() => { _schwabCheckStatus(); refreshConnectionStatus(); }, 500);
+    } else {
+      if (st) st.innerHTML = '<span class="pnl-neg">❌ ' + (d.error||'Exchange failed') + '</span>';
+    }
+  }catch(e){ if (st) st.innerHTML = '<span class="pnl-neg">❌ ' + e.message + '</span>'; }
+}
+
+async function _schwabRefreshToken(){
+  const st = document.getElementById('schwab-status');
+  if (st) st.innerHTML = '<span style="color:var(--dte-muted);">⏳ Refreshing token…</span>';
+  try{
+    const res = await fetch('/schwab/refresh', {method:'POST'});
+    const d = await res.json();
+    if (d.ok || d.access_token){
+      if (st) st.innerHTML = '<span class="pnl-pos">✅ Token refreshed</span>';
+      setTimeout(() => { _schwabCheckStatus(); refreshConnectionStatus(); }, 300);
+    } else {
+      if (st) st.innerHTML = '<span class="pnl-neg">❌ ' + (d.error||'Refresh failed — re-authorize') + '</span>';
+    }
+  }catch(e){ if (st) st.innerHTML = '<span class="pnl-neg">❌ ' + e.message + '</span>'; }
+}
+
+function _extractAccountsList(data){
+  return Array.isArray(data) ? data : (data.accounts || data.Accounts || []);
+}
+
+function _renderAccountPicks(list, sourceLabel){
+  let html = `<div class="sub" style="margin-bottom:6px;">Pick the account to use for trading (from ${sourceLabel}):</div>`;
+  let found = 0;
+  list.forEach((entry, i) => {
+    // /schwab/account_numbers gives flat {accountNumber, hashValue};
+    // /schwab/accounts (fallback) nests everything under securitiesAccount.
+    const acct = entry.securitiesAccount || entry;
+    const num = acct.accountNumber || acct.account_number || acct.accountId || `Account ${i+1}`;
+    const hash = acct.hashValue || acct.hash_value || acct.accountHash || acct.hash || '';
+    if (!hash) return;
+    found++;
+    html += `<button class="btn good" style="display:block;width:100%;text-align:left;margin-bottom:6px;" onclick="saveAccountHash('${esc(hash)}', this)">Account ending ...${esc(String(num)).slice(-4)} &rarr; use this one</button>`;
+  });
+  return found ? html : null;
+}
+
+async function fetchSchwabAccounts(){
+  const wrap = document.getElementById('accountPickerWrap');
+  wrap.innerHTML = '<div class="sub">Fetching&hellip;</div>';
+  try{
+    const res = await fetch('/schwab/account_numbers');
+    const data = await res.json();
+    const list = _extractAccountsList(data);
+    const picksHtml = list.length ? _renderAccountPicks(list, 'account_numbers') : null;
+    if (picksHtml){ wrap.innerHTML = picksHtml; return; }
+
+    // Primary endpoint gave nothing usable -- try the OTHER, already-
+    // working Schwab route (/schwab/accounts) as a fallback instead of
+    // just failing. Different response shape (nested under
+    // securitiesAccount), handled in _renderAccountPicks.
+    wrap.innerHTML = '<div class="sub">account_numbers didn\'t return a usable hash -- trying the fallback endpoint&hellip;</div>';
+    const res2 = await fetch('/schwab/accounts');
+    const data2 = await res2.json();
+    const list2 = _extractAccountsList(data2);
+    const picksHtml2 = list2.length ? _renderAccountPicks(list2, 'accounts (fallback)') : null;
+    if (picksHtml2){ wrap.innerHTML = picksHtml2; return; }
+
+    wrap.innerHTML = `<div class="pnl-neg" style="font-size:12px;">Neither endpoint returned a usable account_hash.<br/>
+      account_numbers raw: <code style="font-size:10px;">${esc(JSON.stringify(data))}</code><br/>
+      accounts raw: <code style="font-size:10px;">${esc(JSON.stringify(data2))}</code></div>
+      <div class="sub" style="margin-top:8px;">Use "Get account_hash manually" below to bypass this app's code entirely and pull it straight from Schwab yourself.</div>`;
+  }catch(e){
+    wrap.innerHTML = `<div class="pnl-neg" style="font-size:12px;">Failed: ${esc(e.message)}</div>`;
+
+  }
+}
+
+async function saveAccountHash(hash, btn){
+  if (btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  try{
+    await fetch('/schwab/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({account_hash: hash})});
+    alert('✅ Account hash saved.');
+    refreshConnectionStatus();
+    document.getElementById('accountPickerWrap').innerHTML = '';
+  }catch(e){ alert('❌ ' + e.message); }
+}
+
+async function revealTokenForManualCurl(){
+  const wrap = document.getElementById('manualCurlWrap');
+  wrap.innerHTML = '<div class="sub">Fetching token&hellip;</div>';
+  try{
+    const res = await fetch('/schwab/access_token_reveal');
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = `<div class="pnl-neg" style="font-size:12px;">${esc(data.error||'failed')}</div>`; return; }
+    const curl = `curl -H "Authorization: Bearer ${data.access_token}" https://api.schwabapi.com/trader/v1/accounts/accountNumbers`;
+    wrap.innerHTML = `<div class="warn-banner" style="margin-top:0;">&#9888; This token is sensitive -- treat it like a password. It expires soon (Schwab tokens are short-lived), so run this promptly.</div>
+      <div style="display:flex;gap:8px;align-items:flex-start;">
+        <code id="manualCurlCmd" style="flex:1;font-size:11px;background:#0d1117;padding:8px;border-radius:6px;word-break:break-all;">${esc(curl)}</code>
+        <button class="btn" style="white-space:nowrap;" onclick="navigator.clipboard.writeText(document.getElementById('manualCurlCmd').textContent); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',1500)">Copy</button>
+      </div>
+      <div class="sub" style="margin-top:8px;">Run that in a terminal (or paste the URL + header into Postman/browser dev tools). The response will contain a "hashValue" per account -- paste that into the manual field above and click Save.</div>`;
+  }catch(e){
+    wrap.innerHTML = `<div class="pnl-neg" style="font-size:12px;">Failed: ${esc(e.message)}</div>`;
+  }
+}
+
+async function saveManualAccountHash(){
+  const hash = document.getElementById('manualAccountHash')?.value?.trim();
+  if (!hash){ alert('Enter an account_hash first'); return; }
+  await saveAccountHash(hash, null);
+  document.getElementById('manualAccountHash').value = '';
+}
+
+async function refreshConnectionStatus(){
+  try{
+    const res = await fetch('/api/schwab-auto/connection_status');
+    const data = await res.json();
+    const dot = document.getElementById('connDot');
+    const txt = document.getElementById('connStatus');
+    if (data.connected){
+      dot.className = 'session-dot dot-active'; txt.textContent = 'Connected';
+    } else {
+      dot.className = 'session-dot dot-inactive'; txt.textContent = 'Not connected';
+    }
+    const acctLine = document.getElementById('accountHashLine');
+    if (acctLine){
+      acctLine.innerHTML = data.has_account_hash
+        ? '<span class="pnl-pos">Trading account identified — order placement and position listing are ready.</span>'
+        : '<span class="pnl-neg">Not set yet — OAuth may be connected, but trading/position calls need this specifically. Set it in the App Key/Secret form above (account_hash field), or via the existing Schwab settings.</span>';
+    }
+  }catch(e){}
+}
+
+async function checkMonitorStatus(){
+  const line = document.getElementById('monitorStatusLine');
+  try{
+    const res = await fetch('/api/schwab-auto/monitor/status');
+    const data = await res.json();
+    if (!data.ok){ line.innerHTML = '<span class="pnl-neg">Failed to check: ' + data.error + '</span>'; return; }
+    if (data.last_run_at == null){
+      line.innerHTML = '<span class="pnl-neg">Never run yet -- if the app has been up more than ~1 minute, needs a restart on the latest code.</span>';
+    } else if (data.seconds_ago > 90){
+      line.innerHTML = `<span class="pnl-neg">Last ran ${data.seconds_ago}s ago -- stale for a 30s job.</span>`;
+    } else {
+      line.innerHTML = `<span class="pnl-pos">Last ran ${data.seconds_ago}s ago -- polling normally.</span>`;
+    }
+  }catch(e){ line.textContent = 'Failed: ' + e; }
+  try{
+    const mres = await fetch('/api/schwab-auto/market_hours/status');
+    const mdata = await mres.json();
+    const mline = document.getElementById('marketHoursLine');
+    mline.innerHTML = mdata.is_market_hours
+      ? '<span class="pnl-pos">Within US market hours -- jobs actively checking.</span>'
+      : 'Outside US market hours (9:30 AM - 4:00 PM ET, Mon-Fri) -- background jobs skip their work until the next session.';
+  }catch(e){}
+}
+
+async function refreshLiveTradingStatus(){
+  try{
+    const res = await fetch('/api/schwab-auto/live_trading/status');
+    const data = await res.json();
+    const btn = document.getElementById('liveTradingBtn');
+    const sub = document.getElementById('liveTradingSub');
+    if (data.enabled){
+      btn.textContent = 'LIVE (click to disable)'; btn.className = 'btn good'; sub.innerHTML = '';
+    } else {
+      btn.textContent = 'PAPER MODE (click to enable live)'; btn.className = 'btn danger';
+      sub.innerHTML = '&#9888; Live trading is OFF -- no new REAL positions will open. Strategies still fire fully-tracked <b>paper</b> positions with live entry prices.';
+    }
+  }catch(e){}
+}
+
+async function toggleLiveTrading(){
+  const btn = document.getElementById('liveTradingBtn');
+  const currentlyLive = btn.textContent.startsWith('LIVE');
+  const goingTo = currentlyLive ? 'PAPER (disable live trading)' : 'LIVE (enable real orders)';
+  if (!confirm(`Switch to ${goingTo}?`)) return;
+  try{
+    await fetch('/api/schwab-auto/live_trading/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: !currentlyLive})});
+    refreshLiveTradingStatus();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+function fmtNum(n){ return n==null ? '' : Number(n).toLocaleString(); }
+
+async function loadOptionChain(){
+  const stockCode = document.getElementById('chain-symbol').value.trim();
+  const expiry = document.getElementById('chain-expiry').value;
+  const strikeCount = Math.max(1, parseInt(document.getElementById('chain-strikecount').value, 10) || 12);
+  const wrap = document.getElementById('chainWrap');
+  const spotLine = document.getElementById('chainSpotLine');
+  if (!stockCode || !expiry){ alert('Enter symbol and pick an expiry'); return; }
+  wrap.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  spotLine.textContent = '';
+  try{
+    const res = await fetch(`/api/schwab-auto/option_chain?symbol=${stockCode}&expiry_date=${expiry}`);
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed: ' + esc(data.error||'unknown') + '</div>'; return; }
+    if (data.spot != null) spotLine.textContent = `Spot: ${data.spot}`;
+    if (!data.rows.length){ wrap.innerHTML = '<div class="empty">Call succeeded but returned 0 rows.</div>'; return; }
+    const calls = {}, puts = {};
+    data.rows.forEach(r => { (r.right === 'call' ? calls : puts)[r.strike_price] = r; });
+    let strikes = Array.from(new Set(data.rows.map(r=>r.strike_price))).sort((a,b)=>a-b);
+    if (data.spot != null){
+      const atmIdx = strikes.reduce((best, s, i) => Math.abs(s - data.spot) < Math.abs(strikes[best] - data.spot) ? i : best, 0);
+      strikes = strikes.slice(Math.max(0, atmIdx - strikeCount), Math.min(strikes.length, atmIdx + strikeCount + 1));
+    }
+    let html = '<table class="pos-table" id="chainTable"><thead><tr><th colspan="9" style="text-align:center;">CALLS</th><th>Strike</th><th colspan="9" style="text-align:center;">PUTS</th></tr>' +
+      '<tr>' +
+      '<th data-col="vol">Vol</th><th data-col="iv">IV</th><th data-col="delta">Delta</th><th data-col="gamma">Gamma</th>' +
+      '<th data-col="oi">OI</th><th data-col="bidask">Bid/Ask</th><th data-col="ltp">LTP</th><th></th><th></th>' +
+      '<th></th>' +
+      '<th></th><th></th>' +
+      '<th data-col="ltp">LTP</th><th data-col="bidask">Bid/Ask</th><th data-col="oi">OI</th>' +
+      '<th data-col="delta">Delta</th><th data-col="gamma">Gamma</th><th data-col="iv">IV</th><th data-col="vol">Vol</th>' +
+      '</tr></thead><tbody>';
+    const fmtGreek = (v) => v == null ? '' : Number(v).toFixed(3);
+    const fmtPct = (v) => v == null ? '' : (Number(v)).toFixed(1) + '%';
+    for (const k of strikes){
+      const c = calls[k], p = puts[k];
+      html += `<tr>` +
+        `<td data-col="vol">${c?fmtNum(c.volume):''}</td><td data-col="iv">${c?fmtPct(c.iv):''}</td><td data-col="delta">${c?fmtGreek(c.delta):''}</td><td data-col="gamma">${c?fmtGreek(c.gamma):''}</td>` +
+        `<td data-col="oi">${c?fmtNum(c.open_interest):''}</td><td data-col="bidask">${c?`${c.bid}/${c.ask}`:''}</td><td data-col="ltp">${c?c.ltp:''}</td>` +
+        `<td>${c?`<button class="btn good" style="padding:3px 6px;font-size:10px;" onclick="addLegFromChain('call',${k},'LONG')">Buy</button>`:''}</td>` +
+        `<td>${c?`<button class="btn danger" style="padding:3px 6px;font-size:10px;" onclick="addLegFromChain('call',${k},'SHORT')">Sell</button>`:''}</td>` +
+        `<td style="text-align:center;font-weight:700;">${k}</td>` +
+        `<td>${p?`<button class="btn good" style="padding:3px 6px;font-size:10px;" onclick="addLegFromChain('put',${k},'LONG')">Buy</button>`:''}</td>` +
+        `<td>${p?`<button class="btn danger" style="padding:3px 6px;font-size:10px;" onclick="addLegFromChain('put',${k},'SHORT')">Sell</button>`:''}</td>` +
+        `<td data-col="ltp">${p?p.ltp:''}</td><td data-col="bidask">${p?`${p.bid}/${p.ask}`:''}</td><td data-col="oi">${p?fmtNum(p.open_interest):''}</td>` +
+        `<td data-col="delta">${p?fmtGreek(p.delta):''}</td><td data-col="gamma">${p?fmtGreek(p.gamma):''}</td><td data-col="iv">${p?fmtPct(p.iv):''}</td><td data-col="vol">${p?fmtNum(p.volume):''}</td>` +
+        `</tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    _applyChainColumnVisibility();
+    document.getElementById('f-stockcode').value = stockCode;
+    await fetchExpiriesFor('f-stockcode', 'f-expiry');
+    syncExpirySelect('f-expiry', expiry);
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+function _applyStrategyTemplate(){
+  const type = document.getElementById('f-strategytype').value;
+  document.getElementById('legsBody').innerHTML = '';
+  const templates = {
+    PS:        [{right:'put',  side:'SHORT'}, {right:'put',  side:'LONG'}],
+    CS:        [{right:'call', side:'SHORT'}, {right:'call', side:'LONG'}],
+    IC:        [{right:'put',  side:'SHORT'}, {right:'put',  side:'LONG'}, {right:'call', side:'SHORT'}, {right:'call', side:'LONG'}],
+    PB:        [{right:'call', side:'LONG'},  {right:'call', side:'SHORT'}],
+    CB:        [{right:'put',  side:'LONG'},  {right:'put',  side:'SHORT'}],
+    CC:        [{instrument_type:'stock', side:'LONG'}, {right:'call', side:'SHORT'}],
+    CP:        [{right:'put',  side:'SHORT'}],
+    Straddle:  [{right:'call', side:'LONG'},  {right:'put',  side:'LONG'}],
+    Strangle:  [{right:'call', side:'SHORT'}, {right:'put',  side:'SHORT'}],
+    Butterfly: [{right:'call', side:'LONG'},  {right:'call', side:'SHORT', qty:2}, {right:'call', side:'LONG'}],
+  };
+  const tmpl = templates[type];
+  if (!tmpl){ addLegRow(); return; }
+  for (const leg of tmpl){
+    addLegRow({instrument_type: leg.instrument_type || 'option', right: leg.right, side: leg.side});
+    if (leg.qty){
+      const rows = document.querySelectorAll('#legsBody tr');
+      const lastRow = rows[rows.length - 1];
+      if (lastRow) lastRow.querySelector('[data-field="quantity"]').value = leg.qty;
+    }
+  }
+  _recalcNetPremium(true);
+}
+
+function _legLivePrice(idx){
+  const cell = document.getElementById('leg-liveprice-' + idx);
+  if (!cell) return null;
+  const txt = cell.textContent.replace('$', '').trim();
+  const v = parseFloat(txt);
+  return isNaN(v) ? null : v;
+}
+
+function _syncLegQuantities(newQty){
+  const q = parseInt(newQty, 10) || 1;
+  document.querySelectorAll('#legsBody [data-field="quantity"]').forEach(el => { el.value = q; });
+  _recalcNetPremium(false);
+}
+
+function _recalcNetPremium(force){
+  const priceEl = document.getElementById('f-net-premium');
+  if (!priceEl) return;
+  if (!force && priceEl.dataset.manualEdit) return; // respect the user's override unless explicitly told to recalc
+  if (force) delete priceEl.dataset.manualEdit;
+  const rows = document.querySelectorAll('#legsBody tr');
+  let net = 0, anyMissing = false;
+  rows.forEach(row => {
+    const idx = row.id.replace('leg-row-', '');
+    const side = row.querySelector('[data-field="side"]').value;
+    const px = _legLivePrice(idx);
+    if (px == null){ anyMissing = true; return; }
+    // Schwab's NET_CREDIT/NET_DEBIT price for a combo order is PER
+    // SPREAD, not multiplied by quantity -- each leg's own "quantity"
+    // already tells Schwab how many spreads to trade, and it
+    // multiplies internally. Multiplying here double-counts qty and
+    // sends a price N times too high, which Schwab will reject (this
+    // was a real bug, not a formatting choice).
+    if (side === 'SHORT') net += px; else net -= px;
+  });
+  priceEl.value = net.toFixed(2);
+  priceEl.placeholder = anyMissing ? 'some legs missing live price' : 'auto-calculated (per spread -- Schwab multiplies by qty)';
+  _syncNetPremiumToCombo();
+}
+
+function _syncNetPremiumToCombo(){
+  const net = document.getElementById('f-net-premium')?.value;
+  const comboField = document.getElementById('f-combo-net-price');
+  if (comboField && net) comboField.value = net;
+}
+
+async function _scoreThisTrade(){
+  const legs = collectLegs();
+  const panel = document.getElementById('tradeScorePreview');
+  if (!legs.length){ panel.innerHTML = '<span class="pnl-neg">Add legs (with strikes) first</span>'; return; }
+  panel.innerHTML = '⏳ Scoring…';
+  const strategyType = document.getElementById('f-strategytype').value || 'IC';
+  const stockCode = document.getElementById('f-stockcode').value.trim().toUpperCase();
+  const netPremium = parseFloat(document.getElementById('f-net-premium').value) || 0;
+  const payload = {
+    symbol: stockCode, trade_type: strategyType,
+    expiry: document.getElementById('f-expiry').value || '',
+    entry_date: new Date().toISOString().slice(0,10),
+    entry_price: netPremium,
+    quantity: legs[0]?.quantity || 1,
+    entry_reason: '[SCHWAB_AUTO] Pre-trade scoring',
+    legs: legs.map(l => ({
+      side: l.side === 'LONG' ? 'buy' : 'sell',
+      option_type: l.instrument_type === 'stock' ? 'stock' : l.right,
+      strike: l.strike_price || 0,
+      expiry: l.expiry_date || '',
+      qty: l.quantity,
+      price: _legLivePrice(l.leg_index) || 0,
+    })),
+  };
+  try{
+    const res = await fetch('/journal/draft_health_score', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const data = await res.json();
+    if (data.error){ panel.innerHTML = `<span class="pnl-neg">${esc(data.error)}</span>`; return; }
+    const score = data.score; // the route's actual top-level field -- trade_health_score/probability_score are internal names used only inside its own computation, not what it returns
+    if (score == null){ panel.innerHTML = '<span class="sub">No score returned</span>'; return; }
+    const color = score >= 70 ? '#22c55e' : score >= 50 ? '#f59e0b' : '#ef4444';
+    panel.innerHTML = `<b style="color:${color};font-size:16px;">${Number(score).toFixed(0)}</b> <span class="sub">/100 (${esc(data.grade||'')}) &middot; ${esc(data.recommendation||'')} &middot; Journal AI health score</span>`;
+  }catch(e){ panel.innerHTML = `<span class="pnl-neg">${esc(e.message)}</span>`; }
+}
+
+function _applyChainColumnVisibility(){
+  const table = document.getElementById('chainTable');
+  if (!table) return;
+  document.querySelectorAll('.chain-col-toggle').forEach(cb => {
+    const col = cb.dataset.col;
+    const show = cb.checked;
+    table.querySelectorAll(`[data-col="${col}"]`).forEach(el => { el.style.display = show ? '' : 'none'; });
+  });
+}
+
+function addLegFromChain(right, strike, side){
+  addLegRow({instrument_type: 'option', right, strike_price: strike, side});
+  document.getElementById('legsTable').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+// ===================== STRATEGY TAB =====================
+let strategyLegCounter = 0;
+
+function addStrategyLegRow(){
+  const tbody = document.getElementById('strategyLegsBody');
+  const idx = strategyLegCounter++;
+  const tr = document.createElement('tr');
+  tr.id = 'strat-leg-row-' + idx;
+  tr.innerHTML = `
+    <td><select data-field="instrument_type" onchange="toggleStrategyLegRowFields(${idx})"><option value="option">Option</option><option value="stock">Stock</option></select></td>
+    <td><select data-field="right"><option value="call">Call</option><option value="put">Put</option></select></td>
+    <td><select data-field="strike_mode"><option value="ATM">ATM</option><option value="ITM">ITM</option><option value="OTM" selected>OTM</option></select></td>
+    <td><input data-field="strike_offset" type="number" value="0" step="1"></td>
+    <td><select data-field="side"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select></td>
+    <td><input data-field="quantity" type="number" value="1" min="1"></td>
+    <td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="document.getElementById('strat-leg-row-${idx}').remove()">Remove</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+addStrategyLegRow();
+
+function toggleStrategyLegRowFields(idx){
+  const row = document.getElementById('strat-leg-row-' + idx);
+  if (!row) return;
+  const type = row.querySelector('[data-field="instrument_type"]').value;
+  const isStock = type === 'stock';
+  row.querySelector('[data-field="right"]').disabled = isStock;
+  row.querySelector('[data-field="strike_mode"]').disabled = isStock;
+  row.querySelector('[data-field="strike_offset"]').disabled = isStock;
+}
+
+function collectStrategyLegs(){
+  const rows = document.querySelectorAll('#strategyLegsBody tr');
+  const legs = [];
+  let i = 0;
+  for (const row of rows){
+    const instrument_type = row.querySelector('[data-field="instrument_type"]').value;
+    const side = row.querySelector('[data-field="side"]').value;
+    const qty = parseInt(row.querySelector('[data-field="quantity"]').value, 10);
+    if (!qty) continue;
+    if (instrument_type === 'stock'){
+      legs.push({leg_index: i++, instrument_type: 'stock', side, quantity: qty});
+    } else {
+      const right = row.querySelector('[data-field="right"]').value;
+      const strike_mode = row.querySelector('[data-field="strike_mode"]').value;
+      const strike_offset = parseFloat(row.querySelector('[data-field="strike_offset"]').value) || 0;
+      legs.push({leg_index: i++, instrument_type: 'option', right, strike_mode, strike_offset, side, quantity: qty});
+    }
+  }
+  return legs;
+}
+
+function toggleConditionHint(which){
+  const type = document.getElementById(`s-${which}-type`).value;
+  const hint = document.getElementById(`s-${which}-hint`);
+  const exprInput = document.getElementById(`s-${which}-expr`);
+  if (type === 'price'){
+    hint.innerHTML = 'Format: an operator + number vs live spot, e.g. "&gt; 195" or "&lt;= 190". <span class="pnl-pos">Fully real-time.</span>';
+    exprInput.placeholder = '> 195';
+  } else if (type === 'scanner'){
+    hint.innerHTML = 'Any Scanner Builder query, e.g. RSIDiff90("1h") &gt; 20. Timeframe is set inside the query itself.';
+    exprInput.placeholder = 'RSIDiff90("1h") > 20';
+  } else {
+    hint.textContent = ''; exprInput.placeholder = '';
+  }
+}
+
+async function createStrategy(){
+  const legs = collectStrategyLegs();
+  if (!legs.length){ alert('Add at least one leg'); return; }
+  const payload = {
+    name: document.getElementById('s-name').value || 'Unnamed strategy',
+    stock_code: document.getElementById('s-stockcode').value,
+    execution_mode: document.getElementById('s-execmode').value,
+    enabled: document.getElementById('s-enabled').value === 'true',
+    legs,
+    open_condition_type: document.getElementById('s-open-type').value,
+    open_condition_expr: document.getElementById('s-open-expr').value,
+    eval_interval_minutes: parseInt(document.getElementById('s-eval-interval').value, 10) || 5,
+    open_time_start: document.getElementById('s-open-time-start').value || null,
+    open_time_end: document.getElementById('s-open-time-end').value || null,
+    target_pnl: parseFloat(document.getElementById('s-target').value) || 0,
+    stop_loss_pnl: parseFloat(document.getElementById('s-stoploss').value) || 0,
+    max_reentries: parseInt(document.getElementById('s-max-reentries').value, 10) || 0,
+    close_condition_type: document.getElementById('s-close-type').value,
+    close_condition_expr: document.getElementById('s-close-expr').value,
+    close_time: document.getElementById('s-close-time').value || null,
+  };
+  const st = document.getElementById('strategyStatus');
+  st.textContent = 'Creating…';
+  try{
+    const res = await fetch('/api/schwab-auto/strategies', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const data = await res.json();
+    if (data.ok){ st.textContent = '✅ Created strategy ' + data.strategy_id; loadStrategies(); }
+    else st.innerHTML = '❌ ' + esc(data.error || 'failed');
+  }catch(e){ st.textContent = '❌ ' + e; }
+}
+
+async function loadStrategies(){
+  const wrap = document.getElementById('strategiesWrap');
+  try{
+    const res = await fetch('/api/schwab-auto/strategies');
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed: ' + esc(data.error) + '</div>'; return; }
+    if (!data.strategies.length){ wrap.innerHTML = '<div class="empty">No strategies yet -- create one below.</div>'; return; }
+    let html = '<table class="pos-table"><thead><tr><th>ID</th><th>Name</th><th>Legs</th><th>Open Condition</th><th>Target/Stop</th><th>Re-entries</th><th>Active Pos</th><th>Last Note</th><th>Enabled</th><th></th></tr></thead><tbody>';
+    for (const s of data.strategies){
+      const legsSummary = s.legs.map(l => l.instrument_type === 'stock'
+        ? `${l.side} STOCK x${l.quantity}`
+        : `${l.side} ${l.right.toUpperCase()} ${l.strike_mode}${l.strike_offset?('+'+l.strike_offset):''} x${l.quantity}`).join(', ');
+      html += `<tr><td>${s.id}</td><td>${esc(s.name)}<br><small style="color:var(--dte-muted)">${s.stock_code}</small></td>` +
+        `<td>${legsSummary}</td>` +
+        `<td><small>${s.open_condition_type}: ${esc(s.open_condition_expr)}<br>every ${s.eval_interval_minutes}min</small></td>` +
+        `<td>$${s.target_pnl} / $${s.stop_loss_pnl}</td>` +
+        `<td>${s.reentry_count}/${s.max_reentries} <button class="btn" style="padding:2px 6px;font-size:10px;" onclick="resetReentries(${s.id})">Reset</button></td>` +
+        `<td>${s.active_position_id ? '#'+s.active_position_id : '—'}</td>` +
+        `<td><small style="color:var(--dte-muted)">${esc(s.last_eval_note || '')}</small></td>` +
+        `<td><input type="checkbox" ${s.enabled?'checked':''} onchange="toggleStrategyEnabled(${s.id}, this.checked)"></td>` +
+        `<td><button class="btn danger" style="padding:4px 8px;font-size:11px;" onclick="deleteStrategy(${s.id})">Delete</button></td></tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+async function toggleStrategyEnabled(id, enabled){
+  try{ await fetch(`/api/schwab-auto/strategies/${id}/${enabled ? 'enable' : 'disable'}`, {method:'POST'}); loadStrategies(); }
+  catch(e){ alert('Failed: ' + e); }
+}
+async function resetReentries(id){
+  if (!confirm('Reset re-entry count for strategy ' + id + '?')) return;
+  try{ await fetch(`/api/schwab-auto/strategies/${id}/reset_reentries`, {method:'POST'}); loadStrategies(); }
+  catch(e){ alert('Failed: ' + e); }
+}
+async function deleteStrategy(id){
+  if (!confirm('Delete strategy ' + id + '?')) return;
+  try{
+    const res = await fetch(`/api/schwab-auto/strategies/${id}`, {method:'DELETE'});
+    const data = await res.json();
+    if (!data.ok) alert('Delete failed: ' + data.error);
+    loadStrategies();
+  }catch(e){ alert('Failed: ' + e); }
+}
+async function evaluateStrategiesNow(){
+  try{
+    const res = await fetch('/api/schwab-auto/strategies/evaluate_now', {method:'POST'});
+    const data = await res.json();
+    if (!data.ok) alert('Evaluate failed: ' + data.error);
+    loadStrategies(); loadPositions();
+  }catch(e){ alert('Failed: ' + e); }
+}
+
+async function loadOrderAuditLog(){
+  const wrap = document.getElementById('orderAuditLogWrap');
+  wrap.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  const since = document.getElementById('order-log-since').value;
+  try{
+    const url = '/api/schwab-auto/order_log' + (since ? `?since=${since}` : '');
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed: ' + esc(data.error||'unknown') + '</div>'; return; }
+    if (!data.log.length){ wrap.innerHTML = '<div class="empty">No orders logged' + (since ? ' since ' + since : '') + '.</div>'; return; }
+    let html = '<table class="pos-table"><thead><tr><th>When</th><th>Position</th><th>Symbol</th><th>Phase</th><th>Leg</th><th>Side</th><th>Action</th><th>Order ID</th><th>Result</th><th>Dry Run</th></tr></thead><tbody>';
+    for (const l of data.log){
+      const resultChip = l.ok ? '<span class="pnl-pos">OK</span>' : `<span class="pnl-neg">${esc(l.error||'FAILED')}</span>`;
+      html += `<tr><td><small>${esc(l.created_at||'')}</small></td>` +
+        `<td>#${l.position_id} <small style="color:var(--dte-muted)">${esc(l.strategy_name||'')}</small></td>` +
+        `<td>${esc(l.stock_code||'')}</td><td>${esc(l.phase||'')}</td><td>${l.leg_index ?? '—'}</td><td>${esc(l.side||'')}</td>` +
+        `<td>${esc(l.action||'')}</td><td><small>${esc(l.order_id||'—')}</small></td><td>${resultChip}</td>` +
+        `<td>${l.dry_run ? '<span class="status-chip status-CLOSED">paper</span>' : '<span class="status-chip status-OPEN">REAL</span>'}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+async function runDiagnostics(){
+  const symbol = document.getElementById('diag-symbol').value.trim().toUpperCase() || 'AAPL';
+  const wrap = document.getElementById('diagnosticsWrap');
+  const summary = document.getElementById('diagSummary');
+  wrap.innerHTML = '<div class="empty">Running&hellip;</div>';
+  summary.textContent = '';
+  try{
+    const res = await fetch('/api/schwab-auto/diagnostics/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({test_symbol: symbol})});
+    const data = await res.json();
+    if (!data.ok){ wrap.innerHTML = '<div class="empty">Failed to run: ' + esc(data.error||'unknown') + '</div>'; return; }
+    const s = data.summary;
+    summary.innerHTML = `<span class="pnl-pos">${s.passed} passed</span> &middot; ${s.failed ? `<span class="pnl-neg">${s.failed} failed</span>` : '0 failed'} &middot; <span style="color:var(--dte-muted);">${s.skipped} skipped</span>`;
+    let html = '<table class="pos-table"><thead><tr><th>Check</th><th>Status</th><th>Time</th><th>Detail</th></tr></thead><tbody>';
+    for (const r of data.results){
+      const statusClass = r.status === 'pass' ? 'pnl-pos' : (r.status === 'skipped' ? '' : 'pnl-neg');
+      html += `<tr><td>${esc(r.name)}</td><td class="${statusClass}" style="font-weight:700;">${r.status.toUpperCase()}</td>` +
+        `<td><small>${r.elapsed_sec}s</small></td><td><small style="color:var(--dte-muted);white-space:pre-wrap;">${esc(JSON.stringify(r.detail))}</small></td></tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }catch(e){ wrap.innerHTML = '<div class="empty">Failed: ' + e + '</div>'; }
+}
+
+function showTab(name){
+  document.querySelectorAll('.tab-page').forEach(el => el.classList.toggle('active', el.dataset.tabgroup === name));
+  document.querySelectorAll('#pageTabs .dte-tab').forEach(el => el.classList.toggle('active', el.dataset.tab === name));
+  try{ localStorage.setItem('schwab_auto_active_tab', name); }catch(e){}
+}
+
+showTab((function(){ try{ return localStorage.getItem('schwab_auto_active_tab') || 'positions'; }catch(e){ return 'positions'; } })());
+
+refreshConnectionStatus();
+_schwabCheckStatus();
+_toggleComboFields();
+refreshLiveTradingStatus();
+checkMonitorStatus();
+loadPositions();
+loadPendingOrders();
+loadStrategies();
+setInterval(loadPositions, 15000);
+setInterval(checkMonitorStatus, 30000);
+setInterval(loadStrategies, 20000);
+setInterval(refreshLiveTradingStatus, 30000);
+</script>
+</body>
+</html>

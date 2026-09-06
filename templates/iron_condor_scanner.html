@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Iron Condor / Vertical Scanner</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/theme_uplift.css"/>
+  <style>
+    :root{--accent:#6366f1;--bg2:#111827;--border2:#1f2937;--muted2:#94a3b8;--text2:#e5e7eb}
+    body{background:var(--bg,#0b1020);color:var(--text,var(--text2));font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+    .shell{max-width:1600px;margin:0 auto;padding:18px}
+    .hero h1{margin:0 0 4px;font-size:26px;font-weight:950;letter-spacing:-.02em}
+    .hero p{margin:0 0 16px;color:var(--muted,var(--muted2));font-size:13px;line-height:1.5;max-width:960px}
+    .card{background:var(--card,var(--bg2));border:1px solid var(--border,var(--border2));border-radius:12px;padding:16px;margin-bottom:16px}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:8px 16px;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:12px}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .tabs{display:flex;gap:6px;margin-bottom:14px}
+    .tab-btn{padding:8px 16px;border-radius:8px;font-weight:800;font-size:12px;cursor:pointer;background:rgba(255,255,255,.05);border:1px solid var(--border,var(--border2));color:var(--muted,var(--muted2))}
+    .tab-btn.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+    select,input[type=number]{padding:8px 10px;background:var(--bg,#0b1020);border:1px solid var(--border,var(--border2));color:var(--text,var(--text2));border-radius:8px;font-size:12px}
+    table.dt{width:100%;border-collapse:collapse;font-size:12px}
+    table.dt th,table.dt td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left}
+    table.dt th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase;cursor:pointer}
+    .grade-A{color:#4ade80;font-weight:900}
+    .grade-B{color:#fbbf24;font-weight:900}
+    .grade-C{color:#94a3b8;font-weight:900}
+    .flag{color:#fbbf24;font-size:11px;display:block;margin-top:3px}
+    .muted{color:var(--muted,var(--muted2))}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border,var(--border2));border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .status-err{color:#f87171;font-size:12px}
+    .strategy-bull{color:#4ade80}
+    .strategy-bear{color:#f87171}
+    .wall-fresh{color:#4ade80;font-weight:800}
+    .wall-unwinding{color:#f87171;font-weight:800}
+    .wall-flat{color:#94a3b8}
+    .wall-unknown{color:#64748b;font-style:italic}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="hero">
+    <h1>🦅 Iron Condor / Vertical Scanner</h1>
+    <p>Scans the whole watchlist for a chosen expiry, finds symbols with a put wall below spot and a call wall above it (condors), or a single strong wall near spot (bull put / bear call verticals) — graded by wall strength, distance, PCR, and IV percentile proxy, plus a recent 5-day price-action flag when the trend is running toward the wall the setup depends on. Each wall also shows a freshness status (● fresh / ● flat / ● unwinding) based on real OI change, since a wall's raw size says nothing about whether that positioning was built recently or is old and unrevisited.</p>
+  </div>
+
+  <div class="tabs">
+    <div class="tab-btn active" id="tab-condor" onclick="switchTab('condor')">Iron Condors</div>
+    <div class="tab-btn" id="tab-vertical" onclick="switchTab('vertical')">Verticals (Bull Put / Bear Call)</div>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <span class="muted" style="font-size:12px">Expiry</span>
+      <select id="expiry-select" style="width:150px"></select>
+      <span class="muted" style="font-size:11px">Min OI (liquidity floor)</span>
+      <input type="number" id="min-oi-input" min="0" step="500" value="2000" style="width:80px" title="Condors: minimum combined OI within 2 strikes of spot. Verticals: minimum OI at the wall strike itself. Was previously hardcoded with no way to see or adjust it."/>
+      <span class="muted" style="font-size:11px">Min RR</span>
+      <input type="number" id="min-rr-input" min="0" step="0.05" value="0.5" style="width:65px" title="Minimum credit / (width - credit), computed from real stored option premiums. Filters out mechanically well-formed setups (big, OI-heavy walls) that still pay too little relative to the risk. Default 0.5 for condors, 0.35 for verticals -- resets to the tab's default on switch."/>
+      <span class="muted" style="font-size:11px">Min IVP</span>
+      <input type="number" id="min-ivp-input" min="0" max="100" step="5" value="30" style="width:55px" title="Minimum IVP proxy (this scanner's own 52-week realized-volatility rank, NOT true implied volatility -- honest label from this same scanner's own docstring). Premium-selling strategies want elevated vol; this filters out low-proxy candidates by default."/>
+      <span class="muted" style="font-size:11px" id="vertical-dist-wrap">
+        <span style="margin-left:6px">Strike distance (verticals)</span>
+        <input type="number" id="strike-dist-input" min="1" max="6" value="2" style="width:50px"/>
+      </span>
+      <button class="btn btn-primary" onclick="runScan()">▶ Scan</button>
+      <span id="scan-status" class="muted" style="font-size:12px"></span>
+    </div>
+  </div>
+
+  <div id="results-body"><div class="card muted">Pick an expiry and click Scan.</div></div>
+</div>
+
+<script>
+let activeTab = "condor";
+let lastResults = [];
+let sortKey = "signal_score", sortDir = -1;
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById("tab-condor").classList.toggle("active", tab === "condor");
+  document.getElementById("tab-vertical").classList.toggle("active", tab === "vertical");
+  document.getElementById("vertical-dist-wrap").style.display = tab === "vertical" ? "inline" : "none";
+  document.getElementById("min-rr-input").value = tab === "condor" ? 0.5 : 0.35;
+  document.getElementById("results-body").innerHTML = '<div class="card muted">Pick an expiry and click Scan.</div>';
+}
+switchTab("condor");
+
+async function loadExpiries() {
+  try {
+    const resp = await fetch("/iron-condor-scanner/api/expiries");
+    const d = await resp.json();
+    const sel = document.getElementById("expiry-select");
+    (d.expiries || []).forEach(e => {
+      const opt = document.createElement("option");
+      opt.value = e; opt.textContent = e;
+      sel.appendChild(opt);
+    });
+  } catch (e) { /* leave picker empty */ }
+}
+
+function fmtPct(n) { return n == null ? "—" : `${n > 0 ? "+" : ""}${n}%`; }
+
+function fmtStatus(status) {
+  if (status === "fresh") return '<span class="wall-fresh">● fresh</span>';
+  if (status === "unwinding") return '<span class="wall-unwinding">● unwinding</span>';
+  if (status === "flat") return '<span class="wall-flat">● flat</span>';
+  return '<span class="wall-unknown">?</span>';
+}
+
+function fmtRR(rr) {
+  if (rr == null) return '<span class="muted">—</span>';
+  const cls = rr >= 1 ? "wall-fresh" : rr >= 0.5 ? "wall-flat" : "wall-unwinding";
+  return `<span class="${cls}">${rr.toFixed(2)}</span>`;
+}
+
+function renderCondorRows(rows) {
+  return rows.map(r => `
+    <tr>
+      <td><b>${r.symbol}</b></td>
+      <td>${r.dte}d (${r.expiry_type})</td>
+      <td>$${r.spot}</td>
+      <td>${r.put_wall_strike} <span class="muted">(${r.put_wall_oi.toLocaleString()}, ${r.put_wall_strength}x)</span><br>${fmtStatus(r.put_wall_status)}</td>
+      <td>${r.call_wall_strike} <span class="muted">(${r.call_wall_oi.toLocaleString()}, ${r.call_wall_strength}x)</span><br>${fmtStatus(r.call_wall_status)}</td>
+      <td>${r.range_width}</td>
+      <td>${r.symmetry}</td>
+      <td>${r.ivp_proxy != null ? r.ivp_proxy + "%" : "—"}</td>
+      <td>${fmtRR(r.rr)} <span class="muted">${r.total_credit != null ? `($${r.total_credit}/$${r.condor_width})` : ""}</span></td>
+      <td><span class="grade-${r.grade}">${r.grade}</span> (${r.signal_score})</td>
+      <td>
+        ${r.suggested_spread}
+        ${r.price_action_flag ? `<span class="flag">⚠ ${r.price_action_flag}</span>` : ""}
+      </td>
+    </tr>`).join("");
+}
+
+function renderVerticalRows(rows) {
+  return rows.map(r => `
+    <tr>
+      <td><b>${r.symbol}</b></td>
+      <td class="${r.strategy === 'Bull Put Spread' ? 'strategy-bull' : 'strategy-bear'}">${r.strategy}</td>
+      <td>${r.dte}d (${r.expiry_type})</td>
+      <td>$${r.spot}</td>
+      <td>Sell ${r.sell_strike} / Buy ${r.buy_strike}</td>
+      <td>${r.wall_oi.toLocaleString()} <span class="muted">(${r.wall_strength}x)</span><br>${fmtStatus(r.wall_status)}</td>
+      <td>${fmtPct(r.strike_dist_pct)}</td>
+      <td>${r.full_chain_pcr ?? "—"}</td>
+      <td>${fmtRR(r.rr)} <span class="muted">${r.credit != null ? `($${r.credit}/$${r.width})` : ""}</span></td>
+      <td><span class="grade-${r.grade}">${r.grade}</span> (${r.signal_score})</td>
+      <td>
+        ${r.bias}
+        ${r.price_action_flag ? `<span class="flag">⚠ ${r.price_action_flag}</span>` : ""}
+      </td>
+    </tr>`).join("");
+}
+
+function sortAndRender() {
+  const rows = [...lastResults].sort((a, b) => (a[sortKey] ?? 0) > (b[sortKey] ?? 0) ? sortDir : -sortDir);
+  const el = document.getElementById("results-body");
+  if (!rows.length) {
+    el.innerHTML = '<div class="card muted">No candidates found for this expiry with the current criteria.</div>';
+    return;
+  }
+  if (activeTab === "condor") {
+    el.innerHTML = `<div class="card"><table class="dt">
+      <thead><tr>
+        <th onclick="setSort('symbol')">Symbol</th><th onclick="setSort('dte')">DTE</th><th onclick="setSort('spot')">Spot</th>
+        <th>Put Wall</th><th>Call Wall</th><th onclick="setSort('range_width')">Range</th>
+        <th onclick="setSort('symmetry')">Symmetry</th><th onclick="setSort('ivp_proxy')">IVP</th>
+        <th onclick="setSort('rr')">RR</th>
+        <th onclick="setSort('signal_score')">Grade</th><th>Suggested Spread</th>
+      </tr></thead>
+      <tbody>${renderCondorRows(rows)}</tbody>
+    </table></div>`;
+  } else {
+    el.innerHTML = `<div class="card"><table class="dt">
+      <thead><tr>
+        <th onclick="setSort('symbol')">Symbol</th><th>Strategy</th><th onclick="setSort('dte')">DTE</th><th onclick="setSort('spot')">Spot</th>
+        <th>Legs</th><th>Wall OI</th><th onclick="setSort('strike_dist_pct')">Dist %</th>
+        <th onclick="setSort('full_chain_pcr')">PCR</th>
+        <th onclick="setSort('rr')">RR</th>
+        <th onclick="setSort('signal_score')">Grade</th><th>Bias</th>
+      </tr></thead>
+      <tbody>${renderVerticalRows(rows)}</tbody>
+    </table></div>`;
+  }
+}
+
+function setSort(key) {
+  if (sortKey === key) sortDir *= -1; else { sortKey = key; sortDir = -1; }
+  sortAndRender();
+}
+
+async function runScan() {
+  const expiry = document.getElementById("expiry-select").value;
+  const status = document.getElementById("scan-status");
+  if (!expiry) { status.textContent = "Pick an expiry first"; return; }
+  status.innerHTML = '<span class="spinner"></span> Scanning...';
+  document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> Scanning watchlist for this expiry...</div>';
+  try {
+    let url;
+    const minOi = document.getElementById("min-oi-input").value || 2000;
+    const minRr = document.getElementById("min-rr-input").value || (activeTab === "condor" ? 0.5 : 0.35);
+    const minIvp = document.getElementById("min-ivp-input").value || 30;
+    if (activeTab === "condor") {
+      url = `/iron-condor-scanner/api/condors?expiry=${encodeURIComponent(expiry)}&min_oi=${minOi}&min_rr=${minRr}&min_ivp=${minIvp}`;
+    } else {
+      const dist = document.getElementById("strike-dist-input").value || 2;
+      url = `/iron-condor-scanner/api/verticals?expiry=${encodeURIComponent(expiry)}&strike_distance=${dist}&min_oi=${minOi}&min_rr=${minRr}&min_ivp=${minIvp}`;
+    }
+    const resp = await fetch(url);
+    const d = await resp.json();
+    if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
+    lastResults = d.results || [];
+    sortKey = "signal_score"; sortDir = -1;
+    status.textContent = `✓ ${d.count} candidate(s) found`;
+    sortAndRender();
+  } catch (e) {
+    status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
+  }
+}
+
+loadExpiries();
+</script>
+</body>
+</html>

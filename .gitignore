@@ -1,0 +1,11 @@
+# Local runtime data - never package/commit
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+__pycache__/
+*.pyc
