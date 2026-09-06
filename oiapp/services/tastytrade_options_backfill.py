@@ -46,6 +46,7 @@ still get stored; strikes with confirmed zero OI don't.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -55,6 +56,10 @@ from ..config import DB_PATH as _OIAPP_DB_PATH
 DEFAULT_MAX_ITEMS_PER_TICK = 3  # ~3 symbols x ~20s each = ~60s per tick, matching the 90s scheduler interval below with room to spare
 DEFAULT_MAX_DTE = 50
 DEFAULT_WEEKLY_EXPIRY_LIMIT = 8
+# Number of strike prices on each side of spot, per selected expiry. Each
+# selected strike includes its call and put, so 20 each side means up to
+# roughly 80 option contracts per expiry.
+DEFAULT_STRIKES_EACH_SIDE = max(1, int(os.environ.get("OIAPP_TASTYTRADE_STRIKES_EACH_SIDE", "20")))
 
 
 def _conn():
@@ -124,8 +129,8 @@ def enqueue_watchlist(symbols: List[str], max_dte: int = DEFAULT_MAX_DTE) -> Dic
 
 
 def _write_chain_rows(symbol: str, expiry: str, rows: List[dict]) -> int:
-    """OI=0 gate applied HERE, before any row reaches the table. Same
-    DELETE-then-INSERT pattern db.py's store_option_chain already uses
+    """Only positive-OI rows are written here; zero or missing OI is skipped.
+    Same DELETE-then-INSERT pattern db.py's store_option_chain already uses
     for same-day re-fetches, so re-running a backfill for a symbol that
     already has tastytrade data today replaces it rather than
     duplicating rows. Called once per expiry found in a symbol's batched
@@ -167,7 +172,8 @@ def _write_chain_rows(symbol: str, expiry: str, rows: List[dict]) -> int:
 
 def fetch_and_store_symbol(symbol: str, max_dte: int = DEFAULT_MAX_DTE) -> Dict[str, Any]:
     """One batched call covering daily expiries through max_dte, or at
-    most eight dates for a weekly-only chain. See this module's docstring
+    most eight dates for a weekly-only chain, and only the configured
+    number of strikes on each side of spot. See this module's docstring
     for why this replaced the original per-expiry-loop design.
 
     ok=True here means the DXLink session/subscription succeeded --
@@ -185,7 +191,7 @@ def fetch_and_store_symbol(symbol: str, max_dte: int = DEFAULT_MAX_DTE) -> Dict[
         symbol,
         max_dte=max(1, int(max_dte)),
         weekly_expiry_limit=DEFAULT_WEEKLY_EXPIRY_LIMIT,
-        strikes_each_side=None,
+        strikes_each_side=DEFAULT_STRIKES_EACH_SIDE,
     )
     if not result.get("ok"):
         return {"ok": False, "error": result.get("error"), "expiries_covered": 0, "rows_written": 0}
