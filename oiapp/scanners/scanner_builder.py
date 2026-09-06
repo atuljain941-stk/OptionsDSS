@@ -584,8 +584,9 @@ DEFAULT_COLUMN_TEMPLATES = [
 def _conn():
     c = sqlite3.connect(DB_PATH, timeout=20)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA busy_timeout=30000")
+    # WAL is configured once during application startup. Setting journal_mode
+    # for every short-lived worker connection can contend with active writers.
+    c.execute("PRAGMA busy_timeout=10000")
     try:
         from ..services.profiling import increment as _prof_increment
         _prof_increment("db_connections_opened")
@@ -3041,7 +3042,9 @@ def _deserialize_snapshot(payload: str) -> Dict[str, Any]:
 
 
 import queue as _snap_queue_mod
-_snapshot_write_queue: "_snap_queue_mod.Queue" = _snap_queue_mod.Queue()
+# Keep cache work bounded. Cache entries are optional and must never build an
+# unbounded backlog after a scan deadline or block new user work.
+_snapshot_write_queue: "_snap_queue_mod.Queue" = _snap_queue_mod.Queue(maxsize=512)
 _snapshot_write_worker_started = False
 _snapshot_write_worker_lock = None
 
@@ -3164,7 +3167,11 @@ def _prepare_snapshot_cached(df: pd.DataFrame, bench_df: Optional[pd.DataFrame],
 
     try:
         _ensure_snapshot_write_worker()
-        _snapshot_write_queue.put((symbol_u, tf, as_of_date, snap))
+        _snapshot_write_queue.put_nowait((symbol_u, tf, as_of_date, snap))
+    except _snap_queue_mod.Full:
+        # The cache is an optimization, not part of the scan result. Dropping
+        # excess work is safer than letting timed-out scans keep writing later.
+        pass
     except Exception:
         pass  # queueing failure should never break the actual scan result
 
@@ -11802,26 +11809,15 @@ def api_run():
                   f"{len(timed_out_symbols)}/{len(symbols)} symbol(s) still not done -- "
                   f"returning partial results instead of hanging. Stuck symbols: "
                   f"{timed_out_symbols[:20]}{'...' if len(timed_out_symbols) > 20 else ''}")
-            # Self-healing: a handful of individually slow/bad symbols
-            # timing out is normal and not a signal of anything wrong
-            # with the shared pool itself. But if HALF or more of a scan
-            # never even got a worker, that's not "this query is slow" --
-            # it's the shared pool itself being degraded (workers
-            # permanently lost to earlier stuck threads from unrelated
-            # scans/fetches, since Python can't kill a hung thread).
-            # Recovering here means the NEXT scan doesn't inherit the
-            # same starved pool and time out for what looks like no
-            # reason, without anyone needing to know to visit
-            # /diagnostics and click "Replace Pool" manually.
-            if symbols and len(timed_out_symbols) / len(symbols) >= 0.5:
-                try:
-                    from ..services.task_executor import replace_pool
-                    result = replace_pool()
-                    print(f"[scanner_builder] {len(timed_out_symbols)}/{len(symbols)} symbols "
-                          f"timed out (>=50%) -- auto-replaced the shared pool "
-                          f"({result.get('orphaned_threads')} thread(s) orphaned)")
-                except Exception as e:
-                    print(f"[scanner_builder] auto pool-replace failed: {e}")
+            # Do not replace the shared pool here: replacement leaves the old
+            # workers running, which doubles the number of live scanner jobs
+            # and can keep database writers alive long after this response.
+            # Cancel tasks that never started; running network calls cannot be
+            # force-killed by Python, but they will no longer be followed by a
+            # backlog of queued symbols from this timed-out request.
+            cancelled = sum(1 for fut in futs if not fut.done() and fut.cancel())
+            if cancelled:
+                print(f"[scanner_builder] cancelled {cancelled} queued symbol task(s) after scan deadline")
     finally:
         unified_scheduler.scan_finished()
 
