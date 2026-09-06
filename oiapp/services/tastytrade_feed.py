@@ -998,8 +998,39 @@ class TastytradeFeed:
                 except asyncio.TimeoutError:
                     pass  # partial data is fine -- most strikes with real OI got a Greeks push already
 
+            # Some option chains intermittently produce no Summary snapshot at
+            # all (not merely zero OI). Keep the streaming path as primary,
+            # but use Tastytrade's REST market-data endpoint as a bounded
+            # same-provider fallback for that complete-symbol failure mode.
+            rest_oi_map: dict = {}
+            if not summary_map:
+                sem = asyncio.Semaphore(8)
+
+                async def _rest_oi(option):
+                    async with sem:
+                        try:
+                            data = await asyncio.wait_for(
+                                get_market_data(session, option.symbol, option.instrument_type),
+                                timeout=5.0,
+                            )
+                            value = getattr(data, "open_interest", None) if data is not None else None
+                            if value is not None and float(value) > 0:
+                                rest_oi_map[option.streamer_symbol] = float(value)
+                        except Exception:
+                            pass
+
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*(_rest_oi(option) for option in all_options)),
+                        timeout=30.0,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                print(f"[tastytrade_feed] {underlying_symbol} Summary snapshot was empty; "
+                      f"REST OI fallback recovered {len(rest_oi_map)}/{len(all_options)} strike(s)")
+
             by_expiry: dict = {}
-            oi_sources_used = {"summary": 0, "static_attr": 0, "none": 0}
+            oi_sources_used = {"summary": 0, "rest": 0, "static_attr": 0, "none": 0}
             diagnostic_logged = False
             for o in all_options:
                 g = greeks_map.get(o.streamer_symbol)
@@ -1012,6 +1043,9 @@ class TastytradeFeed:
                 if oi_from_summary is not None and float(oi_from_summary) > 0:
                     oi_final = float(oi_from_summary)
                     oi_sources_used["summary"] += 1
+                elif rest_oi_map.get(o.streamer_symbol, 0) > 0:
+                    oi_final = rest_oi_map[o.streamer_symbol]
+                    oi_sources_used["rest"] += 1
                 elif oi_from_static is not None and float(oi_from_static or 0) > 0:
                     oi_final = float(oi_from_static)
                     oi_sources_used["static_attr"] += 1
@@ -1056,7 +1090,8 @@ class TastytradeFeed:
                     "streamer_symbol": o.streamer_symbol,
                 })
             print(f"[tastytrade_feed] {underlying_symbol} OI sources: "
-                  f"{oi_sources_used['summary']} from Summary, {oi_sources_used['static_attr']} from static attr, "
+                  f"{oi_sources_used['summary']} from Summary, {oi_sources_used['rest']} from REST fallback, "
+                  f"{oi_sources_used['static_attr']} from static attr, "
                   f"{oi_sources_used['none']} had none (out of {len(all_options)} strikes)")
             return {"ok": True, "underlying": underlying_symbol, "by_expiry": by_expiry, "error": None,
                     "oi_sources_used": oi_sources_used}
