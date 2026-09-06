@@ -154,6 +154,35 @@ def build_occ_option_symbol(root_symbol: str, expiration, option_type: str, stri
     return occ
 
 
+
+async def _collect_summary_until_quiet(streamer, summary_event, expected_symbols, summary_map,
+                                       greeks_done, quiet_after_greeks: float = 3.0) -> None:
+    """Collect the Summary snapshot after Greeks has completed too.
+
+    Summary carries open_interest. Greeks commonly completes first, so ending
+    this listener on greeks_done discarded nearly the entire OI snapshot.
+    Continue until all requested symbols arrive or the Summary stream is quiet
+    for a short post-Greeks grace window.
+    """
+    expected = set(expected_symbols)
+    listener = streamer.listen(summary_event)
+    idle_after_greeks = 0.0
+    while len(summary_map) < len(expected):
+        try:
+            event = await asyncio.wait_for(listener.__anext__(), timeout=0.5)
+        except asyncio.TimeoutError:
+            if greeks_done.is_set():
+                idle_after_greeks += 0.5
+                if idle_after_greeks >= quiet_after_greeks:
+                    return
+            continue
+        except StopAsyncIteration:
+            return
+        idle_after_greeks = 0.0
+        if event.event_symbol in expected:
+            summary_map[event.event_symbol] = event
+
+
 def guess_instrument_type(symbol: str):
     """Best-effort instrument type from a bare symbol string. Override
     explicitly wherever you already know the type (e.g. options chains)."""
@@ -925,17 +954,10 @@ class TastytradeFeed:
                     greeks_done.set()
 
                 async def _collect_summary():
-                    if not summary_available:
-                        return
-                    listener = streamer.listen(Summary)
-                    while not greeks_done.is_set():
-                        try:
-                            s = await asyncio.wait_for(listener.__anext__(), timeout=0.5)
-                        except asyncio.TimeoutError:
-                            continue
-                        except StopAsyncIteration:
-                            return
-                        summary_map[s.event_symbol] = s
+                    if summary_available:
+                        await _collect_summary_until_quiet(
+                            streamer, Summary, streamer_symbols, summary_map, greeks_done
+                        )
 
                 async def _collect_trades():
                     # Trade events are best-effort enrichment (volume,
@@ -1155,17 +1177,10 @@ class TastytradeFeed:
                     greeks_done.set()
 
                 async def _collect_summary():
-                    if not summary_available:
-                        return
-                    listener = streamer.listen(Summary)
-                    while not greeks_done.is_set():
-                        try:
-                            s = await asyncio.wait_for(listener.__anext__(), timeout=0.5)
-                        except asyncio.TimeoutError:
-                            continue
-                        except StopAsyncIteration:
-                            return
-                        summary_map[s.event_symbol] = s
+                    if summary_available:
+                        await _collect_summary_until_quiet(
+                            streamer, Summary, streamer_symbols, summary_map, greeks_done
+                        )
 
                 async def _collect_trades():
                     # Volume isn't a single push like Greeks -- accumulate
