@@ -381,6 +381,77 @@ def _dates(start, end):
     return output
 
 
+
+def _performance_group(trades):
+    count = len(trades)
+    pnl = round(sum(t["pnl"] for t in trades), 2)
+    winners = [t for t in trades if t["pnl"] > 0]
+    losers = [t for t in trades if t["pnl"] < 0]
+    gross_profit = round(sum(t["pnl"] for t in winners), 2)
+    gross_loss = round(abs(sum(t["pnl"] for t in losers)), 2)
+    return {
+        "trades": count, "pnl": pnl, "winners": len(winners), "losers": len(losers),
+        "win_rate_pct": round(100.0 * len(winners) / count, 2) if count else 0.0,
+        "average_win": round(gross_profit / len(winners), 2) if winners else 0.0,
+        "average_loss": round(gross_loss / len(losers), 2) if losers else 0.0,
+        "profit_factor": round(gross_profit / gross_loss, 3) if gross_loss else None,
+    }
+
+
+def _analytics(trades, starting_equity):
+    ordered = sorted(trades, key=lambda t: (t["exit_at"], t["symbol"], t["strategy"]))
+    base = _performance_group(ordered)
+    equity = float(starting_equity)
+    peak = equity
+    max_drawdown = 0.0
+    max_drawdown_pct = 0.0
+    max_wins = max_losses = wins = losses = 0
+    curve = []
+    for trade in ordered:
+        equity += float(trade["pnl"])
+        peak = max(peak, equity)
+        drawdown = peak - equity
+        max_drawdown = max(max_drawdown, drawdown)
+        max_drawdown_pct = max(max_drawdown_pct, (drawdown / peak * 100.0) if peak > 0 else 0.0)
+        if trade["pnl"] > 0:
+            wins, losses = wins + 1, 0
+        elif trade["pnl"] < 0:
+            losses, wins = losses + 1, 0
+        else:
+            wins = losses = 0
+        max_wins, max_losses = max(max_wins, wins), max(max_losses, losses)
+        curve.append({"exit_at": trade["exit_at"], "equity": round(equity, 2), "pnl": trade["pnl"]})
+
+    winners = [t for t in ordered if t["pnl"] > 0]
+    losers = [t for t in ordered if t["pnl"] < 0]
+    probability = len(winners) / len(ordered) if ordered else 0.0
+    avg_win = base["average_win"]
+    avg_loss = base["average_loss"]
+    expectancy = probability * avg_win - (1.0 - probability) * avg_loss
+    by_strategy, by_symbol, by_exit = {}, {}, {}
+    for label, key, target in (
+        ("strategy", "strategy", by_strategy), ("symbol", "symbol", by_symbol),
+        ("exit", "exit_reason", by_exit),
+    ):
+        values = sorted({str(t.get(key) or "unknown") for t in ordered})
+        for value in values:
+            target[value] = _performance_group([t for t in ordered if str(t.get(key) or "unknown") == value])
+    return {
+        **base,
+        "probability_of_winning": round(probability, 4),
+        "expectancy_per_trade": round(expectancy, 2),
+        "starting_equity": round(float(starting_equity), 2),
+        "ending_equity": round(equity, 2),
+        "max_drawdown": round(max_drawdown, 2),
+        "max_drawdown_pct": round(max_drawdown_pct, 2),
+        "max_consecutive_wins": max_wins,
+        "max_consecutive_losses": max_losses,
+        "equity_curve": curve,
+        "by_strategy": by_strategy,
+        "by_symbol": by_symbol,
+        "by_exit_reason": by_exit,
+    }
+
 def _save(run_id, config, summary, trades):
     _ensure_tables()
     con = _conn()
@@ -415,6 +486,7 @@ def run_backtest(payload):
         "ic_offset": max(0.0, float(payload.get("ic_offset") or 1.0)),
         "target_delta": min(0.49, max(0.05, float(payload.get("target_delta") or 0.30))),
         "strike_step": max(0.01, float(payload.get("strike_step") or 1.0)),
+        "starting_equity": max(1.0, float(payload.get("starting_equity") or 10000.0)),
         "gex_symbol": str(payload.get("gex_symbol") or "").upper().strip(),
         "date_from": str(payload.get("date_from") or ""), "date_to": str(payload.get("date_to") or ""),
         "symbols": symbols,
@@ -439,14 +511,14 @@ def run_backtest(payload):
                 trades.extend(_run_iron_condor(symbol, trade_date, bars, pm[0], pm[1], gex["iv"], cfg))
             elif gex["regime"] == "NEGATIVE" and mode in {"buying", "both"}:
                 trades.extend(_run_long_options(symbol, trade_date, bars, pm[0], pm[1], gex["iv"], cfg))
-    total = round(sum(t["pnl"] for t in trades), 2)
-    winners = [t for t in trades if t["pnl"] > 0]
+    analytics = _analytics(trades, cfg["starting_equity"])
     summary = {
-        "run_id": uuid.uuid4().hex, "model": "Black-Scholes mid-price model using saved GEX-plan IV; not historical option bid/ask",
-        "trades": len(trades), "winners": len(winners), "losers": len(trades) - len(winners),
-        "win_rate_pct": round(100.0 * len(winners) / len(trades), 2) if trades else 0.0,
-        "total_pnl": total, "average_pnl": round(total / len(trades), 2) if trades else 0.0,
-        "skipped": skipped, "skipped_count": len(skipped),
+        "run_id": uuid.uuid4().hex,
+        "model": "MODELLED: Black-Scholes mid-price using saved GEX-plan IV and time to 4 PM; not historical option bid/ask or executable fill",
+        "trades": analytics["trades"], "winners": analytics["winners"], "losers": analytics["losers"],
+        "win_rate_pct": analytics["win_rate_pct"], "probability_of_winning": analytics["probability_of_winning"],
+        "total_pnl": analytics["pnl"], "average_pnl": round(analytics["pnl"] / analytics["trades"], 2) if analytics["trades"] else 0.0,
+        "analytics": analytics, "skipped": skipped, "skipped_count": len(skipped),
     }
     _save(summary["run_id"], cfg, summary, trades)
     return {"ok": True, "config": cfg, "summary": summary, "trades": trades}
