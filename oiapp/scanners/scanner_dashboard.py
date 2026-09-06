@@ -18,8 +18,9 @@ DB_PATH = _OIAPP_DB_PATH
 def _conn():
     con = sqlite3.connect(DB_PATH, timeout=20)
     con.row_factory = sqlite3.Row
-    con.execute('PRAGMA journal_mode=WAL')
-    con.execute('PRAGMA busy_timeout=30000')
+    # WAL is configured once during application startup. Reissuing
+    # journal_mode=WAL on every request can itself contend with an active writer.
+    con.execute('PRAGMA busy_timeout=10000')
     return con
 
 
@@ -372,12 +373,9 @@ def dashboard_get_api(dash_id: int):
     dash = _get_dashboard(dash_id)
     if not dash:
         return jsonify({'error': 'dashboard not found'}), 404
-    con = _conn()
-    try:
-        con.execute('UPDATE scanner_dashboards SET last_opened_at=datetime(\'now\') WHERE id=?', (dash_id,))
-        con.commit()
-    finally:
-        con.close()
+    # A GET must remain read-only. This metadata update used to turn a normal
+    # dashboard load into a competing SQLite writer and could make the entire
+    # page fail while a long-running background job held the write lock.
     return jsonify({'dashboard': dash})
 
 

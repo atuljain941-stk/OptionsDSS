@@ -38,18 +38,24 @@ from ..config import DB_PATH as _OIAPP_DB_PATH
 
 DB_PATH = Path(_OIAPP_DB_PATH)
 
+# Table creation/migration is startup work. Guard it so the background writer
+# does not execute DDL before every snapshot write.
+_schema_init_lock = threading.Lock()
+_schema_initialized = False
+
 
 def _conn():
     con = sqlite3.connect(DB_PATH, timeout=30)
     try:
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA busy_timeout=30000")
+        # journal_mode is set once at app startup; this connection only needs
+        # a bounded wait for a briefly active writer.
+        con.execute("PRAGMA busy_timeout=10000")
     except Exception:
         pass
     return con
 
 
-def _ensure_table():
+def _ensure_table_once():
     con = _conn()
     try:
         con.execute("""
@@ -119,6 +125,18 @@ def _ensure_table():
         con.commit()
     finally:
         con.close()
+
+
+def _ensure_table():
+    """Create/migrate the snapshot table once per process, not per write."""
+    global _schema_initialized
+    if _schema_initialized:
+        return
+    with _schema_init_lock:
+        if _schema_initialized:
+            return
+        _ensure_table_once()
+        _schema_initialized = True
 
 
 def _dmi_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
@@ -235,7 +253,9 @@ def compute_technical_snapshot(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
 import threading as _threading_mod
 import queue as _queue_mod
 
-_write_queue: "_queue_mod.Queue" = _queue_mod.Queue()
+# Snapshot writes are cache work. Bound the backlog so a stalled writer does
+# not retain an unlimited amount of timed-out scanner work in memory.
+_write_queue: "_queue_mod.Queue" = _queue_mod.Queue(maxsize=512)
 _write_worker_started = False
 _write_worker_lock = _threading_mod.Lock()
 
@@ -280,7 +300,11 @@ def queue_technical_snapshot_write(symbol: str, timeframe: str, date_str: str, s
     database on the calling (scanning) thread at all. See
     _ensure_write_worker for why this matters under concurrent scans."""
     _ensure_write_worker()
-    _write_queue.put((symbol, timeframe, date_str, snap))
+    try:
+        _write_queue.put_nowait((symbol, timeframe, date_str, snap))
+    except _queue_mod.Full:
+        # A later scan can refresh the cache; never block or fail a scanner.
+        pass
 
 
 def store_technical_snapshot(symbol: str, timeframe: str, date_str: str, snap: Dict[str, Any]) -> None:
