@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Intraday GEX Backtest{% endblock %}
+{% block content %}
+<div style="max-width:1280px;margin:0 auto;padding:18px">
+  <h2 style="margin:0 0 6px">Intraday GEX Regime Backtest</h2>
+  <p style="margin:0 0 16px;color:var(--muted,#94a3b8)">
+    Uses stored 2-minute bars, saved premarket levels, and the saved GEX plan for each date.
+    Option P&amp;L is a Black-Scholes mid-price model using saved IV—not historical bid/ask fills.
+  </p>
+
+  <div style="padding:14px;border:1px solid var(--border,#334155);border-radius:8px;background:var(--card,#111827);display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+    <label>Date from <input id="bt-from" type="date"></label>
+    <label>Date to <input id="bt-to" type="date"></label>
+    <label>Watchlist <select id="bt-watchlist"><option value="">Use symbols below</option></select></label>
+    <label>Symbols <input id="bt-symbols" placeholder="SPY, QQQ, IWM"></label>
+    <label>GEX source (optional) <input id="bt-gex-symbol" placeholder="Blank = same symbol"></label>
+    <label>Strategy
+      <select id="bt-mode">
+        <option value="both">Both (regime selects strategy)</option>
+        <option value="ic">Iron condors only</option>
+        <option value="buying">Option buying only</option>
+      </select>
+    </label>
+    <label>Contracts <input id="bt-contracts" type="number" min="1" value="1"></label>
+    <label>Max re-entries/day <input id="bt-reentries" type="number" min="0" value="0"></label>
+    <label>IC short-strike offset ($) <input id="bt-offset" type="number" min="0" step=".5" value="1"></label>
+    <label>IC wing width ($) <input id="bt-wing" type="number" min=".5" step=".5" value="2"></label>
+    <label>Long option target |delta| <input id="bt-delta" type="number" min=".05" max=".49" step=".05" value=".30"></label>
+    <label>Strike increment ($) <input id="bt-step" type="number" min=".01" step=".5" value="1"></label>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;margin:14px 0">
+    <button id="bt-run" class="btn btn-primary">Run backtest</button>
+    <span id="bt-status" style="color:var(--muted,#94a3b8)"></span>
+  </div>
+  <div id="bt-summary"></div>
+  <div id="bt-trades" style="overflow:auto;margin-top:14px"></div>
+</div>
+<script>
+(() => {
+  const today = new Date().toISOString().slice(0,10);
+  document.getElementById('bt-to').value = today;
+  document.getElementById('bt-from').value = today;
+  const esc = value => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  async function loadWatchlists() {
+    const r = await fetch('/intraday-backtest/api/watchlists');
+    const data = await r.json();
+    const select = document.getElementById('bt-watchlist');
+    (data.watchlists || []).forEach(w => {
+      const option = document.createElement('option');
+      option.value = w.id; option.textContent = `${w.name} (${w.symbol_count})`;
+      select.appendChild(option);
+    });
+  }
+  function number(id) { return Number(document.getElementById(id).value); }
+  document.getElementById('bt-run').onclick = async () => {
+    const button = document.getElementById('bt-run'), status = document.getElementById('bt-status');
+    button.disabled = true; status.textContent = 'Running saved-bar backtest…';
+    document.getElementById('bt-summary').innerHTML = '';
+    document.getElementById('bt-trades').innerHTML = '';
+    const body = {
+      date_from: document.getElementById('bt-from').value,
+      date_to: document.getElementById('bt-to').value,
+      watchlist_id: document.getElementById('bt-watchlist').value || null,
+      symbols: document.getElementById('bt-symbols').value,
+      gex_symbol: document.getElementById('bt-gex-symbol').value,
+      mode: document.getElementById('bt-mode').value,
+      contracts: number('bt-contracts'), max_reentries: number('bt-reentries'),
+      ic_offset: number('bt-offset'), wing_width: number('bt-wing'),
+      target_delta: number('bt-delta'), strike_step: number('bt-step')
+    };
+    try {
+      const r = await fetch('/intraday-backtest/api/run', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data.error || 'Backtest failed');
+      const s = data.summary;
+      status.textContent = 'Completed';
+      document.getElementById('bt-summary').innerHTML = `
+        <div style="padding:12px;border:1px solid var(--border,#334155);border-radius:8px;background:var(--card,#111827)">
+          <b>Run ${esc(s.run_id)}</b> · ${s.trades} trade(s) · ${s.winners} winner(s) ·
+          ${s.win_rate_pct}% win rate · <b style="color:${s.total_pnl >= 0 ? '#22c55e' : '#ef4444'}">$${s.total_pnl.toFixed(2)} P&amp;L</b>
+          · ${s.skipped_count} symbol-day(s) skipped
+          <div style="margin-top:7px;font-size:12px;color:var(--muted,#94a3b8)">${esc(s.model)}</div>
+        </div>`;
+      const rows = (data.trades || []).map(t => `<tr>
+        <td>${esc(t.trade_date)}</td><td>${esc(t.symbol)}</td><td>${esc(t.strategy)}</td>
+        <td>${esc(t.direction || '—')}</td><td>${esc(t.entry_at.slice(11,16))}</td>
+        <td>${esc(t.exit_at.slice(11,16))}</td><td>${esc(t.exit_reason)}</td>
+        <td>${t.reentry_number}</td><td style="color:${t.pnl >= 0 ? '#22c55e' : '#ef4444'}">$${t.pnl.toFixed(2)}</td>
+      </tr>`).join('');
+      const skipped = (s.skipped || []).slice(0,30).map(x => `${esc(x.date)} ${esc(x.symbol)}: ${esc(x.reason)}`).join('<br>');
+      document.getElementById('bt-trades').innerHTML = `
+        <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>
+          <th>Date</th><th>Symbol</th><th>Strategy</th><th>Direction</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Re-entry</th><th>P&amp;L</th>
+        </tr></thead><tbody>${rows || '<tr><td colspan="9">No eligible trades. Check saved GEX plans, premarket levels, and 2-minute data for the selected dates.</td></tr>'}</tbody></table>
+        ${skipped ? `<details style="margin-top:12px"><summary>Skipped data (${s.skipped_count})</summary><div style="margin-top:6px;color:var(--muted,#94a3b8)">${skipped}</div></details>` : ''}`;
+    } catch (e) { status.textContent = 'Error: ' + e.message; }
+    finally { button.disabled = false; }
+  };
+  loadWatchlists().catch(() => {});
+})();
+</script>
+{% endblock %}
