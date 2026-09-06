@@ -9,6 +9,10 @@ _ET = ZoneInfo("America/New_York")
 
 def _conn():
     con = sqlite3.connect(DB_PATH, timeout=30)
+    # Match the application-wide SQLite policy: WAL lets readers proceed
+    # while the small end-of-day upsert is pending, and busy_timeout avoids
+    # needless failures if another scheduler briefly owns the writer lock.
+    con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=30000")
     return con
 
