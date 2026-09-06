@@ -28,6 +28,10 @@ wl_bp = Blueprint("wl_bp", __name__, url_prefix="/watchlists")
 # to a request that LOOKS stuck).
 _fetch_in_progress = set()
 _fetch_in_progress_lock = threading.Lock()
+# The one-minute extended-hours fetch is independent from daily/OI fetches,
+# but a duplicate would create redundant DXLink subscriptions, so guard it too.
+_intraday_fetch_in_progress = set()
+_intraday_fetch_in_progress_lock = threading.Lock()
 from ..config import DB_PATH as _OIAPP_DB_PATH  # centralized DB location
 DB_PATH = _OIAPP_DB_PATH
 
@@ -130,7 +134,9 @@ def _ensure_tables():
                     schedule_indicators_last_date TEXT,
                     schedule_corporate_events_last_date TEXT,
                     schedule_volume_profile_time TEXT,
-                    schedule_volume_profile_last_date TEXT
+                    schedule_volume_profile_last_date TEXT,
+                    schedule_intraday_price_time TEXT,
+                    schedule_intraday_price_last_date TEXT
                 );
                 CREATE TABLE IF NOT EXISTS corporate_events_snapshot (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -221,6 +227,8 @@ def _ensure_tables():
                 "ALTER TABLE watchlists ADD COLUMN schedule_corporate_events_last_date TEXT",
                 "ALTER TABLE watchlists ADD COLUMN schedule_volume_profile_time TEXT",
                 "ALTER TABLE watchlists ADD COLUMN schedule_volume_profile_last_date TEXT",
+                "ALTER TABLE watchlists ADD COLUMN schedule_intraday_price_time TEXT",
+                "ALTER TABLE watchlists ADD COLUMN schedule_intraday_price_last_date TEXT",
             ):
                 try:
                     con.execute(_ddl)
@@ -631,6 +639,8 @@ def list_watchlists():
                COALESCE(w.schedule_corporate_events_last_date, '') as schedule_corporate_events_last_date,
                COALESCE(w.schedule_volume_profile_time, '') as schedule_volume_profile_time,
                COALESCE(w.schedule_volume_profile_last_date, '') as schedule_volume_profile_last_date,
+               COALESCE(w.schedule_intraday_price_time, '') as schedule_intraday_price_time,
+               COALESCE(w.schedule_intraday_price_last_date, '') as schedule_intraday_price_last_date,
                COUNT(ws.id) as symbol_count
         FROM watchlists w
         LEFT JOIN watchlist_symbols ws ON ws.watchlist_id = w.id
@@ -709,7 +719,8 @@ def update_watchlist(wl_id):
     vals   = []
     for col in ["name","description","fetch_options_oi","color",
                 "schedule_price_oi_time","schedule_earnings_time","schedule_indicators_time",
-                "schedule_corporate_events_time","schedule_volume_profile_time"]:
+                "schedule_corporate_events_time","schedule_volume_profile_time",
+                "schedule_intraday_price_time"]:
         if col in d:
             fields.append(f"{col}=?")
             vals.append(1 if (col=="fetch_options_oi" and d[col]) else (d[col] or None))
@@ -1147,6 +1158,7 @@ def watchlist_fetch_history(wl_id):
         "fetch_oi": f"wl_fetch_oi_{wl_id}",
         "backfill_history": f"wl_backfill_history_{wl_id}",
         "backfill_intraday": f"wl_backfill_intraday_{wl_id}",
+        "fetch_intraday_price": f"wl_fetch_intraday_price_{wl_id}",
     }
     out = {}
     for label, key in actions.items():
@@ -1571,6 +1583,58 @@ def fetch_data_for_watchlist(wl_id):
         oi_source=oi_source,
     )
     return jsonify(payload), status
+
+
+def _fetch_intraday_price_for_watchlist_core(wl_id: int) -> dict:
+    """Fetch one completed 04:00--16:00 ET session for every symbol.
+
+    One-minute source bars are aggregated before storage in
+    intraday_2m_price_cache, matching the strategy's two-minute chart and
+    avoiding unnecessary SQLite rows.  premarket_levels stores the derived 04:00--09:29
+    ET high/low for each symbol and date.
+    """
+    _ensure_tables()
+    from ..services.intraday_price_cache import fetch_watchlist_intraday
+    return fetch_watchlist_intraday(wl_id)
+
+
+@wl_bp.route("/<int:wl_id>/fetch_intraday_price", methods=["POST"])
+def fetch_intraday_price_for_watchlist(wl_id):
+    """Start an end-of-day extended-hours price fetch without blocking HTTP."""
+    _ensure_tables()
+    with _intraday_fetch_in_progress_lock:
+        if wl_id in _intraday_fetch_in_progress:
+            return jsonify({"ok": False, "error": "An intraday price fetch is already running for this watchlist"}), 409
+        _intraday_fetch_in_progress.add(wl_id)
+
+    def _run():
+        run_id = None
+        try:
+            from ..services.job_registry import log_run_start, log_run_finish
+            run_id = log_run_start(f"wl_fetch_intraday_price_{wl_id}")
+            result = _fetch_intraday_price_for_watchlist_core(wl_id)
+            ok = bool(result.get("ok"))
+            log_run_finish(
+                run_id, ok,
+                f"{result.get('symbols', 0)} symbol(s); "
+                f"{sum(r.get('bars', 0) for r in result.get('results', []))} two-minute bars",
+            )
+            print(f"[watchlist_manager] intraday price fetch for watchlist_id={wl_id}: {result}")
+        except Exception as exc:
+            print(f"[watchlist_manager] intraday price fetch FAILED for watchlist_id={wl_id}: {exc}")
+            if run_id is not None:
+                try:
+                    from ..services.job_registry import log_run_finish
+                    log_run_finish(run_id, False, str(exc))
+                except Exception:
+                    pass
+        finally:
+            with _intraday_fetch_in_progress_lock:
+                _intraday_fetch_in_progress.discard(wl_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True, "started": True, "watchlist_id": wl_id,
+                    "message": "Fetching extended-hours data and storing two-minute bars for backtests."})
 
 
 @wl_bp.route("/<int:wl_id>/fetch_status")
