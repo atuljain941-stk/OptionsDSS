@@ -156,13 +156,15 @@ def build_occ_option_symbol(root_symbol: str, expiration, option_type: str, stri
 
 
 async def _collect_summary_until_quiet(streamer, summary_event, expected_symbols, summary_map,
-                                       greeks_done, quiet_after_greeks: float = 3.0) -> None:
+                                       greeks_done, quiet_after_greeks: float = 8.0) -> None:
     """Collect the Summary snapshot after Greeks has completed too.
 
     Summary carries open_interest. Greeks commonly completes first, so ending
     this listener on greeks_done discarded nearly the entire OI snapshot.
     Continue until all requested symbols arrive or the Summary stream is quiet
-    for a short post-Greeks grace window.
+    for a short post-Greeks grace window. Eight seconds is intentional:
+    large option chains can take longer than the Greeks snapshot to deliver
+    their Summary values, especially immediately after a fresh subscription.
     """
     expected = set(expected_symbols)
     listener = streamer.listen(summary_event)
