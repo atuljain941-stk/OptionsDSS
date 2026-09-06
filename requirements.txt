@@ -1,5 +1,0 @@
-flask
-yfinance
-pandas
-waitress
-tastytrade
