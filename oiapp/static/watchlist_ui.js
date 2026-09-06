@@ -263,6 +263,7 @@ function _wlRenderTable() {
         ${_scheduleStepRow(wl, 'schedule_indicators_time', 'schedule_indicators_last_date', 'Indicators', wl.id, true)}
         ${_scheduleStepRow(wl, 'schedule_corporate_events_time', 'schedule_corporate_events_last_date', 'Corp Events', wl.id, true)}
         ${_scheduleStepRow(wl, 'schedule_volume_profile_time', 'schedule_volume_profile_last_date', 'Vol Profile', wl.id, true)}
+        ${_scheduleStepRow(wl, 'schedule_intraday_price_time', 'schedule_intraday_price_last_date', 'Intraday 2m', wl.id, false)}
       </td>
       <td style="padding:8px 10px;vertical-align:top">
         <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
@@ -270,6 +271,11 @@ function _wlRenderTable() {
             title="${wl.fetch_options_oi?'Fetch Options OI chain → options table':'Fetch OHLCV → price_cache table'}"
             style="font-size:11px;padding:3px 10px;border-radius:4px;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);color:#22c55e;cursor:pointer;white-space:nowrap">
             ${wl.fetch_options_oi?'📊 Fetch OI':'💰 Fetch Price'}
+          </button>
+          <button onclick="_wlRunIntradayPrice(${wl.id},'${nm}')" id="wl-intraday-price-${wl.id}"
+            title="Fetch Tastytrade extended-hours candles once, then store compact two-minute bars plus premarket high/low for backtests. It does not poll every minute."
+            style="font-size:11px;padding:3px 10px;border-radius:4px;background:rgba(14,165,233,.12);border:1px solid rgba(14,165,233,.3);color:#38bdf8;cursor:pointer;white-space:nowrap">
+            ⏱ Fetch Intraday (2m)
           </button>
           ${wl.fetch_options_oi ? `
           <select id="wl-oi-source-${wl.id}" title="yfinance: fast, no real Greeks. tastytrade: real broker Greeks (delta/gamma/theta/vega), ~20s/symbol -- meant for long, unattended off-hours runs, not a quick daytime check."
@@ -651,6 +657,7 @@ async function _wlShowFetchHistory(wlId, wlName) {
     const labels = {
       fetch_price: '💰 Fetch Price', fetch_oi: '📊 Fetch OI',
       backfill_history: '📈 Backfill History', backfill_intraday: '⏱ Backfill Intraday',
+      fetch_intraday_price: '⏱ Fetch Intraday (2m)',
     };
     const rows = Object.entries(labels).map(([key, label]) => {
       const a = d.actions[key];
@@ -731,6 +738,7 @@ const _WL_SCHEDULE_FIELD_LABELS = {
   schedule_indicators_time: 'Indicators',
   schedule_corporate_events_time: 'Corp Events',
   schedule_volume_profile_time: 'Vol Profile',
+  schedule_intraday_price_time: 'Intraday 2m',
 };
 
 async function _wlSetSchedule(id, field, value) {
@@ -931,4 +939,27 @@ async function _wlDelete(id, name) {
     await _wlLoad();
     addNotif('ok', 'Deleted: '+name, '', 'Watchlists');
   } catch(e) { addNotif('error', 'Delete failed', e.message, 'Watchlists'); }
+}
+
+
+async function _wlRunIntradayPrice(id, name) {
+  const st = document.getElementById('wl-status-' + id);
+  const btn = document.getElementById('wl-intraday-price-' + id);
+  if (btn) btn.disabled = true;
+  if (st) st.textContent = '⏳ Starting extended-hours 2m fetch…';
+  try {
+    const result = await api(`/watchlists/${id}/fetch_intraday_price`, { method: 'POST' });
+    if (!result.ok) throw new Error(result.error || 'Start failed');
+    if (st) st.textContent = '✅ Intraday fetch running in background';
+    addNotif('info', name + ': intraday fetch started',
+      'One end-of-day Tastytrade request per symbol; compact 2m bars + premarket high/low will be saved.', 'Watchlists');
+    // Completion is recorded under Fetch History.  Re-enable the manual
+    // button after a short cooldown; a duplicate request is still rejected
+    // server-side while the actual broker fetch is running.
+    setTimeout(() => { if (btn) btn.disabled = false; }, 3000);
+  } catch (e) {
+    if (st) st.textContent = '❌ ' + e.message;
+    if (btn) btn.disabled = false;
+    addNotif('error', name + ': intraday fetch failed', e.message, 'Watchlists');
+  }
 }

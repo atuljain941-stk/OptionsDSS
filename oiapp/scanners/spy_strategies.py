@@ -3876,62 +3876,13 @@ def _ensure_gex_snapshot_table():
 
 
 def _cleanup_gex_plan_snapshots(con=None, symbol=None, keep_limit=None):
-    """Keep only the current trading day's latest GEX Plan snapshot rows.
+    """Compatibility no-op.
 
-    GEX Plan snapshots are an intraday UI cache.  Stale rows from prior days can
-    make today's plan look inconsistent, so cleanup runs on every save/load.
-    By default we keep only the latest saved row per symbol for today; set
-    GEX_PLAN_TODAY_SNAPSHOT_LIMIT to a higher value if you want multiple
-    intraday runs retained for the same symbol.
+    GEX plans are now retained as historical, date-filterable backtest inputs.
+    Older versions deleted prior days and trimmed the current day as a UI cache;
+    this function intentionally performs no deletion.
     """
-    own = con is None
-    if own:
-        _ensure_gex_snapshot_table()
-        con = _conn()
-    try:
-        try:
-            keep_limit = int(keep_limit if keep_limit is not None else os.getenv('GEX_PLAN_TODAY_SNAPSHOT_LIMIT', '1') or 1)
-        except Exception:
-            keep_limit = 1
-        keep_limit = max(1, min(25, keep_limit))
-
-        # Delete everything not captured on the workstation's current local day.
-        con.execute(
-            """
-            DELETE FROM gex_plan_snapshots
-            WHERE captured_at IS NULL
-               OR (substr(COALESCE(captured_at,''),1,10) <> date('now', 'localtime')
-                   AND COALESCE(date(captured_at, 'localtime'),'') <> date('now', 'localtime'))
-            """
-        )
-
-        # Then trim today's rows to the latest N per symbol so the panel does not
-        # keep growing during repeated refreshes/on-demand saves.
-        if symbol:
-            symbols = [str(symbol or 'SPY').upper()]
-        else:
-            symbols = [str(r[0]).upper() for r in con.execute("SELECT DISTINCT symbol FROM gex_plan_snapshots").fetchall()]
-        for sym in symbols:
-            con.execute(
-                """
-                DELETE FROM gex_plan_snapshots
-                WHERE symbol=?
-                  AND id NOT IN (
-                    SELECT id FROM gex_plan_snapshots
-                    WHERE symbol=?
-                      AND (substr(COALESCE(captured_at,''),1,10) = date('now', 'localtime')
-                           OR COALESCE(date(captured_at, 'localtime'),'') = date('now', 'localtime'))
-                    ORDER BY datetime(captured_at) DESC, id DESC
-                    LIMIT ?
-                  )
-                """,
-                (sym, sym, keep_limit),
-            )
-        if own:
-            con.commit()
-    finally:
-        if own:
-            con.close()
+    return None
 
 
 def _save_daily_plan_snapshot(payload, label='snapshot'):
@@ -3964,50 +3915,29 @@ def _save_daily_plan_snapshot(payload, label='snapshot'):
                 json.dumps(_json_safe(payload_to_store), allow_nan=False),
             ),
         )
-        # Keep today's latest snapshot only by default so repeated refreshes do not
-        # grow the panel indefinitely during the same trading day.
-        try:
-            keep_limit = max(1, int(os.getenv('GEX_PLAN_TODAY_SNAPSHOT_LIMIT', '1') or 1))
-        except Exception:
-            keep_limit = 1
-        con.execute(
-            """
-            DELETE FROM gex_plan_snapshots
-            WHERE symbol=?
-              AND id NOT IN (
-                SELECT id FROM gex_plan_snapshots
-                WHERE symbol=?
-                  AND (substr(COALESCE(captured_at,''),1,10) = date('now', 'localtime')
-                   OR COALESCE(date(captured_at, 'localtime'),'') = date('now', 'localtime'))
-                ORDER BY datetime(captured_at) DESC, id DESC
-                LIMIT ?
-              )
-            """,
-            (str(payload.get('symbol') or 'SPY').upper(), str(payload.get('symbol') or 'SPY').upper(), keep_limit),
-        )
+        # Snapshots are retained permanently for date-filtered review and backtesting.
         con.commit()
         return True
     finally:
         con.close()
 
 
-def _load_daily_plan_snapshots(symbol='SPY', limit=4):
+def _load_daily_plan_snapshots(symbol='SPY', limit=4, snapshot_date=None):
     _ensure_gex_snapshot_table()
     con = _conn()
     try:
-        _cleanup_gex_plan_snapshots(con, symbol=str(symbol or 'SPY').upper())
-        con.commit()
+        # Default to today for the live UI, but permit any saved date for review.
+        selected_date = str(snapshot_date or date.today().isoformat())[:10]
         rows = con.execute(
             """
             SELECT captured_at, label, spot, score, confidence, bias, regime, expiry, payload_json
             FROM gex_plan_snapshots
             WHERE symbol=?
-              AND (substr(COALESCE(captured_at,''),1,10) = date('now', 'localtime')
-                   OR COALESCE(date(captured_at, 'localtime'),'') = date('now', 'localtime'))
+              AND substr(COALESCE(captured_at,''),1,10)=?
             ORDER BY datetime(captured_at) DESC, id DESC
             LIMIT ?
             """,
-            (str(symbol or 'SPY').upper(), int(limit or 4)),
+            (str(symbol or 'SPY').upper(), selected_date, int(limit or 4)),
         ).fetchall()
         out = []
         for r in rows:
@@ -4407,9 +4337,8 @@ def api_daily_plan():
         snapshot_saved = bool(_save_daily_plan_snapshot(payload, label=label))
     payload["snapshot_saved"] = snapshot_saved
     payload["snapshot_retention"] = {
-        "policy": "today_latest_only",
-        "keep_limit": max(1, int(os.getenv('GEX_PLAN_TODAY_SNAPSHOT_LIMIT', '1') or 1)),
-        "local_date": date.today().isoformat(),
+        "policy": "retained_by_date",
+        "selected_date": date.today().isoformat(),
     }
     payload["snapshots"] = _load_daily_plan_snapshots(sym, limit=12)
     return jsonify(_json_safe(payload))
@@ -4420,12 +4349,16 @@ def api_daily_plan():
 def api_daily_plan_snapshots():
     sym = (request.args.get("symbol") or "SPY").upper()
     limit = request.args.get("limit", 4, type=int)
-    _cleanup_gex_plan_snapshots(symbol=sym)
-    keep_limit = max(1, int(os.getenv('GEX_PLAN_TODAY_SNAPSHOT_LIMIT', '1') or 1))
+    selected_date = (request.args.get("date") or date.today().isoformat())[:10]
+    try:
+        date.fromisoformat(selected_date)
+    except ValueError:
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
     return jsonify(_json_safe({
         "symbol": sym,
-        "retention": {"policy": "today_latest_only", "keep_limit": keep_limit, "local_date": date.today().isoformat()},
-        "snapshots": _load_daily_plan_snapshots(sym, limit=max(1, limit)),
+        "date": selected_date,
+        "retention": {"policy": "retained_by_date"},
+        "snapshots": _load_daily_plan_snapshots(sym, limit=max(1, limit), snapshot_date=selected_date),
     }))
 
 def _gex_trade_suggestions(sym, exp, dte, spot, iv_atm, score, gex_info, walls, sigma_1d, pcr, rows):

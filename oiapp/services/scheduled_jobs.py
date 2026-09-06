@@ -164,8 +164,15 @@ def _run_gex_snapshot(app, symbol: str, label: str) -> None:
         with app.test_request_context(f'/spy/daily_plan?symbol={symbol}'):
             resp = api_daily_plan()
             payload = resp.get_json() if hasattr(resp, 'get_json') else None
-            if payload and not payload.get('error'):
-                _save_daily_plan_snapshot(payload, label=label)
+            if not payload or payload.get('error'):
+                raise RuntimeError(f"{symbol} GEX plan failed: {(payload or {}).get('error', 'no payload')}")
+            _save_daily_plan_snapshot(payload, label=label)
+
+
+def _run_gex_premarket_snapshots(app) -> None:
+    """Persist the 8:45 AM ET GEX plan for every intraday 0DTE symbol."""
+    for symbol in ("SPY", "QQQ", "IWM"):
+        _run_gex_snapshot(app, symbol, "08:45 premarket")
 
 
 def _run_oib_snapshot(app) -> None:
@@ -224,8 +231,9 @@ def _scheduler_loop(app) -> None:
          lambda: _run_morning_data_pipeline(app), {"times": ["07:30"], "weekdays": None}, None),
         ('oib_snapshot', 'OI Buildup snapshot', 'Runs the OI buildup screener and saves a snapshot.',
          lambda: _run_oib_snapshot(app), {"times": ["08:00"], "weekdays": None}, None),
-        ('gex_snapshot_pre', 'GEX plan (premarket)', 'Saves an SPY daily GEX/plan snapshot before the open.',
-         lambda: _run_gex_snapshot(app, 'SPY', '08:45 premarket'), {"times": ["08:45"], "weekdays": None}, None),
+        ('gex_snapshot_pre', 'GEX plan (premarket)',
+         'Saves retained 8:45 AM GEX-plan snapshots for SPY, QQQ, and IWM.',
+         lambda: _run_gex_premarket_snapshots(app), {"times": ["08:45"], "weekdays": [0, 1, 2, 3, 4]}, (0, 1, 2, 3, 4)),
         ('weekly_plan_snapshot', 'Weekly plan snapshot', 'Saves the SPY weekly options plan (Mondays only).',
          lambda: _run_weekly_plan_snapshot(app), {"times": ["10:00"], "weekdays": [0]}, (0,)),
         ('weekly_plan_grading', 'Weekly plan grading (backtest)',
@@ -345,7 +353,7 @@ def _notify_job(alert_type: str, title: str, detail: str, severity: str = "ok") 
 
 def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
     """One watchlist's worth of the sequence: price/OI -> earnings ->
-    indicators -> corporate events -> volume profile. Each step only
+    indicators -> corporate events -> volume profile -> intraday price. Each step only
     executes if it HAS a configured time (blank/None means "don't run this
     step" -- opt-in per watchlist, per step) AND that time has passed today
     AND it hasn't already run today. All steps after price/OI additionally
@@ -357,8 +365,8 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
     deliberately left unset on a dependency-skip) until price/OI actually
     completes, then cascades immediately within that same tick.
     """
-    (wl_id, wl_name, t_price, t_earn, t_ind, t_events, t_vp,
-     d_price, d_earn, d_ind, d_events, d_vp) = row
+    (wl_id, wl_name, t_price, t_earn, t_ind, t_events, t_vp, t_intraday,
+     d_price, d_earn, d_ind, d_events, d_vp, d_intraday) = row
 
     price_ran_today = (d_price == today)
 
@@ -497,6 +505,31 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
             _set_watchlist_schedule_date(wl_id, "schedule_volume_profile_last_date", today)
 
 
+    # This is deliberately independent of the normal price/OI job: it is an
+    # end-of-day snapshot for intraday backtests, and needs no per-minute
+    # polling.  Tastytrade's 1m response is compacted to 2m before SQLite.
+    if t_intraday and d_intraday != today and hh_mm >= t_intraday:
+        if _dt.datetime.now().weekday() >= 5:
+            print(f"[watchlist_schedule] intraday price for '{wl_name}': weekend, skipped")
+        else:
+            try:
+                from ..scanners.watchlist_manager import _fetch_intraday_price_for_watchlist_core
+                result = _fetch_intraday_price_for_watchlist_core(wl_id)
+                bars = sum(r.get("bars", 0) for r in result.get("results", []))
+                print(f"[watchlist_schedule] intraday price for '{wl_name}': {result}")
+                _notify_job(
+                    "WATCHLIST_INTRADAY_PRICE",
+                    f"Intraday price fetch finished: \"{wl_name}\"",
+                    f"{result.get('symbols', 0)} symbol(s), {bars} two-minute bars (04:00--16:00 ET)",
+                    severity="ok" if result.get("ok") else "warn",
+                )
+            except Exception as e:
+                print(f"[watchlist_schedule] intraday price for '{wl_name}' FAILED: {e}")
+                _notify_job("WATCHLIST_INTRADAY_PRICE",
+                            f"Intraday price fetch FAILED: \"{wl_name}\"", str(e), severity="error")
+        _set_watchlist_schedule_date(wl_id, "schedule_intraday_price_last_date", today)
+
+
 def _run_future_oi_if_due(today: str, hh_mm: str) -> None:
     """Global (not per-watchlist) futures OI schedule time, stored as a
     single app_setting rather than a watchlists column since futures
@@ -553,9 +586,9 @@ def _watchlist_schedule_loop(app) -> None:
                 try:
                     rows = con.execute("""
                         SELECT id, name, schedule_price_oi_time, schedule_earnings_time, schedule_indicators_time,
-                               schedule_corporate_events_time, schedule_volume_profile_time,
+                               schedule_corporate_events_time, schedule_volume_profile_time, schedule_intraday_price_time,
                                schedule_price_oi_last_date, schedule_earnings_last_date, schedule_indicators_last_date,
-                               schedule_corporate_events_last_date, schedule_volume_profile_last_date
+                               schedule_corporate_events_last_date, schedule_volume_profile_last_date, schedule_intraday_price_last_date
                         FROM watchlists
                     """).fetchall()
                 finally:

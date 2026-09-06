@@ -46,6 +46,7 @@ still get stored; strikes with confirmed zero OI don't.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -53,7 +54,12 @@ from typing import Any, Dict, List, Optional
 from ..config import DB_PATH as _OIAPP_DB_PATH
 
 DEFAULT_MAX_ITEMS_PER_TICK = 3  # ~3 symbols x ~20s each = ~60s per tick, matching the 90s scheduler interval below with room to spare
-DEFAULT_MONTHS_AHEAD = 2
+DEFAULT_MAX_DTE = 50
+DEFAULT_WEEKLY_EXPIRY_LIMIT = 8
+# Number of strike prices on each side of spot, per selected expiry. Each
+# selected strike includes its call and put, so 20 each side means up to
+# roughly 80 option contracts per expiry.
+DEFAULT_STRIKES_EACH_SIDE = max(1, int(os.environ.get("OIAPP_TASTYTRADE_STRIKES_EACH_SIDE", "20")))
 
 
 def _conn():
@@ -69,14 +75,19 @@ def _ensure_queue_table(con) -> None:
         queued_at TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         last_error TEXT,
-        months_ahead INTEGER NOT NULL DEFAULT 2,
+        max_dte INTEGER NOT NULL DEFAULT 50,
         expiries_covered INTEGER,
         rows_written INTEGER
     )""")
+    # Existing installations created the queue before max_dte existed.
+    columns = {row[1] for row in con.execute("PRAGMA table_info(tastytrade_options_backfill_queue)")}
+    if "max_dte" not in columns:
+        con.execute("ALTER TABLE tastytrade_options_backfill_queue ADD COLUMN max_dte INTEGER NOT NULL DEFAULT 50")
+    con.execute("UPDATE tastytrade_options_backfill_queue SET max_dte=? WHERE max_dte IS NULL OR max_dte < 1", (DEFAULT_MAX_DTE,))
     con.execute("CREATE INDEX IF NOT EXISTS idx_tt_backfill_status ON tastytrade_options_backfill_queue(status, queued_at)")
 
 
-def enqueue_symbol(symbol: str, months_ahead: int = DEFAULT_MONTHS_AHEAD) -> Dict[str, Any]:
+def enqueue_symbol(symbol: str, max_dte: int = DEFAULT_MAX_DTE) -> Dict[str, Any]:
     """Queues a symbol for backfill -- fast, no tastytrade call at all
     here (expiry discovery now happens inside the batched fetch itself,
     at processing time, not as a separate up-front step). Safe to call
@@ -87,8 +98,8 @@ def enqueue_symbol(symbol: str, months_ahead: int = DEFAULT_MONTHS_AHEAD) -> Dic
         _ensure_queue_table(con)
         now = datetime.now().isoformat(timespec="seconds")
         cur = con.execute(
-            "INSERT OR IGNORE INTO tastytrade_options_backfill_queue (symbol, queued_at, status, months_ahead) VALUES (?,?,'pending',?)",
-            (symbol.upper(), now, months_ahead),
+            "INSERT OR IGNORE INTO tastytrade_options_backfill_queue (symbol, queued_at, status, max_dte) VALUES (?,?,'pending',?)",
+            (symbol.upper(), now, max(1, int(max_dte))),
         )
         con.commit()
         return {"ok": True, "queued": cur.rowcount}
@@ -96,7 +107,7 @@ def enqueue_symbol(symbol: str, months_ahead: int = DEFAULT_MONTHS_AHEAD) -> Dic
         con.close()
 
 
-def enqueue_watchlist(symbols: List[str], months_ahead: int = DEFAULT_MONTHS_AHEAD) -> Dict[str, Any]:
+def enqueue_watchlist(symbols: List[str], max_dte: int = DEFAULT_MAX_DTE) -> Dict[str, Any]:
     """Enqueues every symbol given. This itself is fast (just queue
     inserts, no tastytrade calls) -- the resulting queue takes roughly
     20s/symbol to actually drain via the throttled background job."""
@@ -107,8 +118,8 @@ def enqueue_watchlist(symbols: List[str], months_ahead: int = DEFAULT_MONTHS_AHE
         queued = 0
         for sym in symbols:
             cur = con.execute(
-                "INSERT OR IGNORE INTO tastytrade_options_backfill_queue (symbol, queued_at, status, months_ahead) VALUES (?,?,'pending',?)",
-                (sym.upper(), now, months_ahead),
+                "INSERT OR IGNORE INTO tastytrade_options_backfill_queue (symbol, queued_at, status, max_dte) VALUES (?,?,'pending',?)",
+                (sym.upper(), now, max(1, int(max_dte))),
             )
             queued += cur.rowcount
         con.commit()
@@ -118,8 +129,8 @@ def enqueue_watchlist(symbols: List[str], months_ahead: int = DEFAULT_MONTHS_AHE
 
 
 def _write_chain_rows(symbol: str, expiry: str, rows: List[dict]) -> int:
-    """OI=0 gate applied HERE, before any row reaches the table. Same
-    DELETE-then-INSERT pattern db.py's store_option_chain already uses
+    """Only positive-OI rows are written here; zero or missing OI is skipped.
+    Same DELETE-then-INSERT pattern db.py's store_option_chain already uses
     for same-day re-fetches, so re-running a backfill for a symbol that
     already has tastytrade data today replaces it rather than
     duplicating rows. Called once per expiry found in a symbol's batched
@@ -159,10 +170,11 @@ def _write_chain_rows(symbol: str, expiry: str, rows: List[dict]) -> int:
         con.close()
 
 
-def fetch_and_store_symbol(symbol: str, months_ahead: int = DEFAULT_MONTHS_AHEAD) -> Dict[str, Any]:
-    """One batched call covering every expiry within months_ahead for
-    this symbol -- see this module's docstring for why this replaced
-    the original per-expiry-loop design.
+def fetch_and_store_symbol(symbol: str, max_dte: int = DEFAULT_MAX_DTE) -> Dict[str, Any]:
+    """One batched call covering daily expiries through max_dte, or at
+    most eight dates for a weekly-only chain, and only the configured
+    number of strikes on each side of spot. See this module's docstring
+    for why this replaced the original per-expiry-loop design.
 
     ok=True here means the DXLink session/subscription succeeded --
     it does NOT by itself mean any data was actually written. This
@@ -175,7 +187,12 @@ def fetch_and_store_symbol(symbol: str, months_ahead: int = DEFAULT_MONTHS_AHEAD
     know whether this symbol actually produced anything.
     """
     from .tastytrade_feed import feed
-    result = feed.get_multi_expiry_chain_snapshot(symbol, months_ahead=months_ahead, strikes_each_side=None)
+    result = feed.get_multi_expiry_chain_snapshot(
+        symbol,
+        max_dte=max(1, int(max_dte)),
+        weekly_expiry_limit=DEFAULT_WEEKLY_EXPIRY_LIMIT,
+        strikes_each_side=DEFAULT_STRIKES_EACH_SIDE,
+    )
     if not result.get("ok"):
         return {"ok": False, "error": result.get("error"), "expiries_covered": 0, "rows_written": 0}
     by_expiry = result.get("by_expiry") or {}
@@ -211,7 +228,7 @@ def run_pending_backfills(max_items: int = DEFAULT_MAX_ITEMS_PER_TICK) -> Dict[s
     try:
         _ensure_queue_table(con)
         rows = con.execute(
-            "SELECT symbol, months_ahead FROM tastytrade_options_backfill_queue WHERE status='pending' ORDER BY queued_at ASC LIMIT ?",
+            "SELECT symbol, max_dte FROM tastytrade_options_backfill_queue WHERE status='pending' ORDER BY queued_at ASC LIMIT ?",
             (max_items,),
         ).fetchall()
     finally:
@@ -219,10 +236,10 @@ def run_pending_backfills(max_items: int = DEFAULT_MAX_ITEMS_PER_TICK) -> Dict[s
 
     result = {"processed": 0, "succeeded": 0, "failed": 0, "rows_written": 0, "expiries_covered": 0}
     for row in rows:
-        symbol, months_ahead = row[0], row[1]
+        symbol, max_dte = row[0], row[1]
         result["processed"] += 1
         try:
-            r = fetch_and_store_symbol(symbol, months_ahead=months_ahead)
+            r = fetch_and_store_symbol(symbol, max_dte=max_dte)
             ok = bool(r.get("ok"))
             result["rows_written"] += r.get("rows_written", 0)
             result["expiries_covered"] += r.get("expiries_covered", 0)
@@ -318,7 +335,7 @@ def api_status():
 def api_enqueue_watchlist():
     body = request.get_json(silent=True) or {}
     symbols = body.get("symbols")
-    months_ahead = int(body.get("months_ahead", DEFAULT_MONTHS_AHEAD))
+    max_dte = int(body.get("max_dte", DEFAULT_MAX_DTE))
     if not symbols:
         try:
             con = _conn()
@@ -327,7 +344,7 @@ def api_enqueue_watchlist():
         except Exception as e:
             return jsonify({"ok": False, "error": f"couldn't resolve default symbol list: {e}"}), 500
     try:
-        return jsonify(enqueue_watchlist(symbols, months_ahead=months_ahead))
+        return jsonify(enqueue_watchlist(symbols, max_dte=max_dte))
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -340,8 +357,8 @@ def api_enqueue_symbol():
     symbol = (body.get("symbol") or "").strip().upper()
     if not symbol:
         return jsonify({"ok": False, "error": "symbol required"}), 400
-    months_ahead = int(body.get("months_ahead", DEFAULT_MONTHS_AHEAD))
+    max_dte = int(body.get("max_dte", DEFAULT_MAX_DTE))
     try:
-        return jsonify(enqueue_symbol(symbol, months_ahead=months_ahead))
+        return jsonify(enqueue_symbol(symbol, max_dte=max_dte))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
