@@ -377,7 +377,7 @@ async function _wlRunFetch(id, name) {
         // identical to one still quietly in progress. If a completed run
         // shows up with errors, say so explicitly instead of just "0
         // fetched" until the poll loop times out on its own.
-        if (lr && (lr.fetched + lr.errored + lr.no_options + lr.timed_out) >= lr.total) {
+        if (!s.running && lr && (lr.fetched + lr.errored + lr.no_options + lr.timed_out) >= lr.total) {
           const errPart = lr.errored > 0 ? ` — ⚠ ${lr.errored} errored` : '';
           const noOptPart = lr.no_options > 0 ? ` — ${lr.no_options} had no options chain` : '';
           // timed_out symbols aren't failures -- their fetches keep
@@ -393,7 +393,9 @@ async function _wlRunFetch(id, name) {
           await _wlLoad();
           return;
         }
-        if (st) st.textContent = `📊 ${s.fetched_today}/${s.symbols_total} fetched today → ${s.table}`;
+        const live = s.fetch_progress || {};
+        const liveSuffix = live.message ? ` — ${live.message}` : '';
+        if (st) st.textContent = `${s.running ? '⏳' : '📊'} ${s.fetched_today}/${s.symbols_total} fetched today → ${s.table}${liveSuffix}`;
         // tastytrade runs far longer than yfinance (~20s/symbol at 3-way
         // concurrency vs yfinance's much faster per-symbol cost) -- the
         // original 60-poll (5 min) cutoff was tuned for yfinance and
@@ -401,7 +403,7 @@ async function _wlRunFetch(id, name) {
         // button well before a tastytrade fetch actually finishes,
         // making a legitimately-still-running fetch look abandoned.
         const maxPolls = oiSource === 'tastytrade' ? 400 : 60;  // ~33min vs ~5min
-        if (s.fetched_today >= s.symbols_total || polls > maxPolls) {
+        if (!s.running || polls > maxPolls) {
           clearInterval(poll);
           if (btn) btn.disabled = false;
           addNotif('ok', `${name}: fetch done`, `${s.fetched_today}/${s.symbols_total} → ${s.table}`, 'Watchlists');
@@ -640,11 +642,12 @@ async function _wlShowFetchHistory(wlId, wlName) {
   const overlay = document.createElement('div');
   overlay.id = 'wl-history-popover';
   overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML = `<div style="background:#111827;color:#e5eefc;border-radius:12px;padding:20px;width:420px;max-width:92vw;box-shadow:0 12px 40px rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.1)">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <h3 style="margin:0;font-size:15px">Fetch history — ${wlName}</h3>
+  overlay.innerHTML = `<div style="background:#111827;color:#e5eefc;border-radius:12px;padding:20px;width:580px;max-width:94vw;max-height:82vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.1)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <h3 style="margin:0;font-size:15px">Action history — ${wlName}</h3>
       <button id="wl-history-close" style="background:transparent;border:none;color:#9ca3af;font-size:18px;cursor:pointer;padding:2px 6px">✕</button>
     </div>
+    <div style="font-size:11px;color:#94a3b8;margin-bottom:10px">Latest recorded run plus current progress for every action available on this page.</div>
     <div id="wl-history-body" style="font-size:12.5px;color:var(--muted)">Loading…</div>
   </div>`;
   document.body.appendChild(overlay);
@@ -652,30 +655,63 @@ async function _wlShowFetchHistory(wlId, wlName) {
   document.getElementById('wl-history-close').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
+  const row = (label, state, detail, when = '') => {
+    const color = state === 'running' ? '#fbbf24' : state === 'failed' ? '#ef4444' : state === 'never' ? '#6b7280' : '#22c55e';
+    const icon = state === 'running' ? '⏳' : state === 'failed' ? '❌' : state === 'never' ? '◌' : '✅';
+    return `<div style="padding:8px 0;border-top:1px solid rgba(255,255,255,.08)">
+      <div style="display:flex;justify-content:space-between;gap:12px"><span>${label}</span><span style="color:${color};white-space:nowrap">${icon} ${when}</span></div>
+      ${detail ? `<div style="font-size:11px;color:#a8b5cc;margin-top:3px;line-height:1.35">${detail}</div>` : ''}</div>`;
+  };
+  const recorded = (label, action) => {
+    if (!action) return row(label, 'never', 'Never run');
+    const state = action.status === 'running' ? 'running' : action.status === 'ok' ? 'ok' : 'failed';
+    const when = action.status === 'running' ? `${action.elapsed_sec ?? '?'}s elapsed` : `${_fmtAgo(action.started_at)}${action.duration_sec != null ? ' · ' + action.duration_sec + 's' : ''}`;
+    return row(label, state, action.note || (state === 'ok' ? 'Completed' : 'Failed'), when);
+  };
   try {
-    const d = await api(`/watchlists/${wlId}/fetch_history`);
-    const labels = {
-      fetch_price: '💰 Fetch Price', fetch_oi: '📊 Fetch OI',
-      backfill_history: '📈 Backfill History', backfill_intraday: '⏱ Backfill Intraday',
-      fetch_intraday_price: '⏱ Fetch Intraday (2m)',
-    };
-    const rows = Object.entries(labels).map(([key, label]) => {
-      const a = d.actions[key];
-      if (!a) return `<div style="display:flex;justify-content:space-between;padding:7px 0;border-top:1px solid rgba(255,255,255,.08)">
-        <span>${label}</span><span style="color:#6b7280">never run</span></div>`;
-      const ok = a.status === 'ok';
-      const ago = _fmtAgo(a.started_at);
-      return `<div style="display:flex;justify-content:space-between;padding:7px 0;border-top:1px solid rgba(255,255,255,.08)">
-        <span>${label}</span>
-        <span style="color:${ok ? '#22c55e' : '#ef4444'}" title="${a.note || ''}">${ok ? '✅' : '❌'} ${ago}${a.duration_sec != null ? ` · ${a.duration_sec}s` : ''}</span>
-      </div>`;
-    }).join('');
-    document.getElementById('wl-history-body').innerHTML = rows;
+    const [history, ...liveResults] = await Promise.all([
+      api(`/watchlists/${wlId}/fetch_history`),
+      api(`/watchlists/${wlId}/fetch_status`).catch(() => null),
+      api('/technical-snapshot/api/bulk-compute/status').catch(() => null),
+      api('/watchlists/api/corporate-events-status').catch(() => null),
+      api('/scanner/volume-profile/api/precompute/status').catch(() => null),
+      api('/scanner-builder/api/bulk-backfill/status').catch(() => null),
+      api('/scanner-builder/api/bulk-backfill-intraday/status').catch(() => null),
+      api('/earnings/fetch_status').catch(() => null),
+      api('/api/update_sectors_status').catch(() => null),
+    ]);
+    const [fetch, indicators, corporate, vp, backfill, intradayBackfill, earnings, sectors] = liveResults;
+    const a = history.actions || {};
+    let html = '<div style="font-weight:600;color:#cbd5e1;margin:2px 0 3px">Recorded runs</div>';
+    html += recorded('💰 Fetch Price', a.fetch_price);
+    html += recorded('📊 Fetch OI', a.fetch_oi);
+    html += recorded('📈 Backfill History', a.backfill_history);
+    html += recorded('⏱ Backfill Intraday', a.backfill_intraday);
+    html += recorded('⏱ Fetch Intraday (2m)', a.fetch_intraday_price);
+    html += '<div style="font-weight:600;color:#cbd5e1;margin:14px 0 3px">Live / latest action results</div>';
+    if (fetch) html += row('🔄 Price / OI Fetch', fetch.running ? 'running' : 'ok',
+      `${fetch.fetched_today}/${fetch.symbols_total} written today → ${fetch.table}${fetch.fetch_progress?.message ? ' · ' + fetch.fetch_progress.message : ''}`);
+    if (fetch) html += row('⏱ Fetch Intraday (2m)', fetch.intraday_running ? 'running' : (String(fetch.intraday_progress?.message || '').startsWith('Failed:') ? 'failed' : 'ok'),
+      `${fetch.intraday_progress?.message || 'No active run'}${fetch.intraday_progress?.symbols != null ? ' · ' + fetch.intraday_progress.symbols + ' symbols' : ''}${fetch.intraday_progress?.bars != null ? ' · ' + fetch.intraday_progress.bars + ' bars' : ''}`);
+    if (backfill) html += row('📈 Backfill History', backfill.running ? 'running' : (backfill.failed ? 'failed' : 'ok'),
+      `${backfill.processed || 0}/${backfill.total || 0} processed · ${backfill.succeeded || 0} succeeded · ${backfill.failed || 0} failed${backfill.current_symbol ? ' · ' + backfill.current_symbol : ''}`);
+    if (intradayBackfill) html += row('⏱ Backfill Intraday', intradayBackfill.running ? 'running' : (intradayBackfill.failed ? 'failed' : 'ok'),
+      `${intradayBackfill.processed || 0}/${intradayBackfill.total || 0} processed · ${intradayBackfill.succeeded || 0} succeeded · ${intradayBackfill.failed || 0} failed${intradayBackfill.current_symbol ? ' · ' + intradayBackfill.current_symbol : ''}`);
+    if (indicators) html += row('🧮 Compute Indicators', indicators.running ? 'running' : (indicators.failed ? 'failed' : 'ok'),
+      `${indicators.processed || 0}/${indicators.total || 0} processed · ${indicators.succeeded || 0} succeeded · ${indicators.failed || 0} failed`);
+    if (earnings) html += row('🗓 Earnings + Fundamentals', earnings.running ? 'running' : (earnings.calendar_failed || earnings.fundamentals_errored ? 'failed' : 'ok'),
+      `${earnings.processed || 0}/${earnings.total || 0} processed · ${earnings.calendar_updated || 0} calendar updated · ${earnings.calendar_skipped || 0} skipped · ${earnings.calendar_failed || 0} failed · ${earnings.fundamentals_fetched || 0} fundamentals fetched`);
+    if (corporate) html += row('📋 Corporate Events', corporate.running ? 'running' : (corporate.errors ? 'failed' : 'ok'),
+      `${corporate.processed || 0}/${corporate.total || 0} processed · ${corporate.fetched || 0} fetched · ${corporate.skipped_no_cik || 0} skipped · ${corporate.errors || 0} failed`);
+    if (vp) html += row('📊 Volume Profile', vp.running ? 'running' : (vp.errors ? 'failed' : 'ok'),
+      `${vp.processed || 0}/${vp.total || 0} processed · ${vp.computed || 0} computed · ${vp.errors || 0} failed`);
+    if (sectors) html += row('🏷 Sectors', sectors.done ? (sectors.failed ? 'failed' : 'ok') : 'running',
+      `${sectors.updated || 0} updated · ${sectors.skipped || 0} skipped · ${sectors.failed || 0} failed / ${sectors.total || 0}`);
+    document.getElementById('wl-history-body').innerHTML = html;
   } catch (e) {
     document.getElementById('wl-history-body').innerHTML = `<span style="color:#ef4444">Failed to load: ${e.message}</span>`;
   }
 }
-
 function _pollFetchStatus(st, label) {
   let ticks = 0;
   const timer = setInterval(async () => {
@@ -950,16 +986,39 @@ async function _wlRunIntradayPrice(id, name) {
   try {
     const result = await api(`/watchlists/${id}/fetch_intraday_price`, { method: 'POST' });
     if (!result.ok) throw new Error(result.error || 'Start failed');
-    if (st) st.textContent = '✅ Intraday fetch running in background';
     addNotif('info', name + ': intraday fetch started',
       'One end-of-day Tastytrade request per symbol; compact 2m bars + premarket high/low will be saved.', 'Watchlists');
-    // Completion is recorded under Fetch History.  Re-enable the manual
-    // button after a short cooldown; a duplicate request is still rejected
-    // server-side while the actual broker fetch is running.
-    setTimeout(() => { if (btn) btn.disabled = false; }, 3000);
+    // Keep the row state visible for the whole broker operation. The old
+    // three-second cooldown made a still-running job look finished.
+    let polls = 0;
+    const poll = setInterval(async () => {
+      polls++;
+      try {
+        const s = await api(`/watchlists/${id}/fetch_status`);
+        const p = s.intraday_progress || {};
+        const count = p.symbols ?? s.symbols_total;
+        const bars = p.bars != null ? ` · ${p.bars} 2m bars` : '';
+        if (st) st.textContent = `${s.intraday_running ? '⏳' : '✅'} Intraday 2m: ${p.message || (s.intraday_running ? 'Running' : 'Completed')} · ${count} symbol(s)${bars}`;
+        if (!s.intraday_running || polls > 720) {
+          clearInterval(poll);
+          if (btn) btn.disabled = false;
+          if (!s.intraday_running) {
+            const failed = /^Failed:/.test(String(p.message || ''));
+            addNotif(failed ? 'error' : 'ok', name + (failed ? ': intraday fetch failed' : ': intraday fetch done'),
+              p.message || `${count} symbol(s)${bars}`, 'Watchlists');
+            await _wlLoad();
+          }
+        }
+      } catch (e) {
+        clearInterval(poll);
+        if (st) st.textContent = '❌ Live progress unavailable: ' + e.message;
+        if (btn) btn.disabled = false;
+      }
+    }, 2000);
   } catch (e) {
     if (st) st.textContent = '❌ ' + e.message;
     if (btn) btn.disabled = false;
     addNotif('error', name + ': intraday fetch failed', e.message, 'Watchlists');
   }
 }
+

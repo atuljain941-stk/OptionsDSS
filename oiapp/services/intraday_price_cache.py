@@ -1,7 +1,7 @@
 """End-of-day 2-minute extended-hours cache for intraday backtests."""
 from __future__ import annotations
 import sqlite3
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from ..config import DB_PATH
 
@@ -9,10 +9,8 @@ _ET = ZoneInfo("America/New_York")
 
 def _conn():
     con = sqlite3.connect(DB_PATH, timeout=30)
-    # Match the application-wide SQLite policy: WAL lets readers proceed
-    # while the small end-of-day upsert is pending, and busy_timeout avoids
-    # needless failures if another scheduler briefly owns the writer lock.
-    con.execute("PRAGMA journal_mode=WAL")
+    # WAL is initialized once in oiapp.config; this connection only needs
+    # a bounded wait if another process has the database open.
     con.execute("PRAGMA busy_timeout=30000")
     return con
 
@@ -59,6 +57,17 @@ def fetch_symbol_intraday(symbol: str, trade_date=None) -> dict:
     ensure_tables()
     symbol = str(symbol).upper().strip()
     day = trade_date or datetime.now(_ET).date()
+    if isinstance(day, str):
+        day = date.fromisoformat(day[:10])
+    # A manual EOD click on a weekend should retrieve the preceding session,
+    # not accept a provider's single stale/live candle as Saturday data.
+    if trade_date is None:
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+    now_et = datetime.now(_ET)
+    if day == now_et.date() and now_et.time() < time(16, 5):
+        return {"ok": False, "symbol": symbol, "trade_date": day.isoformat(),
+                "error": "End-of-day intraday fetch is available after 16:05 ET", "bars": 0}
     start = datetime.combine(day, time(4, 0), tzinfo=_ET)
     from .tastytrade_feed import feed
     candles = feed.get_candles(symbol, "1m", start, extended_hours=True,
@@ -81,7 +90,8 @@ def fetch_symbol_intraday(symbol: str, trade_date=None) -> dict:
         minute_rows.append((ts, session, float(o), float(h), float(l),
                      float(cl), float(_value(candle, "volume", "day_volume") or 0)))
     if not minute_rows:
-        return {"ok": False, "symbol": symbol, "error": "Tastytrade returned no 1-minute extended-hours candles", "bars": 0}
+        return {"ok": False, "symbol": symbol, "trade_date": day.isoformat(),
+                "error": "Tastytrade returned no 1-minute extended-hours candles", "bars": 0}
     # The strategy runs on two-minute candles.  Request a single 1m snapshot
     # after the close, but aggregate each consecutive pair before touching SQLite:
     # one network call per symbol/day and roughly half the DB rows of raw 1m data.
@@ -104,6 +114,16 @@ def fetch_symbol_intraday(symbol: str, trade_date=None) -> dict:
         for bucket, values in sorted(buckets.items())
     ]
 
+    regular_rows = [r for r in rows if r[3] == "regular"]
+    pm = [r for r in rows if r[3] == "premarket"]
+    # A completed session normally has about 195 regular 2m candles and
+    # about 165 premarket candles.  Do not poison a backtest with a stale
+    # one-candle response; incomplete data stays out of both cache tables.
+    if len(rows) < 100 or len(regular_rows) < 50 or len(pm) < 20:
+        return {"ok": False, "symbol": symbol, "trade_date": day.isoformat(),
+                "error": "Incomplete Tastytrade session response; no rows were saved",
+                "bars": len(rows), "regular_bars": len(regular_rows), "premarket_bars": len(pm)}
+
     con = _conn()
     try:
         con.executemany("""
@@ -114,7 +134,6 @@ def fetch_symbol_intraday(symbol: str, trade_date=None) -> dict:
               session=excluded.session, open=excluded.open, high=excluded.high, low=excluded.low,
               close=excluded.close, volume=excluded.volume, source=excluded.source, fetched_at=excluded.fetched_at
         """, rows)
-        pm = [r for r in rows if r[3] == "premarket"]
         if pm:
             con.execute("""
               INSERT INTO premarket_levels(symbol,trade_date,premarket_high,premarket_low,bar_count,source,calculated_at)
@@ -127,7 +146,7 @@ def fetch_symbol_intraday(symbol: str, trade_date=None) -> dict:
         con.commit()
     finally:
         con.close()
-    return {"ok": True, "symbol": symbol, "bars": len(rows), "premarket_bars": len(pm), "timeframe": "2m"}
+    return {"ok": True, "symbol": symbol, "trade_date": day.isoformat(), "bars": len(rows), "premarket_bars": len(pm), "timeframe": "2m"}
 
 def fetch_watchlist_intraday(watchlist_id: int) -> dict:
     ensure_tables()
