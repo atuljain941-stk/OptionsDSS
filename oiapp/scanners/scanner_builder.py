@@ -3470,6 +3470,26 @@ def _build_scan_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _json_safe(value: Any) -> Any:
+    """Recursively make scanner output safe for Flask's JSON encoder.
+
+    Evaluation contexts can contain Pandas objects when a primitive returns
+    a sliced history series.  They are useful during evaluation but cannot
+    be emitted directly in the API result or persisted as a saved scan.
+    """
+    if isinstance(value, pd.Series):
+        return _json_safe(value.to_dict())
+    if isinstance(value, pd.DataFrame):
+        return _json_safe(value.to_dict(orient="records"))
+    if isinstance(value, pd.Index):
+        return [_json_safe(v) for v in value.tolist()]
+    if value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return value.isoformat()
+    # NumPy scalar types expose item(); this avoids importing NumPy only
+    # for serialization while preserving normal Python values unchanged.
+    if type(value).__module__.startswith("numpy") and hasattr(value, "item"):
+        return _json_safe(value.item())
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
