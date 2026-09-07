@@ -1927,6 +1927,20 @@
         <div id="mtf-scenario-picker" style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;padding:8px 0;border-top:1px solid var(--border)"></div>
       </div>
       <div class="status" id="mtf-status">Pick an HTF/LTF pair, select scenarios, then Run Scan.</div>
+      <div id="mtf-client-filters" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0;padding:8px 10px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px">
+        <b style="color:var(--muted)">Filter existing results:</b>
+        <label>RSIΔ90 ≥ <input id="mtf-filter-rsi-min" type="number" step="1" placeholder="e.g. 20" oninput="_mtfApplyClientFilters()" style="width:62px"/></label>
+        <label>≤ <input id="mtf-filter-rsi-max" type="number" step="1" placeholder="e.g. -20" oninput="_mtfApplyClientFilters()" style="width:62px"/></label>
+        <label>Sort <select id="mtf-sort-key" onchange="_mtfApplyClientFilters()" style="font-size:11px">
+          <option value="Symbol">Symbol</option><option value="Close">Close</option><option value="Close / EMA13">Close / EMA13</option>
+          <option value="EMA13 / EMA50">EMA13 / EMA50</option><option value="RSI Diff 90" selected>RSIΔ90</option>
+          <option value="Major Support">Support</option><option value="Major Resistance">Resistance</option>
+          <option value="Put Wall">Put Wall</option><option value="Call Wall">Call Wall</option>
+        </select></label>
+        <select id="mtf-sort-dir" onchange="_mtfApplyClientFilters()" style="font-size:11px"><option value="desc">High → low</option><option value="asc">Low → high</option></select>
+        <button class="btn btn-ghost" type="button" onclick="_mtfClearClientFilters()" style="font-size:10px;padding:3px 7px">Clear</button>
+        <span id="mtf-client-count" style="color:var(--muted)"></span>
+      </div>
       <div class="tbl-wrap" id="mtf-results"></div>
     </div>
     <!-- ═══════════════ CANDLE CONTEXT SCANNER ══════════════════ -->
@@ -3841,33 +3855,76 @@
       var data = await response.json();
       if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
       if (status) status.textContent = '✅ ' + (data.results || []).length + ' symbol(s) matched — HTF ' + htf + ' / LTF ' + ltf + ' · ' + data.maturity_bars + ' LTF-bar confirmation' + (data.require_oi_unwind ? ' · counter-trends need ≥' + data.min_oi_unwind_pct + '% OI unwind' : '');
-      var esc = function (v) {
-        return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
-          return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-        });
-      };
-      var money = function (v) { return v == null || !isFinite(Number(v)) ? '—' : '$' + Number(v).toFixed(2); };
-      var ratio = function (v) { return v == null || !isFinite(Number(v)) ? '—' : Number(v).toFixed(3); };
-      var signed = function (v) { return v == null || !isFinite(Number(v)) ? '—' : (Number(v) > 0 ? '+' : '') + Number(v).toFixed(1); };
-      var rows = (data.results || []).map(function (row) {
-        var m = row.metrics || {};
-        return '<tr><td style="font-weight:700">' + esc(row.symbol) + '</td>' +
-          '<td align="right">' + money(m['Close'] == null ? row.price : m['Close']) + '</td>' +
-          '<td align="right">' + ratio(m['Close / EMA13']) + '</td>' +
-          '<td align="right">' + ratio(m['EMA13 / EMA50']) + '</td>' +
-          '<td align="right">' + signed(m['RSI Diff 90']) + '</td>' +
-          '<td align="right">' + money(m['Major Support']) + '</td>' +
-          '<td align="right">' + money(m['Major Resistance']) + '</td>' +
-          '<td align="right">' + money(m['Put Wall']) + '</td>' +
-          '<td align="right">' + money(m['Call Wall']) + '</td>' +
-          '<td>' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td></tr>';
-      }).join('');
-      if (output) output.innerHTML = rows
-        ? '<table style="width:100%;font-size:12px"><thead><tr><th align="left">Symbol</th><th align="right">Close</th><th align="right">Close/EMA13</th><th align="right">EMA13/EMA50</th><th align="right">RSIΔ90</th><th align="right">Support</th><th align="right">Resistance</th><th align="right">Put Wall</th><th align="right">Call Wall</th><th align="left">Confirmed scenario</th></tr></thead><tbody>' + rows + '</tbody></table>'
-        : '<div style="padding:14px;color:var(--muted)">No symbols meet the selected maturity and OI-confirmation rules.</div>';
+      window._mtfLastData = data;
+      var filters = byId('mtf-client-filters');
+      if (filters) filters.style.display = 'flex';
+      window._mtfApplyClientFilters();
     } catch (err) {
       if (status) status.textContent = '❌ ' + err.message;
     }
+  };
+</script>
+<script>
+  // These controls operate on window._mtfLastData only. They never fetch or
+  // re-run the scanner; they simply filter/sort the last completed response.
+  window._mtfApplyClientFilters = function () {
+    var data = window._mtfLastData;
+    var output = document.getElementById('mtf-results');
+    if (!data || !output) return;
+    var number = function (id) {
+      var raw = (document.getElementById(id) || {}).value;
+      if (raw == null || String(raw).trim() === '') return null;
+      var n = Number(raw); return isFinite(n) ? n : null;
+    };
+    var minRsi = number('mtf-filter-rsi-min'), maxRsi = number('mtf-filter-rsi-max');
+    var key = (document.getElementById('mtf-sort-key') || {}).value || 'Symbol';
+    var direction = (document.getElementById('mtf-sort-dir') || {}).value === 'asc' ? 1 : -1;
+    var value = function (row, column) {
+      if (column === 'Symbol') return String(row.symbol || '');
+      if (column === 'Close') return (row.metrics || {})['Close'] == null ? row.price : (row.metrics || {})['Close'];
+      return (row.metrics || {})[column];
+    };
+    var rows = (data.results || []).filter(function (row) {
+      var rsi = Number((row.metrics || {})['RSI Diff 90']);
+      if (minRsi != null && (!isFinite(rsi) || rsi < minRsi)) return false;
+      if (maxRsi != null && (!isFinite(rsi) || rsi > maxRsi)) return false;
+      return true;
+    });
+    rows.sort(function (a, b) {
+      var av = value(a, key), bv = value(b, key);
+      var an = Number(av), bn = Number(bv);
+      if (isFinite(an) && isFinite(bn)) return (an - bn) * direction;
+      return String(av == null ? '' : av).localeCompare(String(bv == null ? '' : bv)) * direction;
+    });
+    var count = document.getElementById('mtf-client-count');
+    if (count) count.textContent = rows.length + ' / ' + (data.results || []).length + ' shown';
+    var esc = function (v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+    var money = function (v) { return v == null || !isFinite(Number(v)) ? '—' : '$' + Number(v).toFixed(2); };
+    var ratio = function (v) { return v == null || !isFinite(Number(v)) ? '—' : Number(v).toFixed(3); };
+    var signed = function (v) { return v == null || !isFinite(Number(v)) ? '—' : (Number(v) > 0 ? '+' : '') + Number(v).toFixed(1); };
+    var body = rows.map(function (row) {
+      var m = row.metrics || {};
+      return '<tr><td style="font-weight:700">' + esc(row.symbol) + '</td>' +
+        '<td align="right">' + money(m['Close'] == null ? row.price : m['Close']) + '</td>' +
+        '<td align="right">' + ratio(m['Close / EMA13']) + '</td>' +
+        '<td align="right">' + ratio(m['EMA13 / EMA50']) + '</td>' +
+        '<td align="right">' + signed(m['RSI Diff 90']) + '</td>' +
+        '<td align="right">' + money(m['Major Support']) + '</td>' +
+        '<td align="right">' + money(m['Major Resistance']) + '</td>' +
+        '<td align="right">' + money(m['Put Wall']) + '</td>' +
+        '<td align="right">' + money(m['Call Wall']) + '</td>' +
+        '<td>' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td></tr>';
+    }).join('');
+    output.innerHTML = body
+      ? '<table style="width:100%;font-size:12px"><thead><tr><th align="left">Symbol</th><th align="right">Close</th><th align="right">Close/EMA13</th><th align="right">EMA13/EMA50</th><th align="right">RSIΔ90</th><th align="right">Support</th><th align="right">Resistance</th><th align="right">Put Wall</th><th align="right">Call Wall</th><th align="left">Confirmed scenario</th></tr></thead><tbody>' + body + '</tbody></table>'
+      : '<div style="padding:14px;color:var(--muted)">No existing results match the client-side filters.</div>';
+  };
+  window._mtfClearClientFilters = function () {
+    ['mtf-filter-rsi-min', 'mtf-filter-rsi-max'].forEach(function (id) { var el = document.getElementById(id); if (el) el.value = ''; });
+    var key = document.getElementById('mtf-sort-key'), dir = document.getElementById('mtf-sort-dir');
+    if (key) key.value = 'RSI Diff 90';
+    if (dir) dir.value = 'desc';
+    window._mtfApplyClientFilters();
   };
 </script>
 </body>
