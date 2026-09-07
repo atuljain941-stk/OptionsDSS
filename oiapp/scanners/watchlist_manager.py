@@ -557,7 +557,7 @@ def run_corporate_events_for_symbols(symbols, progress=True):
     material_insider_events) -- the last being [(symbol, net_dollars), ...]
     for large ($1M+) net insider moves, same threshold the scheduled step
     uses to fire its own notification."""
-    from . import sec_edgar
+    from ..services import sec_edgar
     if progress:
         with _corp_events_lock:
             _corp_events_status.update({"running": True, "processed": 0, "total": len(symbols),
