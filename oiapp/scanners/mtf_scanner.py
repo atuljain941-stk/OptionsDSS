@@ -9,16 +9,14 @@ engine through an internal self-call.
 
 Three scenarios, matched to a real top-down discretionary workflow:
 
-1. MISALIGNMENT + first counter-move ("rejection" setup): HTF is
-   trending one way, LTF just showed the FIRST character-change
-   AGAINST it (ChochBullish/Bearish on the LTF) -- a counter-move with
-   a real chance of failing back toward the HTF direction, not yet a
-   genuine reversal.
+1. CONFIRMED MISALIGNMENT ("counter-trend" setup): HTF is trending one
+   way while the LTF has sustained an opposite regression slope for a
+   configurable number of LTF bars. A one-bar character change is not
+   enough to be called a mature counter-trend.
 
-2. ALIGNMENT ("continuation" setup): HTF trend + LTF confirming Break
-   of Structure in the SAME direction -- the LTF has caught up and
-   joined the HTF trend, a higher-conviction continuation entry than
-   either timeframe alone.
+2. CONFIRMED ALIGNMENT ("continuation" setup): HTF trend + LTF sustained
+   regression slope in the SAME direction for the configured maturity
+   window. This avoids treating one impulsive LTF bar as continuation.
 
 3. LTF BASE relevant on MTF ("could break and change the trend"): LTF
    showing a genuine volatility squeeze with volume drying up, AND the
@@ -43,11 +41,11 @@ _TF_STEP_UP = {"1h": "4h", "2h": "1d", "4h": "1d", "1d": "1w", "1w": "1m", "1m":
 
 SCENARIOS = {
     "misalign_rejection": {
-        "label": "HTF/LTF Misalignment -- First Counter-Move (rejection setup)",
+        "label": "HTF/LTF Misalignment -- Confirmed Counter-Trend + OI Unwind",
         "requires": ["htf", "ltf"],
     },
     "align_continuation": {
-        "label": "LTF Aligning with HTF (continuation setup)",
+        "label": "LTF Aligned with HTF -- Confirmed Continuation",
         "requires": ["htf", "ltf"],
     },
     "ltf_base_mtf_relevant": {
@@ -60,19 +58,34 @@ SCENARIOS = {
 @mtf_scanner_bp.route("/options")
 def options_route():
     return jsonify({"timeframes": TIMEFRAME_OPTIONS,
+                     "defaults": {"maturity_bars": 3, "require_oi_unwind": True, "min_oi_unwind_pct": 3.0},
                      "scenarios": [{"key": k, **v} for k, v in SCENARIOS.items()]})
 
 
-def _build_query(scenario_key: str, htf: str, ltf: str, trend_bars: int, trend_threshold_deg: float) -> str:
+def _build_query(scenario_key: str, htf: str, ltf: str, trend_bars: int, trend_threshold_deg: float, maturity_bars: int, require_oi_unwind: bool = True, min_oi_unwind_pct: float = 3.0) -> str:
+    # A regression window is used as the maturity gate: it evaluates the
+    # complete recent LTF window instead of a single current-bar CHoCH/BOS.
+    # 0.25° is intentionally modest; the direction must persist, but we do
+    # not require a large momentum move merely to call it established.
+    ltf_confirm_deg = 0.25
     if scenario_key == "misalign_rejection":
+        # Options OI is stored as daily end-of-day history rather than
+        # intraday/weekly candles. A meaningful drop in aggregate OI is the
+        # available confirmation that the prevailing position is unwinding;
+        # without it, a counter-trend price drift is treated as noise.
+        oi_gate = f' and oi_change_pct <= -{min_oi_unwind_pct}' if require_oi_unwind else ''
         return (
-            f'(RegSlopeDeg(close, {trend_bars}, "{htf}") > {trend_threshold_deg} and ChochBearish(40, 2, 2, "{ltf}")) '
-            f'or (RegSlopeDeg(close, {trend_bars}, "{htf}") < -{trend_threshold_deg} and ChochBullish(40, 2, 2, "{ltf}"))'
+            f'(RegSlopeDeg(close, {trend_bars}, "{htf}") > {trend_threshold_deg} and '
+            f'RegSlopeDeg(close, {maturity_bars}, "{ltf}") < -{ltf_confirm_deg}{oi_gate}) '
+            f'or (RegSlopeDeg(close, {trend_bars}, "{htf}") < -{trend_threshold_deg} and '
+            f'RegSlopeDeg(close, {maturity_bars}, "{ltf}") > {ltf_confirm_deg}{oi_gate})'
         )
     if scenario_key == "align_continuation":
         return (
-            f'(RegSlopeDeg(close, {trend_bars}, "{htf}") > {trend_threshold_deg} and BosBullish(40, 2, 2, "{ltf}")) '
-            f'or (RegSlopeDeg(close, {trend_bars}, "{htf}") < -{trend_threshold_deg} and BosBearish(40, 2, 2, "{ltf}"))'
+            f'(RegSlopeDeg(close, {trend_bars}, "{htf}") > {trend_threshold_deg} and '
+            f'RegSlopeDeg(close, {maturity_bars}, "{ltf}") > {ltf_confirm_deg}) '
+            f'or (RegSlopeDeg(close, {trend_bars}, "{htf}") < -{trend_threshold_deg} and '
+            f'RegSlopeDeg(close, {maturity_bars}, "{ltf}") < -{ltf_confirm_deg})'
         )
     if scenario_key == "ltf_base_mtf_relevant":
         mtf = _TF_STEP_UP.get(ltf, ltf)
@@ -83,7 +96,7 @@ def _build_query(scenario_key: str, htf: str, ltf: str, trend_bars: int, trend_t
     raise ValueError(f"Unknown scenario: {scenario_key}")
 
 
-def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_threshold_deg=3.0):
+def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_threshold_deg=3.0, maturity_bars=3, require_oi_unwind=True, min_oi_unwind_pct=3.0):
     """For each selected scenario, builds its query (parameterized by
     the chosen HTF/LTF pair) and runs it via the existing scan engine,
     merging matches by symbol -- same merge-by-symbol pattern as
@@ -97,7 +110,7 @@ def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_thr
         if not scenario:
             continue
         try:
-            query_text = _build_query(key, htf, ltf, trend_bars, trend_threshold_deg)
+            query_text = _build_query(key, htf, ltf, trend_bars, trend_threshold_deg, maturity_bars, require_oi_unwind, min_oi_unwind_pct)
         except Exception as e:
             errors.append({"scenario": key, "error": str(e)})
             continue
@@ -121,7 +134,9 @@ def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_thr
             errors.append({"scenario": scenario["label"], "error": str(e)})
 
     results = sorted(by_symbol.values(), key=lambda r: -len(r["scenarios"]))
-    return {"results": results, "htf": htf, "ltf": ltf, "scenarios_run": len(scenario_keys), "errors": errors}
+    return {"results": results, "htf": htf, "ltf": ltf, "maturity_bars": maturity_bars,
+            "require_oi_unwind": require_oi_unwind, "min_oi_unwind_pct": min_oi_unwind_pct,
+            "scenarios_run": len(scenario_keys), "errors": errors}
 
 
 @mtf_scanner_bp.route("/run", methods=["POST"])
@@ -142,7 +157,11 @@ def run_route():
     try:
         trend_bars = int(payload.get("trend_bars") or 10)
         trend_threshold_deg = float(payload.get("trend_threshold_deg") or 3.0)
-        result = run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars, trend_threshold_deg)
+        maturity_bars = max(2, min(10, int(payload.get("maturity_bars") or 3)))
+        require_oi_unwind = bool(payload.get("require_oi_unwind", True))
+        min_oi_unwind_pct = max(0.1, min(50.0, float(payload.get("min_oi_unwind_pct") or 3.0)))
+        result = run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars, trend_threshold_deg,
+                              maturity_bars, require_oi_unwind, min_oi_unwind_pct)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
