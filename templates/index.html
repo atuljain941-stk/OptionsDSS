@@ -3902,22 +3902,25 @@
     var money = function (v) { return v == null || !isFinite(Number(v)) ? '—' : '$' + Number(v).toFixed(2); };
     var ratio = function (v) { return v == null || !isFinite(Number(v)) ? '—' : Number(v).toFixed(3); };
     var signed = function (v) { return v == null || !isFinite(Number(v)) ? '—' : (Number(v) > 0 ? '+' : '') + Number(v).toFixed(1); };
+    var cell = 'padding:7px 12px;white-space:nowrap;border-bottom:1px solid var(--border)';
+    var scenarioCell = cell + ';padding-left:24px;min-width:310px;border-left:2px solid var(--border);white-space:normal';
     var body = rows.map(function (row) {
       var m = row.metrics || {};
-      return '<tr><td style="font-weight:700">' + esc(row.symbol) + '</td>' +
-        '<td align="right">' + money(m['Close'] == null ? row.price : m['Close']) + '</td>' +
-        '<td align="right">' + ratio(m['Close / EMA13']) + '</td>' +
-        '<td align="right">' + ratio(m['EMA13 / EMA50']) + '</td>' +
-        '<td align="right">' + signed(m['RSI Diff 90']) + '</td>' +
-        '<td align="right">' + money(m['Major Support']) + '</td>' +
-        '<td align="right">' + money(m['Major Resistance']) + '</td>' +
-        '<td align="right">' + money(m['Put Wall']) + '</td>' +
-        '<td align="right">' + money(m['Call Wall']) + '</td>' +
-        '<td>' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td></tr>';
+      return '<tr><td style="' + cell + ';font-weight:700">' + esc(row.symbol) + '</td>' +
+        '<td align="right" style="' + cell + '">' + money(m['Close'] == null ? row.price : m['Close']) + '</td>' +
+        '<td align="right" style="' + cell + '">' + ratio(m['Close / EMA13']) + '</td>' +
+        '<td align="right" style="' + cell + '">' + ratio(m['EMA13 / EMA50']) + '</td>' +
+        '<td align="right" style="' + cell + '">' + signed(m['RSI Diff 90']) + '</td>' +
+        '<td align="right" style="' + cell + '">' + money(m['Major Support']) + '</td>' +
+        '<td align="right" style="' + cell + '">' + money(m['Major Resistance']) + '</td>' +
+        '<td align="right" style="' + cell + '">' + money(m['Put Wall']) + '</td>' +
+        '<td align="right" style="' + cell + '">' + money(m['Call Wall']) + '</td>' +
+        '<td style="' + scenarioCell + '">' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td></tr>';
     }).join('');
-    output.innerHTML = body
-      ? '<table style="width:100%;font-size:12px"><thead><tr><th align="left">Symbol</th><th align="right">Close</th><th align="right">Close/EMA13</th><th align="right">EMA13/EMA50</th><th align="right">RSIΔ90</th><th align="right">Support</th><th align="right">Resistance</th><th align="right">Put Wall</th><th align="right">Call Wall</th><th align="left">Confirmed scenario</th></tr></thead><tbody>' + body + '</tbody></table>'
-      : '<div style="padding:14px;color:var(--muted)">No existing results match the client-side filters.</div>';
+    var headerStyle = 'padding:8px 12px;background:var(--card);color:var(--muted);font-size:10px;letter-spacing:.04em;white-space:nowrap;border-bottom:2px solid var(--border);position:sticky;top:0;z-index:1';
+    var header = '<thead><tr><th align="left" style="' + headerStyle + '">Symbol</th><th align="right" style="' + headerStyle + '">Close</th><th align="right" style="' + headerStyle + '">Close/EMA13</th><th align="right" style="' + headerStyle + '">EMA13/EMA50</th><th align="right" style="' + headerStyle + '">RSIΔ90</th><th align="right" style="' + headerStyle + '">Support</th><th align="right" style="' + headerStyle + '">Resistance</th><th align="right" style="' + headerStyle + '">Put Wall</th><th align="right" style="' + headerStyle + '">Call Wall</th><th align="left" style="' + headerStyle + ';padding-left:24px;border-left:2px solid var(--border);min-width:310px">Confirmed scenario</th></tr></thead>';
+    var empty = '<tr><td colspan="10" style="padding:14px;color:var(--muted)">No existing results match the client-side filters.</td></tr>';
+    output.innerHTML = '<table style="width:100%;min-width:1280px;font-size:12px;border-collapse:collapse">' + header + '<tbody>' + (body || empty) + '</tbody></table>';
   };
   window._mtfClearClientFilters = function () {
     ['mtf-filter-rsi-min', 'mtf-filter-rsi-max'].forEach(function (id) { var el = document.getElementById(id); if (el) el.value = ''; });
