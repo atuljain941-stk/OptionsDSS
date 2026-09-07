@@ -1237,7 +1237,7 @@
           <div style="width:1px;height:26px;background:var(--border)"></div>
           <div id="earn-ctrl-wl" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
             <label style="font-size:11px;color:var(--muted)">Watchlist</label>
-            <select id="earn-watchlist" style="font-size:12px;padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:5px;color:var(--text);min-width:170px" onchange="_earnWatchlistChange()">
+            <select id="earn-watchlist" style="font-size:12px;padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:5px;color:var(--text);min-width:170px" onchange="_earnWatchlistChange(); _refreshMarketMonitorForWatchlist()">
               <option value="">Default watchlist</option>
             </select>
             <span id="earn-wl-count" style="font-size:11px;color:var(--muted)"></span>
@@ -3786,6 +3786,20 @@
     }
   };
 })();
+</script>
+<script>
+  // The shared earnings watchlist control used to update pre/post scans only.
+  // When Market Monitor was visible it left the old table on screen, making
+  // the selector look ineffective.  Refresh the active monitor view after
+  // the selector's normal state update has completed.
+  window._refreshMarketMonitorForWatchlist = function () {
+    var panel = document.getElementById('earn-panel-monitor');
+    if (!panel || panel.style.display === 'none') return;
+    panel.innerHTML = '<div style="padding:22px;text-align:center;color:var(--muted);font-size:12px">Loading Market Monitor for the selected watchlist…</div>';
+    window.setTimeout(function () {
+      if (typeof window._earnNav === 'function') window._earnNav('monitor');
+    }, 0);
+  };
 </script>
 </body>
 </html>
