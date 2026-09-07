@@ -28,10 +28,28 @@ wl_bp = Blueprint("wl_bp", __name__, url_prefix="/watchlists")
 # to a request that LOOKS stuck).
 _fetch_in_progress = set()
 _fetch_in_progress_lock = threading.Lock()
-# The one-minute extended-hours fetch is independent from daily/OI fetches,
-# but a duplicate would create redundant DXLink subscriptions, so guard it too.
+# Runtime state is deliberately in memory: it describes only currently running
+# jobs, and avoids writing a status row on every polling request.
+_fetch_progress = {}
+_fetch_progress_lock = threading.Lock()
+# The extended-hours fetch is independent from daily/OI fetches, but a
+# duplicate would create redundant DXLink subscriptions, so guard it too.
 _intraday_fetch_in_progress = set()
 _intraday_fetch_in_progress_lock = threading.Lock()
+_intraday_fetch_progress = {}
+_intraday_fetch_progress_lock = threading.Lock()
+
+def _set_fetch_progress(wl_id, **values):
+    with _fetch_progress_lock:
+        current = dict(_fetch_progress.get(wl_id, {}))
+        current.update(values)
+        _fetch_progress[wl_id] = current
+
+def _set_intraday_fetch_progress(wl_id, **values):
+    with _intraday_fetch_progress_lock:
+        current = dict(_intraday_fetch_progress.get(wl_id, {}))
+        current.update(values)
+        _intraday_fetch_progress[wl_id] = current
 from ..config import DB_PATH as _OIAPP_DB_PATH  # centralized DB location
 DB_PATH = _OIAPP_DB_PATH
 
@@ -1232,6 +1250,12 @@ def _fetch_data_for_watchlist_core(wl_id, source="manual", remote_addr="?", user
             _fetch_in_progress.discard(wl_id)
         return 400, {"error": "No symbols in this watchlist"}
 
+    table = "options" if fetch_oi else "price_cache"
+    mode  = "Options OI" if fetch_oi else "Price/Volume"
+    _set_fetch_progress(wl_id, running=True, mode=mode, table=table,
+                        total=len(syms), started_at=_dt.datetime.now().isoformat(timespec="seconds"),
+                        source=source, message="Starting fetch")
+
     import time as _time
     def _run():
         if fetch_oi:
@@ -1477,8 +1501,6 @@ def _fetch_data_for_watchlist_core(wl_id, source="manual", remote_addr="?", user
                 severity="error" if _price_stats["errored"] > 0 else "info",
             )
 
-    table = "options" if fetch_oi else "price_cache"
-    mode  = "Options OI" if fetch_oi else "Price/Volume"
     # Per-action-type history: "Fetch Price" and "Fetch OI" on the same
     # watchlist used to share one "Last Run" column that whichever ran
     # most recently overwrote -- so if you ran Fetch OI, you'd lose any
@@ -1524,7 +1546,11 @@ def _fetch_data_for_watchlist_core(wl_id, source="manual", remote_addr="?", user
                            (_dtt.datetime.now().strftime("%Y-%m-%d %H:%M"), mode, len(syms), wl_id))
                 _c.commit(); _c.close()
             except: pass
+            _set_fetch_progress(wl_id, running=False, message="Completed",
+                                finished_at=_dt.datetime.now().isoformat(timespec="seconds"))
         except Exception as e:
+            _set_fetch_progress(wl_id, running=False, message=f"Failed: {type(e).__name__}: {e}",
+                                finished_at=_dt.datetime.now().isoformat(timespec="seconds"))
             if run_id is not None:
                 try:
                     log_run_finish(run_id, False, str(e))
@@ -1610,6 +1636,8 @@ def fetch_intraday_price_for_watchlist(wl_id):
 
     def _run():
         run_id = None
+        _set_intraday_fetch_progress(wl_id, running=True, message="Fetching extended-hours bars",
+                                     started_at=__import__("datetime").datetime.now().isoformat(timespec="seconds"))
         try:
             from ..services.job_registry import log_run_start, log_run_finish
             run_id = log_run_start(f"wl_fetch_intraday_price_{wl_id}")
@@ -1620,8 +1648,15 @@ def fetch_intraday_price_for_watchlist(wl_id):
                 f"{result.get('symbols', 0)} symbol(s); "
                 f"{sum(r.get('bars', 0) for r in result.get('results', []))} two-minute bars",
             )
+            _set_intraday_fetch_progress(wl_id, running=False, message="Completed",
+                                         symbols=result.get("symbols", 0),
+                                         bars=sum(r.get("bars", 0) for r in result.get("results", [])),
+                                         premarket_bars=sum(r.get("premarket_bars", 0) for r in result.get("results", [])),
+                                         finished_at=__import__("datetime").datetime.now().isoformat(timespec="seconds"))
             print(f"[watchlist_manager] intraday price fetch for watchlist_id={wl_id}: {result}")
         except Exception as exc:
+            _set_intraday_fetch_progress(wl_id, running=False, message=f"Failed: {type(exc).__name__}: {exc}",
+                                         finished_at=__import__("datetime").datetime.now().isoformat(timespec="seconds"))
             print(f"[watchlist_manager] intraday price fetch FAILED for watchlist_id={wl_id}: {exc}")
             if run_id is not None:
                 try:
@@ -1667,8 +1702,18 @@ def watchlist_fetch_status(wl_id):
         ).fetchone()[0] if syms else 0
         table = "price_cache"
     con.close()
+    with _fetch_in_progress_lock:
+        fetch_running = wl_id in _fetch_in_progress
+    with _intraday_fetch_in_progress_lock:
+        intraday_running = wl_id in _intraday_fetch_in_progress
+    with _fetch_progress_lock:
+        fetch_progress = dict(_fetch_progress.get(wl_id, {}))
+    with _intraday_fetch_progress_lock:
+        intraday_progress = dict(_intraday_fetch_progress.get(wl_id, {}))
     result = {"watchlist": wl_name, "symbols_total": len(syms),
-              "fetched_today": count, "table": table}
+              "fetched_today": count, "table": table,
+              "running": fetch_running, "fetch_progress": fetch_progress,
+              "intraday_running": intraday_running, "intraday_progress": intraday_progress}
     # Real error visibility -- previously this endpoint only ever
     # reported successfully-fetched row counts, so a fetch where every
     # symbol failed looked identical to one still in progress from the
