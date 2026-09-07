@@ -3812,16 +3812,17 @@
   };
 </script>
 <script>
-  // Override the legacy MTF click handler so the confirmation controls are
-  // part of the request. The scenario picker and watchlist selector are
-  // still populated by the existing MTF page initialization.
+  // Dedicated MTF renderer. Kept separate from the legacy handler so the
+  // maturity, OI confirmation, and context columns are always used.
   window._mtfRunV2 = async function () {
     var byId = function (id) { return document.getElementById(id); };
-    var status = byId('mtf-status'), output = byId('mtf-results');
+    var status = byId('mtf-status');
+    var output = byId('mtf-results');
     var watchlistId = Number((byId('mtf-watchlist') || {}).value);
-    var htf = (byId('mtf-htf') || {}).value, ltf = (byId('mtf-ltf') || {}).value;
+    var htf = (byId('mtf-htf') || {}).value;
+    var ltf = (byId('mtf-ltf') || {}).value;
     var maturity = Math.max(2, Math.min(10, Number((byId('mtf-maturity-bars') || {}).value) || 3));
-    var requireUnwind = !!(byId('mtf-require-oi-unwind') || {}).checked;
+    var requireUnwind = !!((byId('mtf-require-oi-unwind') || {}).checked);
     var unwindPct = Math.max(0.1, Number((byId('mtf-oi-unwind-pct') || {}).value) || 3);
     var scenarios = Array.prototype.slice.call(document.querySelectorAll('#mtf-scenario-picker input[type="checkbox"]:checked')).map(function (el) { return el.value; });
     if (!watchlistId) { if (status) status.textContent = 'Choose a watchlist first.'; return; }
@@ -3829,21 +3830,23 @@
     if (status) status.textContent = '⏳ Checking confirmed multi-timeframe alignment…';
     if (output) output.innerHTML = '';
     try {
-      var response = await fetch('/mtf-scanner/run', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({watchlist_id:watchlistId, htf:htf, ltf:ltf, scenarios:scenarios,
-          maturity_bars:maturity, require_oi_unwind:requireUnwind, min_oi_unwind_pct:unwindPct})});
+      var response = await fetch('/mtf-scanner/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          watchlist_id: watchlistId, htf: htf, ltf: ltf, scenarios: scenarios,
+          maturity_bars: maturity, require_oi_unwind: requireUnwind, min_oi_unwind_pct: unwindPct
+        })
+      });
       var data = await response.json();
       if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
       if (status) status.textContent = '✅ ' + (data.results || []).length + ' symbol(s) matched — HTF ' + htf + ' / LTF ' + ltf + ' · ' + data.maturity_bars + ' LTF-bar confirmation' + (data.require_oi_unwind ? ' · counter-trends need ≥' + data.min_oi_unwind_pct + '% OI unwind' : '');
-      var esc = function (v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
-      var money = function (v) { return v == null || !isFinite(Number(v)) ? '—' : '
-    } catch (err) {
-      if (status) status.textContent = '❌ ' + err.message;
-    }
-  };
-</script>
-</body>
-</html> + Number(v).toFixed(2); };
+      var esc = function (v) {
+        return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+          return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+        });
+      };
+      var money = function (v) { return v == null || !isFinite(Number(v)) ? '—' : '$' + Number(v).toFixed(2); };
       var ratio = function (v) { return v == null || !isFinite(Number(v)) ? '—' : Number(v).toFixed(3); };
       var signed = function (v) { return v == null || !isFinite(Number(v)) ? '—' : (Number(v) > 0 ? '+' : '') + Number(v).toFixed(1); };
       var rows = (data.results || []).map(function (row) {
@@ -3859,7 +3862,9 @@
           '<td align="right">' + money(m['Call Wall']) + '</td>' +
           '<td>' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td></tr>';
       }).join('');
-      if (output) output.innerHTML = rows ? '<table style="width:100%;font-size:12px"><thead><tr><th align="left">Symbol</th><th align="right">Close</th><th align="right">Close/EMA13</th><th align="right">EMA13/EMA50</th><th align="right">RSIΔ90</th><th align="right">Support</th><th align="right">Resistance</th><th align="right">Put Wall</th><th align="right">Call Wall</th><th align="left">Confirmed scenario</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div style="padding:14px;color:var(--muted)">No symbols meet the selected maturity and OI-confirmation rules.</div>';
+      if (output) output.innerHTML = rows
+        ? '<table style="width:100%;font-size:12px"><thead><tr><th align="left">Symbol</th><th align="right">Close</th><th align="right">Close/EMA13</th><th align="right">EMA13/EMA50</th><th align="right">RSIΔ90</th><th align="right">Support</th><th align="right">Resistance</th><th align="right">Put Wall</th><th align="right">Call Wall</th><th align="left">Confirmed scenario</th></tr></thead><tbody>' + rows + '</tbody></table>'
+        : '<div style="padding:14px;color:var(--muted)">No symbols meet the selected maturity and OI-confirmation rules.</div>';
     } catch (err) {
       if (status) status.textContent = '❌ ' + err.message;
     }
