@@ -240,6 +240,51 @@ def parse_form4_xml(xml_text: str) -> Dict[str, Any]:
     }
 
 
+
+def _is_ownership_document_xml(text: str) -> bool:
+    """True only for a Form 4 ownership XML document.
+
+    The SEC archive's primary document is sometimes an HTML/XBRL rendering
+    rather than the underlying ownership XML.  Sending that HTML through
+    ElementTree produces misleading "mismatched tag" errors.
+    """
+    if not text:
+        return False
+    sample = text.lstrip()[:4096].lower()
+    return "<ownershipdocument" in sample
+
+
+def _fetch_form4_ownership_xml(cik_int: str, accession: str, primary_doc: str) -> Optional[str]:
+    """Return the actual ownership XML for a Form 4, if the filing exposes it.
+
+    Prefer the SEC-provided primary document when it already is ownership XML.
+    Otherwise inspect the filing index and select an XML attachment instead of
+    trying to parse the browser-facing HTML/XBRL document as XML.
+    """
+    accession_no_dash = accession.replace("-", "")
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_no_dash}"
+    first = _edgar_get(f"{base}/{primary_doc}")
+    if first.status_code == 200 and _is_ownership_document_xml(first.text):
+        return first.text
+
+    try:
+        index = _edgar_get(f"{base}/index.json")
+        if index.status_code != 200:
+            return None
+        items = (index.json().get("directory") or {}).get("item") or []
+        names = [str(item.get("name") or "") for item in items]
+        # Form 4 attachment names vary; prioritize the clearly relevant XML,
+        # then try the remaining XML files.  Never parse the filing HTML.
+        candidates = [n for n in names if n.lower().endswith(".xml")]
+        candidates.sort(key=lambda n: (0 if ("form" in n.lower() or "ownership" in n.lower()) else 1, n.lower()))
+        for name in candidates:
+            response = _edgar_get(f"{base}/{name}")
+            if response.status_code == 200 and _is_ownership_document_xml(response.text):
+                return response.text
+    except Exception:  # Archive indexes are optional; a missing one is a skip.
+        return None
+    return None
+
 def fetch_insider_activity(symbol: str, lookback_days: int = 90, max_filings: int = 40) -> Dict[str, Any]:
     """Real insider buy/sell summary for a symbol: total dollars bought,
     total dollars sold, net dollars, transaction counts, and the
@@ -288,14 +333,14 @@ def fetch_insider_activity(symbol: str, lookback_days: int = 90, max_filings: in
         primary_doc = primary_docs[i] if i < len(primary_docs) else None
         if not accession or not primary_doc:
             continue  # don't guess the filename -- skip rather than construct a bad URL
-        accession_no_dash = accession.replace("-", "")
-        url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_no_dash}/{primary_doc}"
         try:
-            r = _edgar_get(url)
-            fetched += 1
-            if r.status_code != 200:
+            xml_text = _fetch_form4_ownership_xml(cik_int, accession, primary_doc)
+            if not xml_text:
+                # A browser-oriented HTML/XBRL primary document with no
+                # ownership attachment is not bad data; skip it quietly.
                 continue
-            parsed = parse_form4_xml(r.text)
+            fetched += 1
+            parsed = parse_form4_xml(xml_text)
             for tx in parsed["transactions"]:
                 tx["filing_date"] = dates[i]
                 tx["owner_name"] = parsed["owner_name"]
@@ -304,8 +349,12 @@ def fetch_insider_activity(symbol: str, lookback_days: int = 90, max_filings: in
                 tx["is_director"] = parsed["is_director"]
                 tx["accession_number"] = accession
                 all_tx.append(tx)
+        except (ET.ParseError, ValueError, TypeError) as e:  # malformed XML: skip without log spam
+            continue
         except Exception as e:  # noqa: BLE001
-            print(f"[sec_edgar] Form 4 parse failed for {symbol} {accession}: {e}")
+            # One unavailable filing must not make the symbol's whole
+            # corporate-events snapshot fail.
+            print(f"[sec_edgar] Form 4 retrieval skipped for {symbol} {accession}: {type(e).__name__}")
             continue
 
     dollars_bought = sum(t["dollar_value"] or 0 for t in all_tx if t["code"] == "P")
