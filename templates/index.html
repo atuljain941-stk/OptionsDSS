@@ -3836,10 +3836,30 @@
       if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
       if (status) status.textContent = '✅ ' + (data.results || []).length + ' symbol(s) matched — HTF ' + htf + ' / LTF ' + ltf + ' · ' + data.maturity_bars + ' LTF-bar confirmation' + (data.require_oi_unwind ? ' · counter-trends need ≥' + data.min_oi_unwind_pct + '% OI unwind' : '');
       var esc = function (v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+      var money = function (v) { return v == null || !isFinite(Number(v)) ? '—' : '
+    } catch (err) {
+      if (status) status.textContent = '❌ ' + err.message;
+    }
+  };
+</script>
+</body>
+</html> + Number(v).toFixed(2); };
+      var ratio = function (v) { return v == null || !isFinite(Number(v)) ? '—' : Number(v).toFixed(3); };
+      var signed = function (v) { return v == null || !isFinite(Number(v)) ? '—' : (Number(v) > 0 ? '+' : '') + Number(v).toFixed(1); };
       var rows = (data.results || []).map(function (row) {
-        return '<tr><td style="font-weight:700">' + esc(row.symbol) + '</td><td>' + (row.price == null ? '—' : ' + Number(row.price).toFixed(2)) + '</td><td>' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td></tr>';
+        var m = row.metrics || {};
+        return '<tr><td style="font-weight:700">' + esc(row.symbol) + '</td>' +
+          '<td align="right">' + money(m['Close'] == null ? row.price : m['Close']) + '</td>' +
+          '<td align="right">' + ratio(m['Close / EMA13']) + '</td>' +
+          '<td align="right">' + ratio(m['EMA13 / EMA50']) + '</td>' +
+          '<td align="right">' + signed(m['RSI Diff 90']) + '</td>' +
+          '<td align="right">' + money(m['Major Support']) + '</td>' +
+          '<td align="right">' + money(m['Major Resistance']) + '</td>' +
+          '<td align="right">' + money(m['Put Wall']) + '</td>' +
+          '<td align="right">' + money(m['Call Wall']) + '</td>' +
+          '<td>' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td></tr>';
       }).join('');
-      if (output) output.innerHTML = rows ? '<table style="width:100%;font-size:12px"><thead><tr><th align="left">Symbol</th><th align="right">Price</th><th align="left">Confirmed scenario</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div style="padding:14px;color:var(--muted)">No symbols meet the selected maturity and OI-confirmation rules.</div>';
+      if (output) output.innerHTML = rows ? '<table style="width:100%;font-size:12px"><thead><tr><th align="left">Symbol</th><th align="right">Close</th><th align="right">Close/EMA13</th><th align="right">EMA13/EMA50</th><th align="right">RSIΔ90</th><th align="right">Support</th><th align="right">Resistance</th><th align="right">Put Wall</th><th align="right">Call Wall</th><th align="left">Confirmed scenario</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div style="padding:14px;color:var(--muted)">No symbols meet the selected maturity and OI-confirmation rules.</div>';
     } catch (err) {
       if (status) status.textContent = '❌ ' + err.message;
     }

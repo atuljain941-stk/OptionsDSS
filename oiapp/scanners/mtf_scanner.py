@@ -96,6 +96,25 @@ def _build_query(scenario_key: str, htf: str, ltf: str, trend_bars: int, trend_t
     raise ValueError(f"Unknown scenario: {scenario_key}")
 
 
+def _mtf_result_columns(ltf: str):
+    """Context columns shown with every MTF match.
+
+    These intentionally do not filter the scan.  They make the directional
+    setup tradeable by showing extension, nearby price structure, and current
+    aggregate option positioning in the same result row.
+    """
+    return [
+        {"expr": "close", "label": "Close"},
+        {"expr": f"close[{ltf}] / ema13[{ltf}]", "label": "Close / EMA13"},
+        {"expr": f"ema13[{ltf}] / ema50[{ltf}]", "label": "EMA13 / EMA50"},
+        {"expr": f"rsidiff90(90, \"{ltf}\")", "label": "RSI Diff 90"},
+        {"expr": f"Support(60, \"{ltf}\")", "label": "Major Support"},
+        {"expr": f"Resistance(60, \"{ltf}\")", "label": "Major Resistance"},
+        {"expr": "PutWallStrike()", "label": "Put Wall"},
+        {"expr": "CallWallStrike()", "label": "Call Wall"},
+    ]
+
+
 def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_threshold_deg=3.0, maturity_bars=3, require_oi_unwind=True, min_oi_unwind_pct=3.0):
     """For each selected scenario, builds its query (parameterized by
     the chosen HTF/LTF pair) and runs it via the existing scan engine,
@@ -104,6 +123,7 @@ def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_thr
     all of them together."""
     by_symbol = {}
     errors = []
+    result_columns = _mtf_result_columns(ltf)
 
     for key in scenario_keys:
         scenario = SCENARIOS.get(key)
@@ -119,6 +139,7 @@ def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_thr
                 resp = client.post("/scanner-builder/api/run", json={
                     "query_text": query_text,
                     "watchlist_id": watchlist_id,
+                    "result_columns": result_columns,
                 })
                 data = resp.get_json() or {}
             if data.get("error"):
@@ -128,7 +149,9 @@ def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_thr
                 sym = row.get("symbol")
                 if not sym:
                     continue
-                entry = by_symbol.setdefault(sym, {"symbol": sym, "price": row.get("price") or row.get("close"), "scenarios": []})
+                entry = by_symbol.setdefault(sym, {"symbol": sym, "price": row.get("price") or row.get("close"), "metrics": row.get("_result_columns") or {}, "scenarios": []})
+                if not entry.get("metrics") and row.get("_result_columns"):
+                    entry["metrics"] = row.get("_result_columns")
                 entry["scenarios"].append({"key": key, "label": scenario["label"]})
         except Exception as e:
             errors.append({"scenario": scenario["label"], "error": str(e)})
@@ -136,7 +159,7 @@ def run_mtf_scan(watchlist_id, scenario_keys, htf, ltf, trend_bars=10, trend_thr
     results = sorted(by_symbol.values(), key=lambda r: -len(r["scenarios"]))
     return {"results": results, "htf": htf, "ltf": ltf, "maturity_bars": maturity_bars,
             "require_oi_unwind": require_oi_unwind, "min_oi_unwind_pct": min_oi_unwind_pct,
-            "scenarios_run": len(scenario_keys), "errors": errors}
+            "result_columns": result_columns, "scenarios_run": len(scenario_keys), "errors": errors}
 
 
 @mtf_scanner_bp.route("/run", methods=["POST"])
