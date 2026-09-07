@@ -377,7 +377,7 @@ async function _wlRunFetch(id, name) {
         // identical to one still quietly in progress. If a completed run
         // shows up with errors, say so explicitly instead of just "0
         // fetched" until the poll loop times out on its own.
-        if (lr && (lr.fetched + lr.errored + lr.no_options + lr.timed_out) >= lr.total) {
+        if (!s.running && lr && (lr.fetched + lr.errored + lr.no_options + lr.timed_out) >= lr.total) {
           const errPart = lr.errored > 0 ? ` — ⚠ ${lr.errored} errored` : '';
           const noOptPart = lr.no_options > 0 ? ` — ${lr.no_options} had no options chain` : '';
           // timed_out symbols aren't failures -- their fetches keep
@@ -393,7 +393,9 @@ async function _wlRunFetch(id, name) {
           await _wlLoad();
           return;
         }
-        if (st) st.textContent = `📊 ${s.fetched_today}/${s.symbols_total} fetched today → ${s.table}`;
+        const live = s.fetch_progress || {};
+        const liveSuffix = live.message ? ` — ${live.message}` : '';
+        if (st) st.textContent = `${s.running ? '⏳' : '📊'} ${s.fetched_today}/${s.symbols_total} fetched today → ${s.table}${liveSuffix}`;
         // tastytrade runs far longer than yfinance (~20s/symbol at 3-way
         // concurrency vs yfinance's much faster per-symbol cost) -- the
         // original 60-poll (5 min) cutoff was tuned for yfinance and
@@ -401,7 +403,7 @@ async function _wlRunFetch(id, name) {
         // button well before a tastytrade fetch actually finishes,
         // making a legitimately-still-running fetch look abandoned.
         const maxPolls = oiSource === 'tastytrade' ? 400 : 60;  // ~33min vs ~5min
-        if (s.fetched_today >= s.symbols_total || polls > maxPolls) {
+        if (!s.running || polls > maxPolls) {
           clearInterval(poll);
           if (btn) btn.disabled = false;
           addNotif('ok', `${name}: fetch done`, `${s.fetched_today}/${s.symbols_total} → ${s.table}`, 'Watchlists');
@@ -950,16 +952,39 @@ async function _wlRunIntradayPrice(id, name) {
   try {
     const result = await api(`/watchlists/${id}/fetch_intraday_price`, { method: 'POST' });
     if (!result.ok) throw new Error(result.error || 'Start failed');
-    if (st) st.textContent = '✅ Intraday fetch running in background';
     addNotif('info', name + ': intraday fetch started',
       'One end-of-day Tastytrade request per symbol; compact 2m bars + premarket high/low will be saved.', 'Watchlists');
-    // Completion is recorded under Fetch History.  Re-enable the manual
-    // button after a short cooldown; a duplicate request is still rejected
-    // server-side while the actual broker fetch is running.
-    setTimeout(() => { if (btn) btn.disabled = false; }, 3000);
+    // Keep the row state visible for the whole broker operation. The old
+    // three-second cooldown made a still-running job look finished.
+    let polls = 0;
+    const poll = setInterval(async () => {
+      polls++;
+      try {
+        const s = await api(`/watchlists/${id}/fetch_status`);
+        const p = s.intraday_progress || {};
+        const count = p.symbols ?? s.symbols_total;
+        const bars = p.bars != null ? ` · ${p.bars} 2m bars` : '';
+        if (st) st.textContent = `${s.intraday_running ? '⏳' : '✅'} Intraday 2m: ${p.message || (s.intraday_running ? 'Running' : 'Completed')} · ${count} symbol(s)${bars}`;
+        if (!s.intraday_running || polls > 720) {
+          clearInterval(poll);
+          if (btn) btn.disabled = false;
+          if (!s.intraday_running) {
+            const failed = /^Failed:/.test(String(p.message || ''));
+            addNotif(failed ? 'error' : 'ok', name + (failed ? ': intraday fetch failed' : ': intraday fetch done'),
+              p.message || `${count} symbol(s)${bars}`, 'Watchlists');
+            await _wlLoad();
+          }
+        }
+      } catch (e) {
+        clearInterval(poll);
+        if (st) st.textContent = '❌ Live progress unavailable: ' + e.message;
+        if (btn) btn.disabled = false;
+      }
+    }, 2000);
   } catch (e) {
     if (st) st.textContent = '❌ ' + e.message;
     if (btn) btn.disabled = false;
     addNotif('error', name + ': intraday fetch failed', e.message, 'Watchlists');
   }
 }
+
