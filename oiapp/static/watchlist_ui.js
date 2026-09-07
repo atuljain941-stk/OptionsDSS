@@ -280,8 +280,8 @@ function _wlRenderTable() {
           ${wl.fetch_options_oi ? `
           <select id="wl-oi-source-${wl.id}" title="yfinance: fast, no real Greeks. tastytrade: real broker Greeks (delta/gamma/theta/vega), ~20s/symbol -- meant for long, unattended off-hours runs, not a quick daytime check."
             style="font-size:10px;padding:2px 4px;border-radius:4px;background:var(--card,#111827);border:1px solid var(--border,#1f2937);color:var(--muted,#94a3b8)">
-            <option value="yfinance">yfinance (fast)</option>
-            <option value="tastytrade">tastytrade (real Greeks, slow -- off-hours)</option>
+            <option value="tastytrade" selected>tastytrade (real Greeks, slow -- off-hours)</option>
+            <option value="yfinance">yfinance (fast, no Greeks)</option>
           </select>` : ''}
           <button onclick="_wlRunSectors(${wl.id},'${nm}')"
             style="font-size:11px;padding:3px 10px;border-radius:4px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);color:#818cf8;cursor:pointer">
@@ -354,7 +354,7 @@ async function _wlRunFetch(id, name) {
   const st = document.getElementById('wl-status-'+id);
   const btn = document.getElementById('wl-run-'+id);
   const sourceEl = document.getElementById('wl-oi-source-'+id);
-  const oiSource = sourceEl ? sourceEl.value : 'yfinance';
+  const oiSource = sourceEl ? sourceEl.value : 'tastytrade';
   if (btn) btn.disabled = true;
   if (st) st.textContent = oiSource === 'tastytrade' ? '⏳ Starting tastytrade fetch (this runs long -- off-hours use)…' : '⏳ Starting fetch…';
   try {
