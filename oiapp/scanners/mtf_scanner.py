@@ -73,3 +73,25 @@ def run_route():
 def options_route():
     """UI metadata; keeps the MTF scenario picker independent of a scan."""
     return jsonify({"scenarios":[{"key":key, "label":value["label"]} for key, value in SCENARIOS.items()], "timeframes":TIMEFRAME_OPTIONS})
+
+
+@mtf_scanner_bp.route("/mw-run", methods=["POST"])
+def mw_run_route():
+    p = request.get_json(force=True) or {}
+    watchlist_id = p.get("watchlist_id")
+    side = str(p.get("pattern") or "both").lower()
+    if not watchlist_id: return jsonify({"error":"watchlist_id required"}), 400
+    timeframe = str(p.get("timeframe") or "1d")
+    lookback = max(20, min(120, int(p.get("lookback") or 40)))
+    tolerance = max(.25, min(8, float(p.get("tolerance_pct") or 2)))
+    checks = []
+    if side in ("m", "both"): checks.append(("M Top", f'IsDoubleTop({lookback},{tolerance},"{timeframe}")'))
+    if side in ("w", "both"): checks.append(("W Bottom", f'IsDoubleBottom({lookback},{tolerance},"{timeframe}")'))
+    results = []
+    for label, query in checks:
+        with current_app.test_client() as c:
+            data = c.post("/scanner-builder/api/run", json={"query_text":query,"watchlist_id":watchlist_id,"result_columns":_cols(timeframe)}).get_json() or {}
+        for row in data.get("results", []):
+            item={"symbol":row.get("symbol"),"pattern":label,"price":row.get("price"),"metrics":row.get("_result_columns") or {},"scenarios":[{"key":"mw","label":label}]}
+            _trade(item); results.append(item)
+    return jsonify({"results":results,"pattern":side,"timeframe":timeframe})
