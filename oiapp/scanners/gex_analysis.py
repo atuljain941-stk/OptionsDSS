@@ -99,7 +99,7 @@ def data_api():
     if not stamp:
         return jsonify({"error": f"No saved option chain for {symbol}"}), 404
 
-    sql = "SELECT expiration,type,strike,oi,gamma,iv,underlying FROM options WHERE symbol=? AND fetch_ts=? AND oi>0"
+    sql = "SELECT expiration,type,strike,oi,volume,gamma,iv,underlying FROM options WHERE symbol=? AND fetch_ts=? AND oi>0"
     args = [symbol, stamp]
     if expiration != "all":
         sql += " AND expiration=?"
@@ -117,9 +117,9 @@ def data_api():
     if not rows or spot is None:
         return jsonify({"error": "Live spot lookup failed and no stored price is available"}), 422
 
-    by_strike = defaultdict(lambda: {"call_gex": 0.0, "put_gex": 0.0, "call_oi": 0, "put_oi": 0})
+    by_strike = defaultdict(lambda: {"call_gex": 0.0, "put_gex": 0.0, "call_oi": 0, "put_oi": 0, "call_volume": 0, "put_volume": 0})
     for row in rows:
-        strike, gamma, oi = _num(row["strike"]), _num(row["gamma"]), _num(row["oi"])
+        strike, gamma, oi, volume = _num(row["strike"]), _num(row["gamma"]), _num(row["oi"]), _num(row["volume"])
         kind = str(row["type"] or "").lower()
         if strike is None or oi is None:
             continue
@@ -134,9 +134,11 @@ def data_api():
         if kind.startswith("c"):
             bucket["call_gex"] += exposure
             bucket["call_oi"] += int(oi)
+            bucket["call_volume"] += int(volume or 0)
         elif kind.startswith("p"):
             bucket["put_gex"] += exposure
             bucket["put_oi"] += int(oi)
+            bucket["put_volume"] += int(volume or 0)
 
     ordered = sorted(by_strike)
     if not ordered:
@@ -153,7 +155,7 @@ def data_api():
         series.append({
             "strike": strike, "net_gamma": call_gex - put_gex, "abs_gamma": call_gex + put_gex,
             "call_gamma": call_gex, "put_gamma": put_gex, "put_gamma_signed": -put_gex,
-            "call_oi": value["call_oi"], "put_oi": value["put_oi"],
+            "call_oi": value["call_oi"], "put_oi": value["put_oi"],\n            "call_volume": value["call_volume"], "put_volume": value["put_volume"],
         })
 
     total_call = sum(v["call_gex"] for v in by_strike.values())
