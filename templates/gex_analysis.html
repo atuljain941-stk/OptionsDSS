@@ -32,7 +32,7 @@
   </div></section>
   <section id="metrics" class="metrics card" style="display:none"></section>
   <section class="card"><div class="legend"><span><i class="dot" style="background:#5794f2"></i>Call / positive gamma</span><span><i class="dot" style="background:#ef6b73"></i>Put / negative gamma</span><span><i class="dot" style="background:#5794f2"></i>Dotted line = live spot</span></div><div id="chart"></div></section>
-  <section class="activity-row">
+  <section id="oi-activity-row" class="activity-row">
     <div class="card"><div class="chart-title">Open Interest by Strike</div><div class="legend"><span><i class="dot" style="background:#5794f2"></i>Call OI</span><span><i class="dot" style="background:#ef6b73"></i>Put OI</span></div><div id="oi-chart"></div></div>
     <div class="card"><div class="chart-title">OI Change vs Previous Snapshot</div><div class="legend"><span><i class="dot" style="background:#5794f2"></i>Positive change</span><span><i class="dot" style="background:#ef6b73"></i>Negative change</span></div><div id="oi-change-chart"></div></div>
   </section>
@@ -61,8 +61,11 @@
     else{traces=[{x:x,y:d.series.map(function(r){return r.call_gamma;}),type:'bar',marker:{color:'#5794f2'},name:'Call gamma'},{x:x,y:d.series.map(function(r){return r.put_gamma_signed;}),type:'bar',marker:{color:'#ef6b73'},name:'Put gamma'}];title='Call vs Put Gamma Exposure by Strike';}
     var layout=spotLayout(d,{title:{text:title,font:{color:'#e5e7eb',size:16}},paper_bgcolor:'transparent',plot_bgcolor:'transparent',font:{color:'#cbd5e1'},barmode:'relative',margin:{l:62,r:20,t:60,b:55},xaxis:{title:'Strike',gridcolor:'#243044'},yaxis:{title:'Gamma exposure ($ per 1% move)',gridcolor:'#243044',tickformat:'~s',zerolinecolor:'#6b7280'},showlegend:true,legend:{orientation:'h',y:-.2}});
     Plotly.react('chart',traces,layout,{responsive:true});
-    renderActivity('oi-chart',x,d.series.map(function(r){return r.call_oi;}),d.series.map(function(r){return r.put_oi;}),'Open interest',false);
-    renderActivity('oi-change-chart',x,d.series.map(function(r){return r.call_oi_change;}),d.series.map(function(r){return r.put_oi_change;}),'OI change',true);
+    $('oi-activity-row').classList.toggle('hidden',d.mode==='intraday');
+    if(d.mode!=='intraday'){
+      renderActivity('oi-chart',x,d.series.map(function(r){return r.call_oi;}),d.series.map(function(r){return r.put_oi;}),'Open interest',false);
+      renderActivity('oi-change-chart',x,d.series.map(function(r){return r.call_oi_change;}),d.series.map(function(r){return r.put_oi_change;}),'OI change',true);
+    }
     renderActivity('volume-chart',x,d.series.map(function(r){return r.call_volume;}),d.series.map(function(r){return r.put_volume;}),'Daily volume',false);
   }
   function syncTimer(){if(state.timer){clearInterval(state.timer);state.timer=null;}$('refresh-field').classList.toggle('hidden',$('mode').value!=='intraday');if($('mode').value==='intraday'){state.timer=setInterval(run,Math.max(1,Number($('refresh-minutes').value)||5)*60000);}}
