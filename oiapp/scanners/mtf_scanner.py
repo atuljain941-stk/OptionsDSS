@@ -47,7 +47,12 @@ def _trade(row):
  elif q>=10 or e>=1.06: typ="MRT Short"
  elif q<=-10 or e<=.94: typ="MRT Long"
  else: typ="Signal only"
- rec,flags=_chain_trade(row,typ) if typ not in ('MRT Range','Signal only') else (None,[])
+ # Never let option-chain availability or a malformed legacy row remove a
+ # technically valid MTF match.  A missing/invalid chain is Signal only.
+ try:
+  rec,flags=_chain_trade(row,typ) if typ not in ('MRT Range','Signal only') else (None,[])
+ except Exception as exc:
+  rec,flags=None,[f'Chain unavailable: {str(exc)[:80]}']
  if not rec:rec={'recommendation':'Signal only','expiry':None,'dte':None,'legs':'—','max_profit':None,'max_loss':None,'breakevens':[],'rr':None,'pop_proxy':None,'iv':None,'delta':None}
  score=min(100,50+10*sum([bool(up),bool(down),abs(q)>=10,abs(e-1)>=.04])+(10 if rec['recommendation']!='Signal only' else 0))
  rec.update({'setup':typ,'score':score,'flags':flags,'comment':f"{typ} · walls {abs(call-put)/p*100:.1f}% apart" if p and call and put else f"{typ} · saved-chain check"})
