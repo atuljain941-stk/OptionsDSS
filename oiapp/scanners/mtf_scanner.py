@@ -307,5 +307,5 @@ def mw_run_route():
     rows=[]
     for label,query in queries:
         with current_app.test_client() as c:data=(c.post("/scanner-builder/api/run",json={"query_text":query,"watchlist_id":watchlist_id,"result_columns":_mtf_result_columns(timeframe)}).get_json() or {})
-        for row in data.get("results",[]):\n            item={"symbol":row.get("symbol"),"pattern":label,"price":row.get("price"),"metrics":row.get("_result_columns") or {}}\n            item["trade"]=_mw_trade_idea(item)\n            rows.append(item)
+        for row in data.get("results",[]): rows.append({"symbol":row.get("symbol"),"pattern":label,"price":row.get("price"),"metrics":row.get("_result_columns") or {}})
     return jsonify({"results":rows,"timeframe":timeframe})
