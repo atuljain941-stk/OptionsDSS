@@ -645,11 +645,17 @@ def create_app():
         from .scanners.gex_predictive_analysis import gex_predictive_bp
         app.register_blueprint(gex_predictive_bp)
         print("[app] GEX Predictive Analysis registered at /gex-predictive-analysis")
+    except Exception as e:
+        print(f"[app] WARNING: gex_predictive_analysis not loaded — {e}")
+
+    # Keep this independent: a predictive-analysis dependency must not hide
+    # the saved-chain GEX dashboard route.
+    try:
         from .scanners.gex_analysis import gex_analysis_bp
         app.register_blueprint(gex_analysis_bp)
         print("[app] GEX Analysis registered at /gex-analysis")
     except Exception as e:
-        print(f"[app] WARNING: gex_predictive_analysis not loaded — {e}")
+        print(f"[app] WARNING: gex_analysis not loaded — {e}")
 
     try:
         from .scanners.greeks_strategy_scanner import greeks_strategy_bp
