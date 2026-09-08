@@ -202,6 +202,6 @@ def mw_run_route():
     if pattern in ("w","both"): queries.append(("W Bottom",f'TouchCount(Support({lookback},"{timeframe}"),{tolerance},{lookback},"{timeframe}") >= 2 and lookback(BounceOffSwingLow({tolerance},{lookback},2,2,"{timeframe}"),3) and close > ema5'))
     rows=[]
     for label,query in queries:
-        with current_app.test_client() as c:data=(c.post("/scanner-builder/api/run",json={"query_text":query,"watchlist_id":watchlist_id,"result_columns":_cols(timeframe)}).get_json() or {})
+        with current_app.test_client() as c:data=(c.post("/scanner-builder/api/run",json={"query_text":query,"watchlist_id":watchlist_id,"result_columns":_mtf_result_columns(timeframe)}).get_json() or {})
         for row in data.get("results",[]): rows.append({"symbol":row.get("symbol"),"pattern":label,"price":row.get("price"),"metrics":row.get("_result_columns") or {}})
     return jsonify({"results":rows,"timeframe":timeframe})
