@@ -248,8 +248,8 @@ def _mw_trade_idea(row):
 
     eligible_chain = [dict(x) for x in raw if _dte(x["expiration"]) is not None and 14 <= _dte(x["expiration"]) <= 45]
     chain = [x for x in eligible_chain if str(x.get("type") or "").lower().startswith(side[0]) and _option_mid(x) is not None]
-    if not chain:
-        return {"kind": "signal", "label": "Signal only", "flags": ["No liquid 14–45 DTE " + side + "s"], "comment": "Technical pattern detected; no eligible saved options."}
+    if not eligible_chain:
+        return {"kind": "signal", "label": "Signal only", "flags": ["No liquid 14–45 DTE options"], "comment": "Technical pattern detected; no eligible saved options."}
 
     expiries = sorted({x["expiration"] for x in chain}, key=lambda x: abs((_dte(x) or 999) - 30))
     for expiry in expiries:
