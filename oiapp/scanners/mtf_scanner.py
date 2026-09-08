@@ -67,3 +67,9 @@ def run_route():
  if not p.get("watchlist_id") or not keys:return jsonify({"error":"watchlist_id and scenarios required"}),400
  try:return jsonify(run_mtf_scan(p["watchlist_id"],keys,str(p.get("htf") or "1m"),str(p.get("ltf") or "1d"),int(p.get("trend_bars") or 10),float(p.get("trend_threshold_deg") or 3),max(2,min(10,int(p.get("maturity_bars") or 3))),bool(p.get("require_oi_unwind",True)),float(p.get("min_oi_unwind_pct") or 3)))
  except Exception as e:return jsonify({"error":str(e)}),500
+
+
+@mtf_scanner_bp.route("/options")
+def options_route():
+    """UI metadata; keeps the MTF scenario picker independent of a scan."""
+    return jsonify({"scenarios":[{"key":key, "label":value["label"]} for key, value in SCENARIOS.items()], "timeframes":TIMEFRAME_OPTIONS})
