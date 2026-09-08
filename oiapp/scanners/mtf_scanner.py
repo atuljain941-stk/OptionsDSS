@@ -67,3 +67,35 @@ def run_route():
  if not p.get("watchlist_id") or not keys:return jsonify({"error":"watchlist_id and scenarios required"}),400
  try:return jsonify(run_mtf_scan(p["watchlist_id"],keys,str(p.get("htf") or "1m"),str(p.get("ltf") or "1d"),int(p.get("trend_bars") or 10),float(p.get("trend_threshold_deg") or 3),max(2,min(10,int(p.get("maturity_bars") or 3))),bool(p.get("require_oi_unwind",True)),float(p.get("min_oi_unwind_pct") or 3)))
  except Exception as e:return jsonify({"error":str(e)}),500
+
+
+@mtf_scanner_bp.route("/options")
+def options_route():
+    """UI metadata; keeps the MTF scenario picker independent of a scan."""
+    return jsonify({"scenarios":[{"key":key, "label":value["label"]} for key, value in SCENARIOS.items()], "timeframes":TIMEFRAME_OPTIONS})
+
+
+@mtf_scanner_bp.route("/mw-run", methods=["POST"])
+def mw_run_route():
+    p = request.get_json(force=True) or {}
+    watchlist_id = p.get("watchlist_id")
+    side = str(p.get("pattern") or "both").lower()
+    if not watchlist_id: return jsonify({"error":"watchlist_id required"}), 400
+    timeframe = str(p.get("timeframe") or "1d")
+    lookback = max(20, min(120, int(p.get("lookback") or 40)))
+    tolerance = max(.25, min(8, float(p.get("tolerance_pct") or 2)))
+    # M/W definition intentionally uses the Scanner Builder touch/bounce
+    # primitives: a second/third structural test and a recent rejection/bounce.
+    checks = []
+    if side in ("m", "both"):
+        checks.append(("M Top", f'TouchCount(Resistance(60,"{timeframe}"),{tolerance},60,"{timeframe}") >= 2 and lookback(BounceOffSwingHigh({tolerance},60,2,2,"{timeframe}"),3) and close < ema5'))
+    if side in ("w", "both"):
+        checks.append(("W Bottom", f'TouchCount(Support(60,"{timeframe}"),{tolerance},60,"{timeframe}") >= 2 and lookback(BounceOffSwingLow({tolerance},60,2,2,"{timeframe}"),3) and close > ema5'))
+    results = []
+    for label, query in checks:
+        with current_app.test_client() as c:
+            data = c.post("/scanner-builder/api/run", json={"query_text":query,"watchlist_id":watchlist_id,"result_columns":_cols(timeframe)}).get_json() or {}
+        for row in data.get("results", []):
+            item={"symbol":row.get("symbol"),"pattern":label,"price":row.get("price"),"metrics":row.get("_result_columns") or {},"scenarios":[{"key":"mw","label":label}]}
+            _trade(item); results.append(item)
+    return jsonify({"results":results,"pattern":side,"timeframe":timeframe})
