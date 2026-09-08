@@ -1885,6 +1885,7 @@
     <div id="tab-mtf-scan" class="section">
       <div class="card" data-pt-pin="top" data-pt-title="MTF Alignment Controls" style="padding:14px 16px;margin-bottom:10px">
         <div class="card-title" style="margin:0 0 4px">📊 Multi-Timeframe Alignment</div>
+        <div style="display:flex;gap:6px;margin:0 0 10px"><button class="btn btn-primary" id="mtf-alignment-tab" type="button" onclick="_mtfSubtab('alignment')">Alignment</button><button class="btn btn-ghost" id="mtf-mw-tab" type="button" onclick="_mtfSubtab('mw')">M/W Reversal & Trade Ideas</button></div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Compares a higher timeframe's trend against a lower timeframe's structure -- misalignment with a fresh counter-move (possible rejection), alignment (continuation), or an LTF base significant enough to matter on the timeframe above it. Reuses ChochBullish/Bearish, BosBullish/Bearish, SqueezeOn, and VolumeDryup -- the same primitives usable in any custom query.</div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
           <div>
@@ -1943,7 +1944,8 @@
       </div>
       <div class="tbl-wrap" id="mtf-results"></div>
     </div>
-    <!-- ═══════════════ CANDLE CONTEXT SCANNER ══════════════════ -->
+
+      <div id="mtf-mw-panel" style="display:none" class="card"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end"><label>Pattern<br><select id="mw-pattern"><option value="both">M tops + W bottoms</option><option value="m">M tops</option><option value="w">W bottoms</option></select></label><label>Timeframe<br><select id="mw-timeframe"><option value="1d">Daily</option><option value="1w">Weekly</option><option value="4h">4 Hour</option></select></label><label>Lookback<br><input id="mw-lookback" type="number" min="20" max="120" value="40" style="width:60px"></label><label>Tolerance %<br><input id="mw-tolerance" type="number" min=".25" max="8" step=".25" value="2" style="width:60px"></label><button class="btn btn-primary" type="button" onclick="_mwRun()">▶ Run M/W Scan</button></div><div id="mw-status" class="status">Uses saved Scanner Builder double-top/double-bottom primitives and the selected MTF watchlist.</div><div id="mw-results" class="tbl-wrap"></div></div>\n    <!-- ═══════════════ CANDLE CONTEXT SCANNER ══════════════════ -->
     <div id="tab-candle-ctx-scan" class="section">
       <div class="card" data-pt-pin="top" data-pt-title="Candle Context Controls" style="padding:14px 16px;margin-bottom:10px">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
@@ -3929,6 +3931,11 @@
     if (dir) dir.value = 'desc';
     window._mtfApplyClientFilters();
   };
+</script>
+
+<script>
+window._mtfSubtab=function(which){var align=document.getElementById('mtf-scenario-picker').closest('.card');var mw=document.getElementById('mtf-mw-panel');align.style.display=which==='alignment'?'':'none';mw.style.display=which==='mw'?'':'none';document.getElementById('mtf-alignment-tab').className=which==='alignment'?'btn btn-primary':'btn btn-ghost';document.getElementById('mtf-mw-tab').className=which==='mw'?'btn btn-primary':'btn btn-ghost';};
+window._mwRun=async function(){var status=document.getElementById('mw-status'),out=document.getElementById('mw-results'),watch=Number(document.getElementById('mtf-watchlist').value);if(!watch){status.textContent='Choose a watchlist first.';return;}status.textContent='⏳ Scanning M/W reversals…';var res=await fetch('/mtf-scanner/mw-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({watchlist_id:watch,pattern:document.getElementById('mw-pattern').value,timeframe:document.getElementById('mw-timeframe').value,lookback:document.getElementById('mw-lookback').value,tolerance_pct:document.getElementById('mw-tolerance').value})}),data=await res.json();if(!res.ok||data.error){status.textContent='❌ '+(data.error||res.status);return;}status.textContent='✅ '+data.results.length+' M/W candidates';out.innerHTML='<table style="width:100%"><thead><tr><th>Symbol</th><th>Pattern</th><th>Setup</th><th>Recommendation</th><th>Legs</th><th>Score</th><th>RR</th><th>Flags</th></tr></thead><tbody>'+data.results.map(function(x){var t=x.trade||{};return '<tr><td>'+x.symbol+'</td><td>'+x.pattern+'</td><td>'+t.setup+'</td><td>'+t.recommendation+'</td><td>'+t.legs+'</td><td>'+t.score+'</td><td>'+(t.rr||'—')+'</td><td>'+(t.flags||[]).join(' · ')+'</td></tr>';}).join('')+'</tbody></table>';};
 </script>
 </body>
 </html>
