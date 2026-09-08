@@ -84,9 +84,13 @@ def mw_run_route():
     timeframe = str(p.get("timeframe") or "1d")
     lookback = max(20, min(120, int(p.get("lookback") or 40)))
     tolerance = max(.25, min(8, float(p.get("tolerance_pct") or 2)))
+    # M/W definition intentionally uses the Scanner Builder touch/bounce
+    # primitives: a second/third structural test and a recent rejection/bounce.
     checks = []
-    if side in ("m", "both"): checks.append(("M Top", f'IsDoubleTop({lookback},{tolerance},"{timeframe}")'))
-    if side in ("w", "both"): checks.append(("W Bottom", f'IsDoubleBottom({lookback},{tolerance},"{timeframe}")'))
+    if side in ("m", "both"):
+        checks.append(("M Top", f'TouchCount(Resistance(60,"{timeframe}"),{tolerance},60,"{timeframe}") >= 2 and lookback(BounceOffSwingHigh({tolerance},60,2,2,"{timeframe}"),3) and close < ema5'))
+    if side in ("w", "both"):
+        checks.append(("W Bottom", f'TouchCount(Support(60,"{timeframe}"),{tolerance},60,"{timeframe}") >= 2 and lookback(BounceOffSwingLow({tolerance},60,2,2,"{timeframe}"),3) and close > ema5'))
     results = []
     for label, query in checks:
         with current_app.test_client() as c:
