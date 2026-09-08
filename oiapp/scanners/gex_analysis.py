@@ -7,6 +7,8 @@ import sqlite3
 from flask import Blueprint, jsonify, render_template, request
 
 from ..config import DB_PATH
+from ._spot_cache import _fetch as fetch_live_spot
+from .spy_strategies import _bs_gamma
 
 gex_analysis_bp = Blueprint("gex_analysis", __name__, url_prefix="/gex-analysis")
 
@@ -28,6 +30,26 @@ def _latest_stamp(symbol):
 def _spot_from_rows(rows):
     spots = [_num(row["underlying"]) for row in rows if _num(row["underlying"]) and _num(row["underlying"]) > 0]
     return spots[-1] if spots else None
+
+
+def _stored_spot(symbol):
+    """Prefer the app's local price caches before any live lookup."""
+    candidates = (
+        ("SELECT close FROM intraday_price_cache WHERE symbol=? AND close>0 ORDER BY ts DESC LIMIT 1", "ts"),
+        ("SELECT close FROM intraday_2m_price_cache WHERE symbol=? AND close>0 ORDER BY ts_et DESC LIMIT 1", "ts_et"),
+        ("SELECT close FROM price_cache WHERE symbol=? AND close>0 ORDER BY date DESC LIMIT 1", "date"),
+    )
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
+        for sql, _ in candidates:
+            try:
+                row = con.execute(sql, (symbol,)).fetchone()
+                value = _num(row[0]) if row else None
+                if value and value > 0:
+                    return value
+            except sqlite3.OperationalError:
+                # Some deployments do not have every cache table.
+                continue
+    return None
 
 
 def _dte(expiration):
@@ -77,7 +99,7 @@ def data_api():
     if not stamp:
         return jsonify({"error": f"No saved option chain for {symbol}"}), 404
 
-    sql = "SELECT expiration,type,strike,oi,gamma,underlying FROM options WHERE symbol=? AND fetch_ts=? AND oi>0 AND gamma IS NOT NULL"
+    sql = "SELECT expiration,type,strike,oi,gamma,iv,underlying FROM options WHERE symbol=? AND fetch_ts=? AND oi>0"
     args = [symbol, stamp]
     if expiration != "all":
         sql += " AND expiration=?"
@@ -85,15 +107,27 @@ def data_api():
     with sqlite3.connect(DB_PATH, timeout=10) as con:
         con.row_factory = sqlite3.Row
         rows = con.execute(sql, args).fetchall()
-    spot = _spot_from_rows(rows)
+    # One direct quote call per Analyze action keeps the GEX dollar scaling
+    # aligned with current spot; stored values are fallback only.
+    spot = fetch_live_spot(symbol)
+    spot_source = "live" if spot else None
+    if spot is None:
+        spot = _spot_from_rows(rows) or _stored_spot(symbol)
+        spot_source = "saved fallback" if spot else None
     if not rows or spot is None:
-        return jsonify({"error": "Saved chain has no usable underlying price and gamma rows"}), 422
+        return jsonify({"error": "Live spot lookup failed and no stored price is available"}), 422
 
     by_strike = defaultdict(lambda: {"call_gex": 0.0, "put_gex": 0.0, "call_oi": 0, "put_oi": 0})
     for row in rows:
         strike, gamma, oi = _num(row["strike"]), _num(row["gamma"]), _num(row["oi"])
         kind = str(row["type"] or "").lower()
-        if strike is None or gamma is None or oi is None:
+        if strike is None or oi is None:
+            continue
+        if gamma is None or gamma <= 0:
+            iv = _num(row["iv"]) or 30.0
+            iv = iv * 100.0 if iv <= 1 else iv
+            gamma = _bs_gamma(spot, strike, max(1, _dte(row["expiration"]) or 1), iv)
+        if gamma is None or gamma <= 0:
             continue
         exposure = abs(gamma) * oi * 100 * spot * spot * .01
         bucket = by_strike[strike]
@@ -129,7 +163,7 @@ def data_api():
     call_wall = max(by_strike, key=lambda k: by_strike[k]["call_gex"])
     put_wall = max(by_strike, key=lambda k: by_strike[k]["put_gex"])
     return jsonify({
-        "symbol": symbol, "expiration": expiration, "fetch_ts": stamp, "spot": spot,
+        "symbol": symbol, "expiration": expiration, "fetch_ts": stamp, "spot": spot, "spot_source": spot_source,
         "dte": _dte(expiration) if expiration != "all" else None, "series": series,
         "summary": {
             "net_gex": net, "abs_gex": gross, "call_gex": total_call, "put_gex": total_put,
