@@ -155,7 +155,8 @@ def data_api():
         series.append({
             "strike": strike, "net_gamma": call_gex - put_gex, "abs_gamma": call_gex + put_gex,
             "call_gamma": call_gex, "put_gamma": put_gex, "put_gamma_signed": -put_gex,
-            "call_oi": value["call_oi"], "put_oi": value["put_oi"],\n            "call_volume": value["call_volume"], "put_volume": value["put_volume"],
+            "call_oi": value["call_oi"], "put_oi": value["put_oi"],
+            "call_volume": value["call_volume"], "put_volume": value["put_volume"],
         })
 
     total_call = sum(v["call_gex"] for v in by_strike.values())
