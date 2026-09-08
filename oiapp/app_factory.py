@@ -645,6 +645,9 @@ def create_app():
         from .scanners.gex_predictive_analysis import gex_predictive_bp
         app.register_blueprint(gex_predictive_bp)
         print("[app] GEX Predictive Analysis registered at /gex-predictive-analysis")
+        from .scanners.gex_analysis import gex_analysis_bp
+        app.register_blueprint(gex_analysis_bp)
+        print("[app] GEX Analysis registered at /gex-analysis")
     except Exception as e:
         print(f"[app] WARNING: gex_predictive_analysis not loaded — {e}")
 
