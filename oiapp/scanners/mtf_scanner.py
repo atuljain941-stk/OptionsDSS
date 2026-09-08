@@ -188,3 +188,20 @@ def run_route():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@mtf_scanner_bp.route("/mw-run", methods=["POST"])
+def mw_run_route():
+    """Separate M/W scan; deliberately does not alter Alignment filtering."""
+    p=request.get_json(force=True) or {}; watchlist_id=p.get("watchlist_id")
+    if not watchlist_id:return jsonify({"error":"watchlist_id required"}),400
+    timeframe=str(p.get("timeframe") or "1d"); pattern=str(p.get("pattern") or "both").lower()
+    tolerance=max(.25,min(8,float(p.get("tolerance_pct") or 1.0))); lookback=max(20,min(120,int(p.get("lookback") or 60)))
+    queries=[]
+    if pattern in ("m","both"): queries.append(("M Top",f'TouchCount(Resistance({lookback},"{timeframe}"),{tolerance},{lookback},"{timeframe}") >= 2 and lookback(BounceOffSwingHigh({tolerance},{lookback},2,2,"{timeframe}"),3) and close < ema5'))
+    if pattern in ("w","both"): queries.append(("W Bottom",f'TouchCount(Support({lookback},"{timeframe}"),{tolerance},{lookback},"{timeframe}") >= 2 and lookback(BounceOffSwingLow({tolerance},{lookback},2,2,"{timeframe}"),3) and close > ema5'))
+    rows=[]
+    for label,query in queries:
+        with current_app.test_client() as c:data=(c.post("/scanner-builder/api/run",json={"query_text":query,"watchlist_id":watchlist_id,"result_columns":_cols(timeframe)}).get_json() or {})
+        for row in data.get("results",[]): rows.append({"symbol":row.get("symbol"),"pattern":label,"price":row.get("price"),"metrics":row.get("_result_columns") or {}})
+    return jsonify({"results":rows,"timeframe":timeframe})
