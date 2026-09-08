@@ -27,6 +27,7 @@
     <label class="field">Strikes around spot<input id="strikes" type="number" value="40" min="10" max="120"></label>
     <label class="field">Data mode<select id="mode"><option value="saved">Saved snapshot</option><option value="intraday">Intraday</option></select></label>
     <label id="refresh-field" class="field hidden">Refresh every<select id="refresh-minutes"><option value="1">1 min</option><option value="2">2 min</option><option value="5" selected>5 min</option><option value="10">10 min</option><option value="15">15 min</option></select></label>
+    <span id="oi-date-controls" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><label class="field">OI change from<input id="oi-from" type="date"></label><label class="field">to<input id="oi-to" type="date"></label></span>
     <button id="load">↻ Analyze GEX</button>
     <div class="views"><button class="view active" data-view="net">Net Gamma</button><button class="view" data-view="abs">Abs Gamma</button><button class="view" data-view="callput">Call vs Put</button></div>
   </div></section>
@@ -34,7 +35,7 @@
   <section class="card"><div class="legend"><span><i class="dot" style="background:#5794f2"></i>Call / positive gamma</span><span><i class="dot" style="background:#ef6b73"></i>Put / negative gamma</span><span><i class="dot" style="background:#5794f2"></i>Dotted line = live spot</span></div><div id="chart"></div></section>
   <section id="oi-activity-row" class="activity-row">
     <div class="card"><div class="chart-title">Open Interest by Strike</div><div class="legend"><span><i class="dot" style="background:#5794f2"></i>Call OI</span><span><i class="dot" style="background:#ef6b73"></i>Put OI</span></div><div id="oi-chart"></div></div>
-    <div class="card"><div class="chart-title">OI Change vs Previous Snapshot</div><div class="legend"><span><i class="dot" style="background:#5794f2"></i>Positive change</span><span><i class="dot" style="background:#ef6b73"></i>Negative change</span></div><div id="oi-change-chart"></div></div>
+    <div class="card"><div class="chart-title">Call vs Put OI Change</div><div class="legend"><span><i class="dot" style="background:#5794f2"></i>Call OI change (above zero)</span><span><i class="dot" style="background:#ef6b73"></i>Put OI change (below zero)</span></div><div id="oi-change-chart"></div></div>
   </section>
   <section class="card"><div class="chart-title">Daily Volume by Strike</div><div class="legend"><span><i class="dot" style="background:#5794f2"></i>Call volume</span><span><i class="dot" style="background:#ef6b73"></i>Put volume</span><span class="note">Intraday mode fetches these values from the live option chain.</span></div><div id="volume-chart"></div></section>
   <section class="card explain">
@@ -64,14 +65,16 @@
     $('oi-activity-row').classList.toggle('hidden',d.mode==='intraday');
     if(d.mode!=='intraday'){
       renderActivity('oi-chart',x,d.series.map(function(r){return r.call_oi;}),d.series.map(function(r){return r.put_oi;}),'Open interest',false);
-      renderActivity('oi-change-chart',x,d.series.map(function(r){return r.call_oi_change;}),d.series.map(function(r){return r.put_oi_change;}),'OI change',true);
+      renderActivity('oi-change-chart',x,d.series.map(function(r){return Math.abs(Number(r.call_oi_change)||0);}),d.series.map(function(r){return -Math.abs(Number(r.put_oi_change)||0);}), 'OI change',true);
     }
     renderActivity('volume-chart',x,d.series.map(function(r){return r.call_volume;}),d.series.map(function(r){return r.put_volume;}),'Daily volume',false);
   }
-  function syncTimer(){if(state.timer){clearInterval(state.timer);state.timer=null;}$('refresh-field').classList.toggle('hidden',$('mode').value!=='intraday');if($('mode').value==='intraday'){state.timer=setInterval(run,Math.max(1,Number($('refresh-minutes').value)||5)*60000);}}
-  async function run(){try{var intraday=$('mode').value==='intraday';status(intraday?'Refreshing live spot, IV, and volume…':'Calculating saved-chain gamma exposure…');var url='/gex-analysis/api/data?symbol='+encodeURIComponent($('symbol').value)+'&expiration='+encodeURIComponent($('expiration').value)+'&strikes='+encodeURIComponent($('strikes').value)+'&mode='+encodeURIComponent($('mode').value);var d=await json(url);state.data=d;metrics(d);render();var note=d.live_note?' · '+d.live_note:'';status(d.symbol+' · spot '+Number(d.spot).toFixed(2)+' ('+(d.spot_source||'unknown')+') · '+d.market_source+' · '+(d.expiration==='all'?'all expirations':d.expiration)+' · OI snapshot '+d.fetch_ts+note,d.live_note?'warning':'note');}catch(e){status(e.message,'error');}}
+  function syncTimer(){var intra=$('mode').value==='intraday';if(state.timer){clearInterval(state.timer);state.timer=null;}$('refresh-field').classList.toggle('hidden',!intra);$('oi-date-controls').classList.toggle('hidden',intra);if(intra){state.timer=setInterval(run,Math.max(1,Number($('refresh-minutes').value)||5)*60000);}}
+  function isoDay(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+  function setOiDefaults(){var today=new Date(),prior=new Date(today);prior.setDate(prior.getDate()-1);while(prior.getDay()===0||prior.getDay()===6)prior.setDate(prior.getDate()-1);$('oi-to').value=isoDay(today);$('oi-from').value=isoDay(prior);}
+  async function run(){try{var intraday=$('mode').value==='intraday';status(intraday?'Refreshing live spot, IV, and volume…':'Calculating saved-chain gamma exposure…');var url='/gex-analysis/api/data?symbol='+encodeURIComponent($('symbol').value)+'&expiration='+encodeURIComponent($('expiration').value)+'&strikes='+encodeURIComponent($('strikes').value)+'&mode='+encodeURIComponent($('mode').value)+'&oi_from='+encodeURIComponent($('oi-from').value)+'&oi_to='+encodeURIComponent($('oi-to').value);var d=await json(url);state.data=d;metrics(d);render();var note=d.live_note?' · '+d.live_note:'';var oiNote=d.mode==='saved'&&d.oi_change?' · OI '+d.oi_change.from_date+' → '+d.oi_change.to_date:'';status(d.symbol+' · spot '+Number(d.spot).toFixed(2)+' ('+(d.spot_source||'unknown')+') · '+d.market_source+' · '+(d.expiration==='all'?'all expirations':d.expiration)+oiNote+note,d.live_note?'warning':'note');}catch(e){status(e.message,'error');}}
   $('symbol').addEventListener('change',function(){loadExpirations().catch(function(e){status(e.message,'error');});});
   $('load').addEventListener('click',run);$('mode').addEventListener('change',function(){if($('mode').value==='intraday'&&$('expiration').value==='all'&&$('expiration').options.length>1)$('expiration').selectedIndex=1;syncTimer();run();});$('refresh-minutes').addEventListener('change',syncTimer);
-  document.querySelectorAll('[data-view]').forEach(function(b){b.addEventListener('click',function(){state.view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(function(x){x.classList.toggle('active',x===b);});render();});});loadSymbols();
+  document.querySelectorAll('[data-view]').forEach(function(b){b.addEventListener('click',function(){state.view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(function(x){x.classList.toggle('active',x===b);});render();});});setOiDefaults();loadSymbols();
 })();
 </script></body></html>
