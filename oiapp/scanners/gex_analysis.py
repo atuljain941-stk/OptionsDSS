@@ -1,6 +1,6 @@
 """Interactive gamma-exposure analysis from saved and live option-chain inputs."""
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 import math
 import sqlite3
 
@@ -27,13 +27,25 @@ def _latest_stamp(symbol):
     return row[0] if row else None
 
 
-def _previous_stamp(symbol, stamp):
+def _stamp_on_or_before(symbol, selected_day):
+    """Resolve a calendar date to the latest saved option snapshot on/before it."""
+    try:
+        selected_day = date.fromisoformat(str(selected_day)[:10]).isoformat()
+    except (TypeError, ValueError):
+        return None
     with sqlite3.connect(DB_PATH, timeout=10) as con:
         row = con.execute(
-            "SELECT MAX(fetch_ts) FROM options WHERE symbol=? AND fetch_ts < ?",
-            (symbol.upper(), stamp),
+            "SELECT MAX(fetch_ts) FROM options WHERE symbol=? AND date(fetch_ts) <= ?",
+            (symbol.upper(), selected_day),
         ).fetchone()
     return row[0] if row else None
+
+
+def _prior_business_day():
+    day = date.today() - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day.isoformat()
 
 
 def _spot_from_rows(rows):
@@ -78,11 +90,11 @@ def _saved_rows(symbol, stamp, expiration):
         return [dict(row) for row in con.execute(sql, args).fetchall()]
 
 
-def _previous_oi(symbol, previous_stamp, expiration):
-    if not previous_stamp:
+def _oi_by_stamp(symbol, snapshot_stamp, expiration):
+    if not snapshot_stamp:
         return {}
     sql = "SELECT type,strike,SUM(oi) AS oi FROM options WHERE symbol=? AND fetch_ts=?"
-    args = [symbol, previous_stamp]
+    args = [symbol, snapshot_stamp]
     if expiration != "all":
         sql += " AND expiration=?"
         args.append(expiration)
@@ -157,6 +169,8 @@ def data_api():
     symbol = (request.args.get("symbol") or "").upper().strip()
     expiration = (request.args.get("expiration") or "all").strip()
     mode = (request.args.get("mode") or "saved").lower()
+    oi_from_date = (request.args.get("oi_from") or _prior_business_day()).strip()
+    oi_to_date = (request.args.get("oi_to") or date.today().isoformat()).strip()
     strike_count = max(10, min(120, int(request.args.get("strikes") or 40)))
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
@@ -175,10 +189,12 @@ def data_api():
     if not rows or spot is None:
         return jsonify({"error": "Live spot lookup failed and no stored price is available"}), 422
 
-    # OI is a saved baseline for the GEX calculation. In intraday mode we do
-    # not treat it as a live input or query a previous snapshot for an OI chart.
-    previous_stamp = _previous_stamp(symbol, stamp) if mode == "saved" else None
-    prior_oi = _previous_oi(symbol, previous_stamp, expiration) if previous_stamp else {}
+    # OI is a saved baseline for GEX. OI change is a date-to-date comparison
+    # of saved snapshots, never an intraday live input.
+    oi_from_stamp = _stamp_on_or_before(symbol, oi_from_date) if mode == "saved" else None
+    oi_to_stamp = _stamp_on_or_before(symbol, oi_to_date) if mode == "saved" else None
+    oi_from = _oi_by_stamp(symbol, oi_from_stamp, expiration)
+    oi_to = _oi_by_stamp(symbol, oi_to_stamp, expiration)
     live_fields, live_note = ({}, None)
     market_source = "saved snapshot"
     if mode == "intraday":
@@ -211,16 +227,16 @@ def data_api():
 
         exposure = abs(gamma) * oi * 100 * spot * spot * 0.01
         bucket = by_strike[strike]
-        prior = prior_oi.get((side, strike), 0)
+        oi_change = oi_to.get((side, strike), 0) - oi_from.get((side, strike), 0)
         if side == "c":
             bucket["call_gex"] += exposure
             bucket["call_oi"] += int(oi)
-            bucket["call_oi_change"] += int(oi) - prior
+            bucket["call_oi_change"] += oi_change
             bucket["call_volume"] += int(volume or 0)
         else:
             bucket["put_gex"] += exposure
             bucket["put_oi"] += int(oi)
-            bucket["put_oi_change"] += int(oi) - prior
+            bucket["put_oi_change"] += oi_change
             bucket["put_volume"] += int(volume or 0)
 
     ordered = sorted(by_strike)
@@ -259,7 +275,12 @@ def data_api():
         "symbol": symbol,
         "expiration": expiration,
         "fetch_ts": stamp,
-        "previous_fetch_ts": previous_stamp,
+        "oi_change": {
+            "from_date": oi_from_date if mode == "saved" else None,
+            "to_date": oi_to_date if mode == "saved" else None,
+            "from_fetch_ts": oi_from_stamp,
+            "to_fetch_ts": oi_to_stamp,
+        },
         "mode": mode,
         "market_source": market_source,
         "live_note": live_note,
