@@ -59,7 +59,6 @@ def _dte(expiration):
         return None
 
 
-@gex_analysis_bp.route("")
 @gex_analysis_bp.route("/")
 def page():
     return render_template("gex_analysis.html")
