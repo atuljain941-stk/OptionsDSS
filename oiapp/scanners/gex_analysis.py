@@ -175,8 +175,10 @@ def data_api():
     if not rows or spot is None:
         return jsonify({"error": "Live spot lookup failed and no stored price is available"}), 422
 
-    previous_stamp = _previous_stamp(symbol, stamp)
-    prior_oi = _previous_oi(symbol, previous_stamp, expiration)
+    # OI is a saved baseline for the GEX calculation. In intraday mode we do
+    # not treat it as a live input or query a previous snapshot for an OI chart.
+    previous_stamp = _previous_stamp(symbol, stamp) if mode == "saved" else None
+    prior_oi = _previous_oi(symbol, previous_stamp, expiration) if previous_stamp else {}
     live_fields, live_note = ({}, None)
     market_source = "saved snapshot"
     if mode == "intraday":
