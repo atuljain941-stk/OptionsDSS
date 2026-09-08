@@ -32,6 +32,26 @@ def _spot_from_rows(rows):
     return spots[-1] if spots else None
 
 
+def _stored_spot(symbol):
+    """Prefer the app's local price caches before any live lookup."""
+    candidates = (
+        ("SELECT close FROM intraday_price_cache WHERE symbol=? AND close>0 ORDER BY ts DESC LIMIT 1", "ts"),
+        ("SELECT close FROM intraday_2m_price_cache WHERE symbol=? AND close>0 ORDER BY ts_et DESC LIMIT 1", "ts_et"),
+        ("SELECT close FROM price_cache WHERE symbol=? AND close>0 ORDER BY date DESC LIMIT 1", "date"),
+    )
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
+        for sql, _ in candidates:
+            try:
+                row = con.execute(sql, (symbol,)).fetchone()
+                value = _num(row[0]) if row else None
+                if value and value > 0:
+                    return value
+            except sqlite3.OperationalError:
+                # Some deployments do not have every cache table.
+                continue
+    return None
+
+
 def _dte(expiration):
     try:
         return (date.fromisoformat(str(expiration)[:10]) - date.today()).days
@@ -87,7 +107,7 @@ def data_api():
     with sqlite3.connect(DB_PATH, timeout=10) as con:
         con.row_factory = sqlite3.Row
         rows = con.execute(sql, args).fetchall()
-    spot = _spot_from_rows(rows) or get_spot(symbol)
+    spot = _spot_from_rows(rows) or _stored_spot(symbol) or get_spot(symbol)
     if not rows or spot is None:
         return jsonify({"error": "No saved-chain underlying price and live spot lookup failed"}), 422
 
