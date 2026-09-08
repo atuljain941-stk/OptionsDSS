@@ -29,7 +29,11 @@ configurable threshold -- simple and consistent, reusing the same
 regression-slope primitive already built for the volume-vs-price trend
 discussion, rather than a separate trend classifier.
 """
+from datetime import date
+import sqlite3
+
 from flask import Blueprint, jsonify, request, current_app
+from ..config import DB_PATH
 
 mtf_scanner_bp = Blueprint("mtf_scanner_bp", __name__, url_prefix="/mtf-scanner")
 
@@ -190,6 +194,106 @@ def run_route():
         return jsonify({"error": str(e)}), 500
 
 
+def _number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _option_mid(option):
+    bid, ask, last, price = (_number(option.get(k)) for k in ("bid", "ask", "last", "price"))
+    if bid is not None and ask is not None and bid >= 0 and ask >= bid:
+        return round((bid + ask) / 2.0, 2)
+    return next((round(v, 2) for v in (last, price, bid, ask) if v is not None and v >= 0), None)
+
+
+def _dte(expiration):
+    try:
+        return (date.fromisoformat(str(expiration)[:10]) - date.today()).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _nearest(options, target):
+    return min(options, key=lambda x: abs(_number(x["strike"]) - target)) if options else None
+
+
+def _mw_trade_idea(row):
+    """Create a saved-chain, defined-risk vertical only when usable.
+
+    Technical M/W matches are never filtered out by this enrichment.
+    """
+    metrics = row.get("metrics") or {}
+    price = _number(metrics.get("Close")) or _number(row.get("price"))
+    bullish = row.get("pattern") == "W Bottom"
+    side = "put" if bullish else "call"
+    wall_key, level_key = ("Put Wall", "Major Support") if bullish else ("Call Wall", "Major Resistance")
+    wall, level = _number(metrics.get(wall_key)), _number(metrics.get(level_key))
+    if price is None:
+        return {"kind": "signal", "label": "Signal only", "flags": ["No valid close price"], "comment": "Technical pattern detected; price context is unavailable."}
+
+    try:
+        con = sqlite3.connect(DB_PATH, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            stamp = con.execute("SELECT MAX(fetch_ts) FROM options WHERE symbol = ?", (row["symbol"],)).fetchone()[0]
+            if not stamp:
+                return {"kind": "signal", "label": "Signal only", "flags": ["No saved option chain"], "comment": "Technical pattern detected; collect an option chain to build a trade idea."}
+            raw = con.execute("SELECT expiration,type,strike,price,oi,bid,ask,last,iv,delta,gamma FROM options WHERE symbol=? AND fetch_ts=? AND oi>0", (row["symbol"], stamp)).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return {"kind": "signal", "label": "Signal only", "flags": ["Option chain unavailable"], "comment": "Technical pattern detected; saved-chain lookup failed safely."}
+
+    chain = [dict(x) for x in raw if _dte(x["expiration"]) is not None and 14 <= _dte(x["expiration"]) <= 45]
+    chain = [x for x in chain if str(x.get("type") or "").lower().startswith(side[0]) and _option_mid(x) is not None]
+    if not chain:
+        return {"kind": "signal", "label": "Signal only", "flags": ["No liquid 14–45 DTE " + side + "s"], "comment": "Technical pattern detected; no eligible saved options."}
+
+    expiries = sorted({x["expiration"] for x in chain}, key=lambda x: abs((_dte(x) or 999) - 30))
+    for expiry in expiries:
+        contracts = sorted([x for x in chain if x["expiration"] == expiry], key=lambda x: _number(x["strike"]) or 0)
+        shorts = []
+        for x in contracts:
+            strike, delta = _number(x["strike"]), abs(_number(x.get("delta")) or 0)
+            otm = strike < price if bullish else strike > price
+            if otm and (not delta or 0.10 <= delta <= 0.42):
+                shorts.append(x)
+        if not shorts:
+            continue
+        anchor = next((v for v in (wall, level) if v is not None), price)
+        target = min(anchor, price * .985) if bullish else max(anchor, price * 1.015)
+        short = _nearest(shorts, target)
+        short_strike = _number(short["strike"])
+        longs = [x for x in contracts if (_number(x["strike"]) < short_strike if bullish else _number(x["strike"]) > short_strike)]
+        if not longs:
+            continue
+        long = _nearest(longs, short_strike - max(price * .025, 1.0) if bullish else short_strike + max(price * .025, 1.0))
+        long_strike = _number(long["strike"])
+        width = abs(short_strike - long_strike)
+        credit = round((_option_mid(short) or 0) - (_option_mid(long) or 0), 2)
+        if width <= 0 or credit <= 0 or credit >= width:
+            continue
+        max_loss, rr = round(width - credit, 2), round(credit / (width - credit), 2)
+        pop = round((1 - min(abs(_number(short.get("delta")) or .5), .95)) * 100, 1)
+        structural_values = [v for v in (price, wall, level) if v is not None]
+        beyond_structure = short_strike <= min(structural_values) if bullish else short_strike >= max(structural_values)
+        flags = []
+        if not beyond_structure: flags.append("Short strike is not beyond nearest wall/structure")
+        if rr < .60: flags.append("Risk/reward below 0.60")
+        if abs(_number(short.get("delta")) or 0) > .42: flags.append("High short-leg delta")
+        return {
+            "kind": "vertical", "label": "Candidate" if rr >= .60 and beyond_structure else "Watchlist candidate",
+            "strategy": "Put credit vertical" if bullish else "Call credit vertical", "expiry": expiry, "dte": _dte(expiry),
+            "legs": f"Sell {short_strike:g} / Buy {long_strike:g} {side}", "credit": credit, "max_profit": credit,
+            "max_loss": max_loss, "breakeven": round(short_strike - credit if bullish else short_strike + credit, 2),
+            "rr": rr, "pop_proxy": pop, "iv": _number(short.get("iv")), "delta": _number(short.get("delta")),
+            "flags": flags, "comment": "Newest saved chain only; confirm fills and liquidity before entry."
+        }
+    return {"kind": "signal", "label": "Signal only", "flags": ["No defined-risk saved-chain vertical"], "comment": "Technical pattern detected; no usable vertical met the stored-chain checks."}
+
+
 @mtf_scanner_bp.route("/mw-run", methods=["POST"])
 def mw_run_route():
     """Separate M/W scan; deliberately does not alter Alignment filtering."""
@@ -203,5 +307,5 @@ def mw_run_route():
     rows=[]
     for label,query in queries:
         with current_app.test_client() as c:data=(c.post("/scanner-builder/api/run",json={"query_text":query,"watchlist_id":watchlist_id,"result_columns":_mtf_result_columns(timeframe)}).get_json() or {})
-        for row in data.get("results",[]): rows.append({"symbol":row.get("symbol"),"pattern":label,"price":row.get("price"),"metrics":row.get("_result_columns") or {}})
+        for row in data.get("results",[]):\n            item={"symbol":row.get("symbol"),"pattern":label,"price":row.get("price"),"metrics":row.get("_result_columns") or {}}\n            item["trade"]=_mw_trade_idea(item)\n            rows.append(item)
     return jsonify({"results":rows,"timeframe":timeframe})
