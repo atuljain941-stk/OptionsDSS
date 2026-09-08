@@ -1944,8 +1944,15 @@
         <span id="mtf-client-count" style="color:var(--muted)"></span>
       </div>
       <div class="tbl-wrap" id="mtf-results"></div>
+      <div id="mtf-mw-panel" style="display:none">
+        <div class="card"><div class="card-title">M/W Reversal & Trade Ideas</div>
+          <label>Watchlist <select id="mw-watchlist"></select></label>
+          <label>Pattern <select id="mw-pattern"><option value="both">M Tops + W Bottoms</option><option value="m">M Tops</option><option value="w">W Bottoms</option></select></label>
+          <label>Sort <select id="mw-sort" onchange="mwRender()"><option value="symbol">Symbol</option><option value="pattern">Pattern</option><option value="rsi">RSIΔ90</option><option value="ema13">Close / EMA13</option><option value="ema50">EMA13 / EMA50</option><option value="rr">Risk / Reward</option></select></label>
+          <button class="btn btn-primary" onclick="mwRun()">Run M/W Scan</button>
+        </div><div id="mw-status" class="status"></div><div id="mw-results" class="tbl-wrap"></div>
+      </div>
     </div>
-<div id="mtf-mw-panel" style="display:none"><div class="card"><div class="card-title">M/W Reversal & Trade Ideas</div><label>Watchlist <select id="mw-watchlist"></select></label> <label>Pattern <select id="mw-pattern"><option value="both">M Tops + W Bottoms</option><option value="m">M Tops</option><option value="w">W Bottoms</option></select></label> <label>Sort <select id="mw-sort" onchange="mwRender()"><option value="symbol">Symbol</option><option value="pattern">Pattern</option></select></label> <button class="btn btn-primary" onclick="mwRun()">Run M/W Scan</button></div><div id="mw-status" class="status"></div><div id="mw-results" class="tbl-wrap"></div></div>
     <!-- ═══════════════ CANDLE CONTEXT SCANNER ══════════════════ -->
     <div id="tab-candle-ctx-scan" class="section">
       <div class="card" data-pt-pin="top" data-pt-title="Candle Context Controls" style="padding:14px 16px;margin-bottom:10px">
@@ -3361,7 +3368,7 @@
 
     <div id="tab-gex-analysis" class="section">
       <div class="card" style="padding:12px">
-        <iframe data-src="/gex-analysis/" title="GEX Analysis" style="width:100%;height:90vh;border:0;border-radius:12px;background:#0b1020"></iframe>
+        <iframe src="/gex-analysis/" title="GEX Analysis" style="width:100%;height:90vh;border:0;border-radius:12px;background:#0b1020"></iframe>
       </div>
     </div>
 
@@ -3981,11 +3988,13 @@
     }
   };
 
+  window.mwSetSort = function (key) { var select=byId('mw-sort'); if (select) { select.value=key; window.mwRender(); } };
+
   window.mwRender = function () {
     var output=byId('mw-results'), sort=(byId('mw-sort')||{}).value || 'Symbol';
     if (!output) return;
     var rows=(window.mwRows || []).slice();
-    var values={Symbol:function(r){return r.symbol;},Pattern:function(r){return r.pattern;},'RSI Diff 90':function(r){return (r.metrics||{})['RSI Diff 90'];},'Risk/Reward':function(r){return (r.trade||{}).rr;}};
+    var values={symbol:function(r){return r.symbol;},pattern:function(r){return r.pattern;},rsi:function(r){return (r.metrics||{})['RSI Diff 90'];},ema13:function(r){return (r.metrics||{})['Close / EMA13'];},ema50:function(r){return (r.metrics||{})['EMA13 / EMA50'];},rr:function(r){return (r.trade||{}).rr;}};
     rows.sort(function(a,b){var av=values[sort] ? values[sort](a) : a.symbol, bv=values[sort] ? values[sort](b) : b.symbol; var an=n(av), bn=n(bv); return an != null && bn != null ? bn-an : String(av||'').localeCompare(String(bv||''));});
     var cell='padding:7px 10px;vertical-align:top;border-bottom:1px solid var(--border);white-space:nowrap';
     var head='padding:8px 10px;background:var(--card);color:var(--muted);font-size:10px;letter-spacing:.04em;border-bottom:2px solid var(--border);white-space:nowrap';
@@ -3995,7 +4004,7 @@
       var terms=t.kind==='vertical' ? 'Credit '+money(t.credit)+'<br>Max loss '+money(t.max_loss)+'<br>BE '+money(t.breakeven) : esc(t.comment||'');
       return '<tr><td style="'+cell+';font-weight:700">'+esc(row.symbol)+'</td><td style="'+cell+'">'+esc(row.pattern)+'</td><td align="right" style="'+cell+'">'+money(m.Close==null?row.price:m.Close)+'</td><td align="right" style="'+cell+'">'+ratio(m['Close / EMA13'])+'</td><td align="right" style="'+cell+'">'+ratio(m['EMA13 / EMA50'])+'</td><td align="right" style="'+cell+'">'+signed(m['RSI Diff 90'])+'</td><td align="right" style="'+cell+'">'+money(m['Major Support'])+'</td><td align="right" style="'+cell+'">'+money(m['Major Resistance'])+'</td><td align="right" style="'+cell+'">'+money(m['Put Wall'])+'</td><td align="right" style="'+cell+'">'+money(m['Call Wall'])+'</td><td style="'+cell+';min-width:225px;white-space:normal">'+idea+'</td><td style="'+cell+';min-width:145px;white-space:normal">'+terms+'</td><td align="right" style="'+cell+'">'+(n(t.rr)==null?'—':Number(t.rr).toFixed(2))+'</td><td align="right" style="'+cell+'">'+(n(t.pop_proxy)==null?'—':Number(t.pop_proxy).toFixed(0)+'%')+'</td><td style="'+cell+';min-width:180px;white-space:normal;color:'+(flags?'#fbbf24':'var(--muted)')+'">'+esc(flags || '—')+'</td></tr>';
     }).join('');
-    output.innerHTML='<div style="overflow:auto"><table style="width:100%;min-width:1780px;font-size:12px;border-collapse:collapse"><thead><tr><th style="'+head+'">Symbol</th><th style="'+head+'">Pattern</th><th align="right" style="'+head+'">Close</th><th align="right" style="'+head+'">Close/EMA13</th><th align="right" style="'+head+'">EMA13/EMA50</th><th align="right" style="'+head+'">RSIΔ90</th><th align="right" style="'+head+'">Support</th><th align="right" style="'+head+'">Resistance</th><th align="right" style="'+head+'">Put Wall</th><th align="right" style="'+head+'">Call Wall</th><th style="'+head+'">Trade idea</th><th style="'+head+'">Economics</th><th align="right" style="'+head+'">R/R</th><th align="right" style="'+head+'">PoP*</th><th style="'+head+'">Flags</th></tr></thead><tbody>'+(body || '<tr><td colspan="15" style="padding:14px;color:var(--muted)">No M/W matches for this watchlist and pattern selection.</td></tr>')+'</tbody></table></div><div style="padding:7px 2px;color:var(--muted);font-size:10px">*PoP is a delta-based proxy, not a forecast. Ideas use only the newest saved option chain; verify current prices, liquidity, and risk before any trade.</div>';
+    output.innerHTML='<div style="overflow:auto"><table style="width:100%;min-width:1780px;font-size:12px;border-collapse:collapse"><thead><tr><th onclick="mwSetSort('symbol')" style="'+head+';cursor:pointer">Symbol ↕</th><th onclick="mwSetSort('pattern')" style="'+head+';cursor:pointer">Pattern ↕</th><th style="'+head+'">Close</th><th onclick="mwSetSort('ema13')" align="right" style="'+head+';cursor:pointer">Close/EMA13 ↕</th><th onclick="mwSetSort('ema50')" align="right" style="'+head+';cursor:pointer">EMA13/EMA50 ↕</th><th onclick="mwSetSort('rsi')" align="right" style="'+head+';cursor:pointer">RSIΔ90 ↕</th><th align="right" style="'+head+'">Support</th><th align="right" style="'+head+'">Resistance</th><th align="right" style="'+head+'">Put Wall</th><th align="right" style="'+head+'">Call Wall</th><th style="'+head+'">Trade idea</th><th style="'+head+'">Economics</th><th align="right" style="'+head+'">R/R</th><th align="right" style="'+head+'">PoP*</th><th style="'+head+'">Flags</th></tr></thead><tbody>'+(body || '<tr><td colspan="15" style="padding:14px;color:var(--muted)">No M/W matches for this watchlist and pattern selection.</td></tr>')+'</tbody></table></div><div style="padding:7px 2px;color:var(--muted);font-size:10px">*PoP is a delta-based proxy, not a forecast. Ideas use only the newest saved option chain; verify current prices, liquidity, and risk before any trade.</div>';
   };
 })();
 </script></body>

@@ -246,10 +246,10 @@ def _mw_trade_idea(row):
     except Exception:
         return {"kind": "signal", "label": "Signal only", "flags": ["Option chain unavailable"], "comment": "Technical pattern detected; saved-chain lookup failed safely."}
 
-    chain = [dict(x) for x in raw if _dte(x["expiration"]) is not None and 14 <= _dte(x["expiration"]) <= 45]
-    chain = [x for x in chain if str(x.get("type") or "").lower().startswith(side[0]) and _option_mid(x) is not None]
-    if not chain:
-        return {"kind": "signal", "label": "Signal only", "flags": ["No liquid 14–45 DTE " + side + "s"], "comment": "Technical pattern detected; no eligible saved options."}
+    eligible_chain = [dict(x) for x in raw if _dte(x["expiration"]) is not None and 14 <= _dte(x["expiration"]) <= 45]
+    chain = [x for x in eligible_chain if str(x.get("type") or "").lower().startswith(side[0]) and _option_mid(x) is not None]
+    if not eligible_chain:
+        return {"kind": "signal", "label": "Signal only", "flags": ["No liquid 14–45 DTE options"], "comment": "Technical pattern detected; no eligible saved options."}
 
     expiries = sorted({x["expiration"] for x in chain}, key=lambda x: abs((_dte(x) or 999) - 30))
     for expiry in expiries:
@@ -290,6 +290,45 @@ def _mw_trade_idea(row):
             "max_loss": max_loss, "breakeven": round(short_strike - credit if bullish else short_strike + credit, 2),
             "rr": rr, "pop_proxy": pop, "iv": _number(short.get("iv")), "delta": _number(short.get("delta")),
             "flags": flags, "comment": "Newest saved chain only; confirm fills and liquidity before entry."
+        }
+    # If an OTM credit spread cannot satisfy the saved-chain economics, try a
+    # directional debit vertical. It still uses exact saved strikes/prices and
+    # leaves the technical match untouched when no liquid candidate exists.
+    debit_side = "call" if bullish else "put"
+    debit_chain = [x for x in eligible_chain if str(x.get("type") or "").lower().startswith(debit_side[0]) and _option_mid(x) is not None]
+    for expiry in sorted({x["expiration"] for x in debit_chain}, key=lambda x: abs((_dte(x) or 999) - 30)):
+        contracts = sorted([x for x in debit_chain if x["expiration"] == expiry], key=lambda x: _number(x["strike"]) or 0)
+        if bullish:
+            longs = [x for x in contracts if _number(x["strike"]) >= price]
+            if not longs: longs = contracts
+            long_leg = _nearest(longs, price)
+            shorts = [x for x in contracts if _number(x["strike"]) > _number(long_leg["strike"])]
+        else:
+            longs = [x for x in contracts if _number(x["strike"]) <= price]
+            if not longs: longs = contracts
+            long_leg = _nearest(longs, price)
+            shorts = [x for x in contracts if _number(x["strike"]) < _number(long_leg["strike"])]
+        if not shorts:
+            continue
+        short_leg = _nearest(shorts, _number(long_leg["strike"]) + (max(price * .025, 1.0) if bullish else -max(price * .025, 1.0)))
+        width = abs(_number(short_leg["strike"]) - _number(long_leg["strike"]))
+        debit = round((_option_mid(long_leg) or 0) - (_option_mid(short_leg) or 0), 2)
+        if width <= 0 or debit <= 0 or debit >= width:
+            continue
+        max_profit, rr = round(width - debit, 2), round((width - debit) / debit, 2)
+        flags = []
+        if rr < .60: flags.append("Risk/reward below 0.60")
+        long_delta = _number(long_leg.get("delta"))
+        if long_delta is not None and abs(long_delta) > .70: flags.append("High long-leg delta")
+        return {
+            "kind": "vertical", "label": "Candidate" if rr >= .60 else "Watchlist candidate",
+            "strategy": "Call debit vertical" if bullish else "Put debit vertical", "expiry": expiry, "dte": _dte(expiry),
+            "legs": f"Buy {_number(long_leg['strike']):g} / Sell {_number(short_leg['strike']):g} {debit_side}", "debit": debit,
+            "max_profit": max_profit, "max_loss": debit,
+            "breakeven": round(_number(long_leg["strike"]) + debit if bullish else _number(long_leg["strike"]) - debit, 2),
+            "rr": rr, "pop_proxy": round(abs(long_delta) * 100, 1) if long_delta is not None else None,
+            "iv": _number(long_leg.get("iv")), "delta": long_delta, "flags": flags,
+            "comment": "Directional fallback using newest saved-chain prices; confirm fills and liquidity before entry."
         }
     return {"kind": "signal", "label": "Signal only", "flags": ["No defined-risk saved-chain vertical"], "comment": "Technical pattern detected; no usable vertical met the stored-chain checks."}
 
