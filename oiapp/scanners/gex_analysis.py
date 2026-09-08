@@ -7,7 +7,7 @@ import sqlite3
 from flask import Blueprint, jsonify, render_template, request
 
 from ..config import DB_PATH
-from ._spot_cache import get_spot
+from ._spot_cache import _fetch as fetch_live_spot
 from .spy_strategies import _bs_gamma
 
 gex_analysis_bp = Blueprint("gex_analysis", __name__, url_prefix="/gex-analysis")
@@ -107,9 +107,15 @@ def data_api():
     with sqlite3.connect(DB_PATH, timeout=10) as con:
         con.row_factory = sqlite3.Row
         rows = con.execute(sql, args).fetchall()
-    spot = _spot_from_rows(rows) or _stored_spot(symbol) or get_spot(symbol)
+    # One direct quote call per Analyze action keeps the GEX dollar scaling
+    # aligned with current spot; stored values are fallback only.
+    spot = fetch_live_spot(symbol)
+    spot_source = "live" if spot else None
+    if spot is None:
+        spot = _spot_from_rows(rows) or _stored_spot(symbol)
+        spot_source = "saved fallback" if spot else None
     if not rows or spot is None:
-        return jsonify({"error": "No saved-chain underlying price and live spot lookup failed"}), 422
+        return jsonify({"error": "Live spot lookup failed and no stored price is available"}), 422
 
     by_strike = defaultdict(lambda: {"call_gex": 0.0, "put_gex": 0.0, "call_oi": 0, "put_oi": 0})
     for row in rows:
@@ -157,7 +163,7 @@ def data_api():
     call_wall = max(by_strike, key=lambda k: by_strike[k]["call_gex"])
     put_wall = max(by_strike, key=lambda k: by_strike[k]["put_gex"])
     return jsonify({
-        "symbol": symbol, "expiration": expiration, "fetch_ts": stamp, "spot": spot,
+        "symbol": symbol, "expiration": expiration, "fetch_ts": stamp, "spot": spot, "spot_source": spot_source,
         "dte": _dte(expiration) if expiration != "all" else None, "series": series,
         "summary": {
             "net_gex": net, "abs_gex": gross, "call_gex": total_call, "put_gex": total_put,
