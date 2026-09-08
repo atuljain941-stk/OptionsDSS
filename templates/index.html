@@ -1882,9 +1882,10 @@
       <div class="tbl-wrap" id="pp-results"></div>
     </div>
     <!-- ═══════════════ MTF ALIGNMENT SCANNER ══════════════════ -->
-    <div id="tab-mtf-scan" class="section">\n      <div id="mtf-shared-tabs" style="display:flex;gap:6px;margin:0 0 8px"><button id="mtf-tab-a2" class="btn btn-primary" type="button" onclick="mtfShowTab(0)">Alignment</button><button id="mtf-tab-m2" class="btn btn-ghost" type="button" onclick="mtfShowTab(1)">M/W Reversal & Trade Ideas</button></div>
+    <div id="tab-mtf-scan" class="section">
+      <div id="mtf-shared-tabs" style="display:flex;gap:6px;margin:0 0 8px"><button id="mtf-tab-a2" class="btn btn-primary" type="button" onclick="mtfShowTab(false)">Alignment</button><button id="mtf-tab-m2" class="btn btn-ghost" type="button" onclick="mtfShowTab(true)">M/W Reversal & Trade Ideas</button><span id="mtf-tab-a" style="display:none"></span><span id="mtf-tab-m" style="display:none"></span></div>
       <div id="mtf-align-controls" class="card" data-pt-pin="top" data-pt-title="MTF Alignment Controls" style="padding:14px 16px;margin-bottom:10px">
-        <div class="card-title" style="margin:0 0 4px">📊 Multi-Timeframe Alignment</div><div style="display:flex;gap:6px;margin:0 0 10px"><button id="mtf-tab-a" class="btn btn-primary" type="button" onclick="mtfShowTab(0)">Alignment</button><button id="mtf-tab-m" class="btn btn-ghost" type="button" onclick="mtfShowTab(1)">M/W Reversal & Trade Ideas</button></div>
+        <div class="card-title" style="margin:0 0 4px">📊 Multi-Timeframe Alignment</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Compares a higher timeframe's trend against a lower timeframe's structure -- misalignment with a fresh counter-move (possible rejection), alignment (continuation), or an LTF base significant enough to matter on the timeframe above it. Reuses ChochBullish/Bearish, BosBullish/Bearish, SqueezeOn, and VolumeDryup -- the same primitives usable in any custom query.</div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
           <div>
@@ -1943,7 +1944,8 @@
       </div>
       <div class="tbl-wrap" id="mtf-results"></div>
     </div>
-<div id="mtf-mw-panel" style="display:none"><div class="card"><div class="card-title">M/W Reversal & Trade Ideas</div><label>Watchlist <select id="mw-watchlist"></select></label> <label>Pattern <select id="mw-pattern"><option value="both">M Tops + W Bottoms</option><option value="m">M Tops</option><option value="w">W Bottoms</option></select></label> <label>Sort <select id="mw-sort" onchange="mwRender()"><option value="symbol">Symbol</option><option value="pattern">Pattern</option></select></label> <button class="btn btn-primary" onclick="mwRun()">Run M/W Scan</button></div><div id="mw-status" class="status"></div><div id="mw-results" class="tbl-wrap"></div></div>\n    <!-- ═══════════════ CANDLE CONTEXT SCANNER ══════════════════ -->
+<div id="mtf-mw-panel" style="display:none"><div class="card"><div class="card-title">M/W Reversal & Trade Ideas</div><label>Watchlist <select id="mw-watchlist"></select></label> <label>Pattern <select id="mw-pattern"><option value="both">M Tops + W Bottoms</option><option value="m">M Tops</option><option value="w">W Bottoms</option></select></label> <label>Sort <select id="mw-sort" onchange="mwRender()"><option value="symbol">Symbol</option><option value="pattern">Pattern</option></select></label> <button class="btn btn-primary" onclick="mwRun()">Run M/W Scan</button></div><div id="mw-status" class="status"></div><div id="mw-results" class="tbl-wrap"></div></div>
+    <!-- ═══════════════ CANDLE CONTEXT SCANNER ══════════════════ -->
     <div id="tab-candle-ctx-scan" class="section">
       <div class="card" data-pt-pin="top" data-pt-title="Candle Context Controls" style="padding:14px 16px;margin-bottom:10px">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
