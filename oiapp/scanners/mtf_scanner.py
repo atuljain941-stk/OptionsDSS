@@ -1,4 +1,7 @@
-"""Multi-Timeframe Alignment Scanner."""
+"""Multi-Timeframe Alignment Scanner.  Concrete saved-chain trade selection lives here."""
+import sqlite3
+from datetime import date
+from ..config import DB_PATH
 from flask import Blueprint, jsonify, request, current_app
 
 mtf_scanner_bp = Blueprint("mtf_scanner_bp", __name__, url_prefix="/mtf-scanner")
@@ -14,6 +17,28 @@ def _build_query(k,h,l,b,t,m,unwind=True,pct=3):
     return f'SqueezeOn(20,2.0,20,10,1.5,"{l}") and VolumeDryup(20,"{l}")<70 and ATRCompression(14,"{_TF_STEP_UP.get(l,l)}")<80'
 
 def _cols(l): return [{"expr":"close","label":"Close"},{"expr":f"close[{l}] / ema13[{l}]","label":"Close / EMA13"},{"expr":f"ema13[{l}] / ema50[{l}]","label":"EMA13 / EMA50"},{"expr":f'rsidiff90(90,"{l}")',"label":"RSI Diff 90"},{"expr":f'Support(60,"{l}")',"label":"Major Support"},{"expr":f'Resistance(60,"{l}")',"label":"Major Resistance"},{"expr":"PutWallStrike()","label":"Put Wall"},{"expr":"CallWallStrike()","label":"Call Wall"}]
+def _chain_trade(row, setup):
+ """Use only the newest stored chain and real leg prices/Greeks."""
+ con=sqlite3.connect(DB_PATH,timeout=20);con.row_factory=sqlite3.Row
+ try:
+  stamp=con.execute("select max(fetch_ts) from options where symbol=?",(row['symbol'],)).fetchone()[0]
+  if not stamp:return None,['No saved option chain']
+  rows=[dict(x) for x in con.execute("select * from options where symbol=? and fetch_ts=? and oi>0",(row['symbol'],stamp))]
+ finally: con.close()
+ p=float((row.get('metrics') or {}).get('Close') or row.get('price') or 0);bull=setup in ('Trending Bull','MRT Long');typ='P' if bull else 'C'
+ def dte(x):
+  try:return (date.fromisoformat(str(x['expiration'])[:10])-date.today()).days
+  except:return -1
+ def px(x):
+  b,a,l,q=[float(x.get(k) or 0) for k in ('bid','ask','last','price')];return (b+a)/2 if b>0 and a>0 else l or q
+ legs=[x for x in rows if str(x.get('type','')).upper().startswith(typ) and 14<=dte(x)<=45 and px(x)>0]
+ for short in sorted([x for x in legs if (float(x['strike'])<p if bull else float(x['strike'])>p) and .12<=abs(float(x.get('delta') or 0))<=.42],key=lambda x:abs(abs(float(x.get('delta') or 0))-.25)):
+  long=[x for x in legs if x['expiration']==short['expiration'] and (float(x['strike'])<float(short['strike']) if bull else float(x['strike'])>float(short['strike']))]
+  if not long:continue
+  buy=min(long,key=lambda x:abs(abs(float(x['strike'])-float(short['strike']))-5));credit=px(short)-px(buy);width=abs(float(short['strike'])-float(buy['strike']));loss=width-credit
+  if credit>0 and loss>0 and credit/loss>=.6:return {'recommendation':'Put Credit Vertical' if bull else 'Call Credit Vertical','expiry':str(short['expiration'])[:10],'dte':dte(short),'legs':f"Sell {short['strike']}{typ} / Buy {buy['strike']}{typ}",'max_profit':round(credit*100,2),'max_loss':round(loss*100,2),'breakevens':[round(float(short['strike'])-credit if bull else float(short['strike'])+credit,2)],'rr':round(credit/loss,2),'pop_proxy':round((1-abs(float(short.get('delta') or 0)))*100,1),'iv':float(short.get('iv') or 0),'delta':float(short.get('delta') or 0)},[]
+ return None,['No liquid defined-risk legs meeting RR floor']
+
 def _trade(row):
  m=row.get("metrics",{}); p=float(m.get("Close") or row.get("price") or 0); call=float(m.get("Call Wall") or 0); put=float(m.get("Put Wall") or 0); r=float(m.get("Major Resistance") or 0); s=float(m.get("Major Support") or 0); e=float(m.get("Close / EMA13") or 1); q=float(m.get("RSI Diff 90") or 0); names=" ".join(x["key"] for x in row["scenarios"])
  up=(call or r)>p and ((call-p)/p if call else (r-p)/p)<.025; down=(put or s)<p and ((p-put)/p if put else (p-s)/p)<.025
@@ -22,8 +47,11 @@ def _trade(row):
  elif q>=10 or e>=1.06: typ="MRT Short"
  elif q<=-10 or e<=.94: typ="MRT Long"
  else: typ="Signal only"
- rec="Iron Condor" if typ=="MRT Range" else ("Call Credit Vertical" if typ=="MRT Short" else ("Put Credit Vertical" if typ=="MRT Long" else typ))
- row["trade"]={"setup":typ,"recommendation":rec,"score":min(100,50+10*sum([bool(up),bool(down),abs(q)>=10,abs(e-1)>=.04])),"comment":f"{typ} · call wall {call or '—'} · put wall {put or '—'}"}
+ rec,flags=_chain_trade(row,typ) if typ not in ('MRT Range','Signal only') else (None,[])
+ if not rec:rec={'recommendation':'Signal only','expiry':None,'dte':None,'legs':'—','max_profit':None,'max_loss':None,'breakevens':[],'rr':None,'pop_proxy':None,'iv':None,'delta':None}
+ score=min(100,50+10*sum([bool(up),bool(down),abs(q)>=10,abs(e-1)>=.04])+(10 if rec['recommendation']!='Signal only' else 0))
+ rec.update({'setup':typ,'score':score,'flags':flags,'comment':f"{typ} · walls {abs(call-put)/p*100:.1f}% apart" if p and call and put else f"{typ} · saved-chain check"})
+ row['trade']=rec
 
 def run_mtf_scan(watchlist_id,keys,h,l,b=10,t=3,m=3,unwind=True,pct=3):
  out={}; cols=_cols(l)
