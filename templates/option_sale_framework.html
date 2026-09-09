@@ -48,8 +48,10 @@
 
   <div class="card">
     <div class="toolbar">
-      <span class="muted" style="font-size:12px">Symbol</span>
-      <input type="text" id="symbol-input" placeholder="e.g. AAPL" style="width:100px;text-transform:uppercase"/>
+      <span class="muted" style="font-size:12px">Watchlist</span>
+      <select id="watchlist-select" style="width:190px"><option value="">Loading watchlists…</option></select>
+      <span class="muted" style="font-size:12px">or Symbol</span>
+      <input type="text" id="symbol-input" placeholder="optional, e.g. AAPL" style="width:140px;text-transform:uppercase"/>
       <span class="muted" style="font-size:12px">Expiry</span>
       <select id="expiry-select" style="width:150px"><option value="">Load a symbol first</option></select>
       <span class="muted" style="font-size:12px">Strategy</span>
@@ -94,26 +96,36 @@
 </div>
 
 <script>
+async function loadWatchlists() {
+  const sel = document.getElementById("watchlist-select");
+  try {
+    const resp = await fetch('/option-sale-framework/api/watchlists'), d = await resp.json();
+    if (!d.ok) throw Error(d.error || 'Unable to load watchlists');
+    sel.innerHTML = '<option value="">Select a watchlist…</option>' + (d.watchlists || []).map(w =>
+      '<option value="'+w.id+'">'+w.name+' ('+w.symbol_count+')</option>').join('');
+  } catch (e) { sel.innerHTML = '<option value="">Watchlists unavailable</option>'; }
+}
 async function loadExpiries() {
   const symbol = document.getElementById("symbol-input").value.trim().toUpperCase();
+  const watchlistId = document.getElementById("watchlist-select").value;
   const sel = document.getElementById("expiry-select");
   sel.innerHTML = "";
-  if (!symbol) { sel.innerHTML = '<option value="">Enter a symbol first</option>'; return; }
+  if (!symbol && !watchlistId) { sel.innerHTML = '<option value="">Select a watchlist or symbol first</option>'; return; }
   try {
-    const resp = await fetch(`/option-sale-framework/api/expiries?symbol=${encodeURIComponent(symbol)}`);
-    const d = await resp.json();
-    if (!d.ok || !d.expiries.length) { sel.innerHTML = '<option value="">No stored expiries for this symbol</option>'; return; }
+    const url = '/option-sale-framework/api/expiries?symbol='+encodeURIComponent(symbol)+'&watchlist_id='+encodeURIComponent(symbol ? '' : watchlistId);
+    const resp = await fetch(url), d = await resp.json();
+    if (!d.ok || !d.expiries.length) { sel.innerHTML = '<option value="">No saved expiries for this scope</option>'; return; }
     d.expiries.forEach(e => {
+      const value = typeof e === 'string' ? e : e.value, coverage = typeof e === 'string' ? null : e.coverage;
       const opt = document.createElement("option");
-      opt.value = e; opt.textContent = e;
+      opt.value = value; opt.textContent = value + (coverage != null && !symbol ? ' ('+coverage+'/'+d.symbol_count+' symbols)' : '');
       sel.appendChild(opt);
     });
-  } catch (e) {
-    sel.innerHTML = '<option value="">Error loading expiries</option>';
-  }
+  } catch (e) { sel.innerHTML = '<option value="">Error loading expiries</option>'; }
 }
-document.getElementById("symbol-input").addEventListener("change", loadExpiries);
+document.getElementById("symbol-input").addEventListener("change", function(){ if(this.value.trim()) document.getElementById("watchlist-select").value=''; loadExpiries(); });
 document.getElementById("symbol-input").addEventListener("blur", loadExpiries);
+document.getElementById("watchlist-select").addEventListener("change", function(){ if(this.value) document.getElementById("symbol-input").value=''; loadExpiries(); });
 
 function verdictClass(v) {
   if (v === "GO") return "verdict-go";
@@ -265,7 +277,8 @@ async function evaluateTrade() {
   const expiry = document.getElementById("expiry-select").value;
   const strategy = document.getElementById("strategy-select").value;
   const status = document.getElementById("eval-status");
-  if (!symbol || !expiry) { status.textContent = "Pick a symbol and expiry first"; return; }
+  const watchlistId = document.getElementById("watchlist-select").value;
+  if ((!symbol && !watchlistId) || !expiry) { status.textContent = "Select a watchlist or symbol, then an expiry"; return; }
   const positions = document.getElementById("positions-input").value.trim();
   const minRr = document.getElementById("min-rr-input").value || 0.5;
   const minOi = document.getElementById("min-oi-input").value || 50;
@@ -278,28 +291,28 @@ async function evaluateTrade() {
   status.innerHTML = '<span class="spinner"></span> Running all 7 stages...';
   document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> Evaluating...</div>';
   try {
-    let url = `/option-sale-framework/api/evaluate?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiry)}&strategy=${strategy}&min_rr=${minRr}&min_oi=${minOi}&max_spread_pct=${maxSpread}` +
+    let url = `/option-sale-framework/api/evaluate?symbol=${encodeURIComponent(symbol)}&watchlist_id=${encodeURIComponent(symbol ? '' : watchlistId)}&expiry=${encodeURIComponent(expiry)}&strategy=${strategy}&min_rr=${minRr}&min_oi=${minOi}&max_spread_pct=${maxSpread}` +
       `&min_atr_multiple=${minAtrMultiple}&beta_neutral_point=${betaNeutral}&beta_floor_multiplier=${betaFloor}&correlation_floor=${corrFloor}&correlation_full_penalty=${corrFull}`;
     if (positions) url += `&existing_positions=${encodeURIComponent(positions)}`;
     const resp = await fetch(url);
     const d = await resp.json();
     if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
     status.textContent = `✓ Evaluation complete`;
-    const r = d.result;
-    document.getElementById("results-body").innerHTML =
-      renderVerdict(r) +
-      renderEarnings(r.earnings_check) +
-      renderStage1(r.stage_1_market_sector_regime) +
-      renderTrendStage(2, "Weekly Trend", r.stage_2_weekly_trend) +
-      renderTrendStage(3, "Daily Setup", r.stage_3_daily_setup) +
-      renderStage4(r.stage_4_iv_vs_hv) +
-      renderStage5(r.stage_5_expected_move_strikes) +
-      renderStage6(r.stage_6_trade_structure_risk) +
-      renderStage7(r.stage_7_beta_correlation_sizing);
+    const entries = d.results || (d.result ? [{symbol:d.result.symbol,result:d.result}] : []);
+    document.getElementById("results-body").innerHTML = entries.map(entry => {
+      if (entry.error) return '<div class="card"><b>'+entry.symbol+'</b><div class="status-err" style="margin-top:6px">'+entry.error+'</div></div>';
+      const r = entry.result;
+      return '<div style="margin-top:20px;font-size:18px;font-weight:900">'+entry.symbol+'</div>' +
+        renderVerdict(r) + renderEarnings(r.earnings_check) + renderStage1(r.stage_1_market_sector_regime) +
+        renderTrendStage(2, "Weekly Trend", r.stage_2_weekly_trend) + renderTrendStage(3, "Daily Setup", r.stage_3_daily_setup) +
+        renderStage4(r.stage_4_iv_vs_hv) + renderStage5(r.stage_5_expected_move_strikes) +
+        renderStage6(r.stage_6_trade_structure_risk) + renderStage7(r.stage_7_beta_correlation_sizing);
+    }).join('');
   } catch (e) {
     status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
   }
 }
+loadWatchlists();
 </script>
 </body>
 </html>

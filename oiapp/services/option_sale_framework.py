@@ -712,14 +712,25 @@ def evaluate_trade(symbol: str, expiry: str, strategy: str = "iron_fly",
 
 
 # ── Routes ──────────────────────────────────────────────────────────────
-# Genuinely missing until now -- evaluate_trade() was a real, tested
-# orchestration with no web-facing surface at all: no Blueprint, no
-# routes, no template. Callable from a Python console, unreachable from
-# a browser. This closes that gap.
 
+import sqlite3
 from flask import Blueprint, jsonify, render_template, request
+from ..config import DB_PATH
 
 option_sale_framework_bp = Blueprint("option_sale_framework", __name__, url_prefix="/option-sale-framework")
+
+
+def _watchlist_symbols(watchlist_id):
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
+        rows = con.execute(
+            "SELECT DISTINCT upper(symbol) FROM watchlist_symbols WHERE watchlist_id=? ORDER BY symbol",
+            (watchlist_id,),
+        ).fetchall()
+    return [row[0] for row in rows if row[0]]
+
+
+def _scope_symbols(symbol, watchlist_id):
+    return [symbol] if symbol else (_watchlist_symbols(watchlist_id) if watchlist_id else [])
 
 
 @option_sale_framework_bp.route("/")
@@ -727,29 +738,61 @@ def page():
     return render_template("option_sale_framework.html")
 
 
+@option_sale_framework_bp.route("/api/watchlists")
+def api_watchlists():
+    try:
+        with sqlite3.connect(DB_PATH, timeout=10) as con:
+            rows = con.execute(
+                """SELECT w.id, w.name, COUNT(ws.symbol) AS symbol_count
+                   FROM watchlists w LEFT JOIN watchlist_symbols ws ON ws.watchlist_id=w.id
+                   GROUP BY w.id, w.name ORDER BY COALESCE(w.is_default,0) DESC, lower(w.name)"""
+            ).fetchall()
+        return jsonify({"ok": True, "watchlists": [
+            {"id": row[0], "name": row[1], "symbol_count": row[2]} for row in rows
+        ]})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @option_sale_framework_bp.route("/api/expiries")
 def api_expiries():
     symbol = (request.args.get("symbol") or "").strip().upper()
-    if not symbol:
-        return jsonify({"ok": False, "error": "symbol required"}), 400
+    raw_watchlist_id = request.args.get("watchlist_id")
     try:
-        import sqlite3
-        conn = sqlite3.connect(_OIAPP_DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT DISTINCT expiration FROM options WHERE symbol=? AND expiration>=date('now') ORDER BY expiration", (symbol,))
-        expiries = [r[0] for r in c.fetchall() if r[0]]
-        conn.close()
-        return jsonify({"ok": True, "expiries": expiries})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        watchlist_id = int(raw_watchlist_id) if raw_watchlist_id else None
+    except ValueError:
+        return jsonify({"ok": False, "error": "invalid watchlist_id"}), 400
+    symbols = _scope_symbols(symbol, watchlist_id)
+    if not symbols:
+        return jsonify({"ok": False, "error": "select a symbol or watchlist"}), 400
+    placeholders = ",".join("?" for _ in symbols)
+    try:
+        with sqlite3.connect(DB_PATH, timeout=10) as con:
+            rows = con.execute(
+                f"""SELECT expiration, COUNT(DISTINCT symbol) AS coverage
+                    FROM options WHERE symbol IN ({placeholders}) AND expiration IS NOT NULL
+                    GROUP BY expiration ORDER BY expiration""",
+                symbols,
+            ).fetchall()
+        return jsonify({"ok": True, "symbol_count": len(symbols),
+                        "expiries": [{"value": row[0], "coverage": row[1]} for row in rows if row[0]]})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @option_sale_framework_bp.route("/api/evaluate")
 def api_evaluate():
     symbol = (request.args.get("symbol") or "").strip().upper()
+    raw_watchlist_id = request.args.get("watchlist_id")
     expiry = request.args.get("expiry")
-    if not symbol or not expiry:
-        return jsonify({"ok": False, "error": "symbol and expiry required"}), 400
+    try:
+        watchlist_id = int(raw_watchlist_id) if raw_watchlist_id else None
+    except ValueError:
+        return jsonify({"ok": False, "error": "invalid watchlist_id"}), 400
+    symbols = _scope_symbols(symbol, watchlist_id)
+    if not symbols or not expiry:
+        return jsonify({"ok": False, "error": "select a symbol or watchlist, then an expiry"}), 400
+
     strategy = request.args.get("strategy", "iron_fly")
     min_rr = float(request.args.get("min_rr", 0.5))
     min_oi = int(request.args.get("min_oi", 50))
@@ -760,18 +803,23 @@ def api_evaluate():
     correlation_floor = float(request.args.get("correlation_floor", 0.3))
     correlation_full_penalty = float(request.args.get("correlation_full_penalty", 0.9))
     positions_raw = request.args.get("existing_positions", "")
-    existing_position_symbols = [s.strip().upper() for s in positions_raw.split(",") if s.strip()] or None
-    try:
-        result = evaluate_trade(
-            symbol, expiry, strategy=strategy,
-            existing_position_symbols=existing_position_symbols,
-            min_rr=min_rr, min_oi=min_oi, max_spread_pct=max_spread_pct,
-            min_atr_multiple=min_atr_multiple,
-            beta_neutral_point=beta_neutral_point, beta_floor_multiplier=beta_floor_multiplier,
-            correlation_floor=correlation_floor, correlation_full_penalty=correlation_full_penalty,
-        )
-        return jsonify({"ok": True, "result": result})
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+    existing_position_symbols = [item.strip().upper() for item in positions_raw.split(",") if item.strip()] or None
+
+    results = []
+    for target_symbol in symbols:
+        try:
+            result = evaluate_trade(
+                target_symbol, expiry, strategy=strategy,
+                existing_position_symbols=existing_position_symbols,
+                min_rr=min_rr, min_oi=min_oi, max_spread_pct=max_spread_pct,
+                min_atr_multiple=min_atr_multiple,
+                beta_neutral_point=beta_neutral_point, beta_floor_multiplier=beta_floor_multiplier,
+                correlation_floor=correlation_floor, correlation_full_penalty=correlation_full_penalty,
+            )
+            results.append({"symbol": target_symbol, "result": result})
+        except Exception as exc:
+            results.append({"symbol": target_symbol, "error": f"{type(exc).__name__}: {exc}"})
+
+    return jsonify({"ok": True, "scope": "symbol" if symbol else "watchlist",
+                    "requested_expiry": expiry, "results": results,
+                    "result": results[0].get("result") if len(results) == 1 and results[0].get("result") else None})
