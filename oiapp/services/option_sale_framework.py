@@ -50,6 +50,7 @@ GENUINELY NEW HERE:
 from __future__ import annotations
 
 import math
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -178,9 +179,11 @@ def _trend_classify(df: pd.DataFrame, label: str, min_atr_multiple: float = 1.0)
     low = df["low"].astype(float) if "low" in df.columns else close
     ema13, ema50 = _ema(close, 13), _ema(close, 50)
     rsi = _rsi(close, 14)
+    rsi_ema90 = _ema(rsi, 90)
     atr = _atr_series(high, low, close, 14)
     price, e13, e50 = float(close.iloc[-1]), float(ema13.iloc[-1]), float(ema50.iloc[-1])
     r = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else None
+    rsi_diff90 = (float(rsi.iloc[-1] - rsi_ema90.iloc[-1]) if not pd.isna(rsi.iloc[-1]) and not pd.isna(rsi_ema90.iloc[-1]) else None)
     atr_val = float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) and atr.iloc[-1] > 0 else None
     gap_price_e13 = price - e13
     gap_e13_e50 = e13 - e50
@@ -205,7 +208,8 @@ def _trend_classify(df: pd.DataFrame, label: str, min_atr_multiple: float = 1.0)
     dist_from_ema13_atr = round(gap_price_e13_atr, 2) if gap_price_e13_atr is not None else None
     return {
         "available": True, "trend": trend, "price": round(price, 2),
-        "ema13": round(e13, 2), "ema50": round(e50, 2), "rsi": round(r, 1) if r is not None else None,
+        "ema13": round(e13, 2), "ema50": round(e50, 2), "ema13_ema50": round(e13 / e50, 4) if e50 else None,
+        "rsi": round(r, 1) if r is not None else None, "rsi_diff90": round(rsi_diff90, 2) if rsi_diff90 is not None else None,
         "atr": round(atr_val, 2) if atr_val else None,
         "dist_from_ema13_pct": dist_from_ema13_pct, "dist_from_ema13_atr": dist_from_ema13_atr,
         "note": (f"{label}: {trend}, {dist_from_ema13_atr}x ATR from EMA13 ({dist_from_ema13_pct}%), RSI {round(r,1) if r is not None else 'n/a'}"
@@ -711,6 +715,54 @@ def evaluate_trade(symbol: str, expiry: str, strategy: str = "iron_fly",
     }
 
 
+def _strategy_summary(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact comparison payload for Auto mode and the results table."""
+    s4 = result.get("stage_4_iv_vs_hv") or {}
+    s3 = result.get("stage_3_daily_setup") or {}
+    s6 = result.get("stage_6_trade_structure_risk") or {}
+    return {"strategy": s6.get("strategy") or result.get("strategy"), "stage_verdict": s6.get("stage_verdict"),
+            "overall_verdict": result.get("overall_verdict"), "pop": s6.get("pop"), "rr": s6.get("rr"),
+            "iv": s4.get("atm_iv_pct"), "rsi_diff90": s3.get("rsi_diff90"),
+            "ema13_ema50": s3.get("ema13_ema50"), "note": s6.get("note")}
+
+
+def evaluate_trade_auto(symbol: str, expiry: str, **kwargs) -> Dict[str, Any]:
+    """Evaluate supported structures and expose a transparent ranking."""
+    from ..scanners.greeks_strategy_scanner import STRATEGY_BUILDERS
+    candidates = []
+    for key in STRATEGY_BUILDERS:
+        try:
+            candidate = evaluate_trade(symbol, expiry, strategy=key, **kwargs)
+            stage6 = candidate.get("stage_6_trade_structure_risk") or {}
+            structural_pass = stage6.get("stage_verdict") == "PASS"
+            pop = float(stage6.get("pop") or 0)
+            rr = float(stage6.get("rr") or 0)
+            no_blockers = not candidate.get("blocking_count", 0)
+            score = (1000 if structural_pass else 0) + (100 if no_blockers else 0) + pop * 100 + min(rr, 10) * 10
+            candidates.append((score, key, candidate))
+        except Exception as exc:
+            candidates.append((-1, key, {"symbol": symbol, "expiry": expiry, "strategy": key, "overall_verdict": "UNAVAILABLE",
+                                          "stage_6_trade_structure_risk": {"available": False, "note": str(exc)}}))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    selected = candidates[0][2]
+    comparisons = []
+    for score, key, candidate in candidates:
+        item = _strategy_summary(candidate)
+        item["key"] = key
+        item["selected"] = candidate is selected
+        comparisons.append(item)
+    selected["requested_strategy"] = "auto"
+    selected["strategy_comparisons"] = comparisons
+    selected_summary = comparisons[0]
+    viable = [c for c in comparisons if c.get("stage_verdict") == "PASS"]
+    if len(viable) > 1:
+        selected["auto_rationale"] = ("Auto selected {} from {} structurally viable choices; it ranked highest on framework verdict, then POP ({:.0f}%) and RR ({}). Review alternatives before placing a trade.".format(
+            selected_summary.get("strategy"), len(viable), (selected_summary.get("pop") or 0) * 100, selected_summary.get("rr") if selected_summary.get("rr") is not None else "n/a"))
+    else:
+        selected["auto_rationale"] = "Auto selected {}; it was the strongest available framework result. Review POP, RR and flags before placing a trade.".format(selected_summary.get("strategy"))
+    return selected
+
+
 # ── Routes ──────────────────────────────────────────────────────────────
 
 import sqlite3
@@ -771,6 +823,7 @@ def api_expiries():
             rows = con.execute(
                 f"""SELECT expiration, COUNT(DISTINCT symbol) AS coverage
                     FROM options WHERE symbol IN ({placeholders}) AND expiration IS NOT NULL
+                      AND date(expiration) >= date('now')
                     GROUP BY expiration ORDER BY expiration""",
                 symbols,
             ).fetchall()
@@ -793,7 +846,7 @@ def api_evaluate():
     if not symbols or not expiry:
         return jsonify({"ok": False, "error": "select a symbol or watchlist, then an expiry"}), 400
 
-    strategy = request.args.get("strategy", "iron_fly")
+    strategy = request.args.get("strategy", "auto")
     min_rr = float(request.args.get("min_rr", 0.5))
     min_oi = int(request.args.get("min_oi", 50))
     max_spread_pct = float(request.args.get("max_spread_pct", 15.0))
@@ -808,14 +861,14 @@ def api_evaluate():
     results = []
     for target_symbol in symbols:
         try:
-            result = evaluate_trade(
-                target_symbol, expiry, strategy=strategy,
-                existing_position_symbols=existing_position_symbols,
-                min_rr=min_rr, min_oi=min_oi, max_spread_pct=max_spread_pct,
-                min_atr_multiple=min_atr_multiple,
+            common_kwargs = dict(
+                existing_position_symbols=existing_position_symbols, min_rr=min_rr, min_oi=min_oi,
+                max_spread_pct=max_spread_pct, min_atr_multiple=min_atr_multiple,
                 beta_neutral_point=beta_neutral_point, beta_floor_multiplier=beta_floor_multiplier,
                 correlation_floor=correlation_floor, correlation_full_penalty=correlation_full_penalty,
             )
+            result = (evaluate_trade_auto(target_symbol, expiry, **common_kwargs) if strategy == 'auto'
+                      else evaluate_trade(target_symbol, expiry, strategy=strategy, **common_kwargs))
             results.append({"symbol": target_symbol, "result": result})
         except Exception as exc:
             results.append({"symbol": target_symbol, "error": f"{type(exc).__name__}: {exc}"})
