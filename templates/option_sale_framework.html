@@ -37,6 +37,7 @@
     .verdict-stand-aside{color:#f87171}
     .flag-item{font-size:12.5px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.06)}
     .flag-item:last-child{border-bottom:none}
+    .summary-wrap{overflow:auto}.summary-table{width:100%;border-collapse:collapse;font-size:12px}.summary-table th,.summary-table td{padding:9px 8px;border-bottom:1px solid rgba(255,255,255,.09);text-align:left;white-space:nowrap}.summary-table th{color:var(--muted,var(--muted2));font-size:10px;text-transform:uppercase}.trade-result[hidden],.summary-row[hidden]{display:none}
   </style>
 </head>
 <body>
@@ -56,6 +57,7 @@
       <select id="expiry-select" style="width:150px"><option value="">Load a symbol first</option></select>
       <span class="muted" style="font-size:12px">Strategy</span>
       <select id="strategy-select" style="width:150px">
+        <option value="auto" selected>Auto — compare best strategies</option>
         <option value="iron_fly">Iron Fly</option>
         <option value="strangle">Short Strangle</option>
         <option value="straddle">Short Straddle</option>
@@ -92,7 +94,8 @@
     </details>
   </div>
 
-  <div id="results-body"><div class="card muted">Enter a symbol, pick an expiry and strategy, then run the evaluation.</div></div>
+  <div id="result-filters" class="card toolbar" hidden><b style="font-size:13px">Screen results</b><span class="muted" style="font-size:12px">Min POP %</span><input type="number" id="screen-pop" min="0" max="100" step="1" placeholder="Any" style="width:64px"/><span class="muted" style="font-size:12px">Min RR</span><input type="number" id="screen-rr" min="0" step="0.1" placeholder="Any" style="width:64px"/><span class="muted" style="font-size:12px">Display-only filters; they do not change evaluation.</span></div>
+  <div id="results-body"><div class="card muted">Select a watchlist or symbol, then choose a future expiry and strategy.</div></div>
 </div>
 
 <script>
@@ -170,6 +173,8 @@ function renderTrendStage(num, title, s) {
       ${fmtKV("EMA13", s.ema13)}
       ${fmtKV("EMA50", s.ema50)}
       ${fmtKV("RSI", s.rsi)}
+      ${fmtKV("RSI Diff 90", s.rsi_diff90)}
+      ${fmtKV("EMA13 / EMA50", s.ema13_ema50)}
       ${fmtKV("ATR Dist", s.dist_from_ema13_atr != null ? s.dist_from_ema13_atr+"x" : null)}
       ${fmtKV("Setup Quality", s.setup_quality)}
     </div>
@@ -243,6 +248,10 @@ function renderEarnings(e) {
   </div>`;
 }
 
+function fmtPct(v) { return v == null ? "—" : Math.round(Number(v)*100)+"%"; }
+function fmtNum(v) { return v == null ? "—" : Number(v).toFixed(2); }
+function resultMetrics(r) { const a=r.stage_4_iv_vs_hv||{}, d=r.stage_3_daily_setup||{}, t=r.stage_6_trade_structure_risk||{}; return {iv:a.atm_iv_pct,rsid:d.rsi_diff90,ema:d.ema13_ema50,pop:t.pop,rr:t.rr,strategy:t.strategy||r.strategy}; }
+function renderAutoComparison(r) { if(!r.strategy_comparisons) return ""; return `<div class="card"><b>Auto strategy comparison</b><div class="stage-note">${r.auto_rationale||""}</div><div class="summary-wrap"><table class="summary-table"><thead><tr><th>Strategy</th><th>Structure</th><th>Overall</th><th>POP</th><th>RR</th><th>Why</th></tr></thead><tbody>${r.strategy_comparisons.map(x=>`<tr><td>${x.selected?"★ ":""}${x.strategy||x.key}</td><td>${x.stage_verdict||"—"}</td><td>${x.overall_verdict||"—"}</td><td>${fmtPct(x.pop)}</td><td>${fmtNum(x.rr)}</td><td>${x.note||"—"}</td></tr>`).join("")}</tbody></table></div></div>`; }
 function renderVerdict(r) {
   // Severity-aware: a blocking flag (structure fails, IV works against
   // the premise, earnings inside the trade) is shown distinctly from a
@@ -272,6 +281,8 @@ function renderVerdict(r) {
   </div>`;
 }
 
+function applyScreenFilters(){const p=Number(document.getElementById("screen-pop").value||0)/100,r=Number(document.getElementById("screen-rr").value||0);document.querySelectorAll(".trade-result").forEach(e=>{const show=Number(e.dataset.pop||0)>=p&&Number(e.dataset.rr||0)>=r;e.hidden=!show;const row=document.querySelector(`.summary-row[data-symbol="${e.dataset.symbol}"]`);if(row)row.hidden=!show;});}
+document.getElementById("screen-pop").addEventListener("input",applyScreenFilters);document.getElementById("screen-rr").addEventListener("input",applyScreenFilters);
 async function evaluateTrade() {
   const symbol = document.getElementById("symbol-input").value.trim().toUpperCase();
   const expiry = document.getElementById("expiry-select").value;
@@ -298,16 +309,11 @@ async function evaluateTrade() {
     const d = await resp.json();
     if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
     status.textContent = `✓ Evaluation complete`;
-    const entries = d.results || (d.result ? [{symbol:d.result.symbol,result:d.result}] : []);
-    document.getElementById("results-body").innerHTML = entries.map(entry => {
-      if (entry.error) return '<div class="card"><b>'+entry.symbol+'</b><div class="status-err" style="margin-top:6px">'+entry.error+'</div></div>';
-      const r = entry.result;
-      return '<div style="margin-top:20px;font-size:18px;font-weight:900">'+entry.symbol+'</div>' +
-        renderVerdict(r) + renderEarnings(r.earnings_check) + renderStage1(r.stage_1_market_sector_regime) +
-        renderTrendStage(2, "Weekly Trend", r.stage_2_weekly_trend) + renderTrendStage(3, "Daily Setup", r.stage_3_daily_setup) +
-        renderStage4(r.stage_4_iv_vs_hv) + renderStage5(r.stage_5_expected_move_strikes) +
-        renderStage6(r.stage_6_trade_structure_risk) + renderStage7(r.stage_7_beta_correlation_sizing);
-    }).join('');
+    const entries = d.results || (d.result ? [{symbol:d.result.symbol,result:d.result}] : []), good=entries.filter(e=>e.result);
+    document.getElementById("result-filters").hidden=!good.length;
+    const summary=good.length?'<div class="card summary-wrap"><table class="summary-table"><thead><tr><th>Symbol</th><th>Expiry</th><th>Strategy</th><th>IV</th><th>RSI Diff 90</th><th>EMA13 / EMA50</th><th>POP</th><th>RR</th><th>Verdict</th></tr></thead><tbody>'+good.map(e=>{const r=e.result,m=resultMetrics(r);return '<tr class="summary-row" data-symbol="'+e.symbol+'"><td>'+e.symbol+'</td><td>'+r.expiry+'</td><td>'+m.strategy+'</td><td>'+(m.iv==null?'—':m.iv+'%')+'</td><td>'+fmtNum(m.rsid)+'</td><td>'+fmtNum(m.ema)+'</td><td>'+fmtPct(m.pop)+'</td><td>'+fmtNum(m.rr)+'</td><td>'+r.overall_verdict+'</td></tr>';}).join('')+'</tbody></table></div>':'';
+    document.getElementById("results-body").innerHTML=summary+entries.map(entry=>{if(entry.error)return '<div class="card"><b>'+entry.symbol+'</b><div class="status-err" style="margin-top:6px">'+entry.error+'</div></div>';const r=entry.result,m=resultMetrics(r);return '<section class="trade-result" data-symbol="'+entry.symbol+'" data-pop="'+(m.pop||0)+'" data-rr="'+(m.rr||0)+'"><div style="margin-top:20px;font-size:18px;font-weight:900">'+entry.symbol+' · '+r.expiry+' · '+m.strategy+'</div>'+renderAutoComparison(r)+renderVerdict(r)+renderEarnings(r.earnings_check)+renderStage1(r.stage_1_market_sector_regime)+renderTrendStage(2,"Weekly Trend",r.stage_2_weekly_trend)+renderTrendStage(3,"Daily Setup",r.stage_3_daily_setup)+renderStage4(r.stage_4_iv_vs_hv)+renderStage5(r.stage_5_expected_move_strikes)+renderStage6(r.stage_6_trade_structure_risk)+renderStage7(r.stage_7_beta_correlation_sizing)+'</section>';}).join('');
+    applyScreenFilters();
   } catch (e) {
     status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
   }
