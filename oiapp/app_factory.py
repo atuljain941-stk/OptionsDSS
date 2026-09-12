@@ -370,6 +370,12 @@ def create_app():
     except Exception as e:
         print(f"[app] WARN: scanner_builder failed: {e}")
     try:
+        from .scanners.institutional_confluence import institutional_confluence_bp
+        app.register_blueprint(institutional_confluence_bp)
+        print("[app] Institutional Confluence Scanner registered at /institutional-confluence")
+    except Exception as e:
+        print(f"[app] WARN: institutional_confluence failed: {e}")
+    try:
         from .scanners.backtest import backtest_bp
         app.register_blueprint(backtest_bp)
         print("[app] Backtest API registered at /backtest")
