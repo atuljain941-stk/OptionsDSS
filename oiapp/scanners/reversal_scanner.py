@@ -20,6 +20,11 @@ def _mode(payload: Dict[str, Any], name: str) -> str:
 def _watchlists() -> List[Dict[str, Any]]:
     """Small local watchlist payload; avoids coupling this scanner UI to a
     broader watchlist page response or its optional enrichment queries."""
+    try:
+        from .watchlist_manager import _ensure_tables
+        _ensure_tables()
+    except Exception:
+        pass
     con = _conn()
     try:
         rows = con.execute(
