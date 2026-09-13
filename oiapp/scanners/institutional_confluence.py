@@ -417,11 +417,19 @@ def run():
                 rows.append({"symbol": "?", "included": False, "score": 0,
                              "error": f"{type(exc).__name__}: {exc}"})
     rows.sort(key=lambda row: (row.get("included", False), row.get("score", 0)), reverse=True)
-    after_sector = sum(1 for row in rows if _mode(payload, "sector_regime") != "filter" or row["stages"]["sector_regime"]["pass"] or row["stages"]["sector_regime"]["status"] == "unavailable")
-    after_mtf = sum(1 for row in rows if _mode(payload, "mtf_confluence") != "filter" or row["stages"]["mtf_confluence"]["pass"] or row["stages"]["mtf_confluence"]["status"] == "unavailable")
-    after_structure = sum(1 for row in rows if _mode(payload, "price_structure") != "filter" or row["stages"]["price_structure"]["pass"] or row["stages"]["price_structure"]["status"] == "unavailable")
-    after_options = sum(1 for row in rows if _mode(payload, "options_positioning") != "filter" or row["stages"]["options_positioning"]["pass"] or row["stages"]["options_positioning"]["status"] == "unavailable")
-    after_earnings = sum(1 for row in rows if _mode(payload, "earnings_risk") != "filter" or row["stages"]["earnings_risk"]["pass"] or row["stages"]["earnings_risk"]["status"] == "unavailable")
+    def survives(row: Dict[str, Any], names: Iterable[str]) -> bool:
+        return all(
+            _mode(payload, name) != "filter"
+            or row["stages"][name]["status"] == "unavailable"
+            or row["stages"][name]["pass"]
+            for name in names
+        )
+    stage_order = ("sector_regime", "mtf_confluence", "price_structure", "options_positioning", "earnings_risk")
+    after_sector = sum(survives(row, stage_order[:1]) for row in rows)
+    after_mtf = sum(survives(row, stage_order[:2]) for row in rows)
+    after_structure = sum(survives(row, stage_order[:3]) for row in rows)
+    after_options = sum(survives(row, stage_order[:4]) for row in rows)
+    after_earnings = sum(survives(row, stage_order) for row in rows)
     min_total_score = max(0, float(payload.get("min_total_score", 0) or 0))
     included = [row for row in rows if row.get("included") and row.get("score", 0) >= min_total_score]
     return jsonify({
