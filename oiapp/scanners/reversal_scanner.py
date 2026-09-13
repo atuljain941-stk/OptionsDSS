@@ -16,6 +16,24 @@ def _num(value: Any) -> Optional[float]:
     except (TypeError, ValueError): return None
 def _mode(payload: Dict[str, Any], name: str) -> str:
     value = str(payload.get(name, "score")).lower(); return value if value in MODES else "score"
+def _watchlists() -> List[Dict[str, Any]]:
+    """Small local watchlist payload; avoids coupling this scanner UI to a
+    broader watchlist page response or its optional enrichment queries."""
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT w.id, w.name, COALESCE(w.is_default, 0) AS is_default, "
+            "COUNT(ws.symbol) AS symbol_count FROM watchlists w "
+            "LEFT JOIN watchlist_symbols ws ON ws.watchlist_id=w.id "
+            "GROUP BY w.id, w.name, w.is_default "
+            "ORDER BY COALESCE(w.is_default, 0) DESC, w.name"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
+
 def _symbols(watchlist_id: int) -> List[str]:
     con = _conn()
     try:
@@ -76,6 +94,10 @@ def _evaluate(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @systematic_reversal_bp.route("/")
 def page(): return render_template("systematic_reversal.html")
+
+@systematic_reversal_bp.route("/api/watchlists")
+def watchlists():
+    return jsonify({"watchlists": _watchlists()})
 @systematic_reversal_bp.route("/api/run",methods=["POST"])
 def run():
     payload=request.get_json(silent=True) or {}
