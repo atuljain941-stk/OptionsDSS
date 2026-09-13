@@ -9,7 +9,7 @@ from __future__ import annotations
 import concurrent.futures
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, render_template, request
@@ -200,6 +200,41 @@ def _options_positioning(symbol: str, direction: str, spot: Optional[float]) -> 
     }
 
 
+def _iv_rank(symbol: str) -> Dict[str, Any]:
+    """IV Rank from daily stored chain snapshots.
+
+    IV Rank is (current IV - lowest observed IV) / observed range.  We use
+    the average IV across each daily stored chain because the database does
+    not retain one canonical ATM contract for every historical snapshot.
+    """
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT date, AVG(iv) AS iv FROM options "
+            "WHERE symbol=? AND iv IS NOT NULL AND iv>0 GROUP BY date ORDER BY date",
+            (symbol,),
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        con.close()
+    values = [(str(row["date"])[:10], _safe_num(row["iv"])) for row in rows]
+    values = [(when, iv) for when, iv in values if iv is not None]
+    if not values:
+        return {"status": "unavailable", "rank": None, "current_iv": None,
+                "observations": 0, "reason": "No historical option IV snapshots"}
+    _, current = values[-1]
+    history = [iv for _, iv in values]
+    low, high = min(history), max(history)
+    rank = 50.0 if high == low else round((current - low) / (high - low) * 100.0, 1)
+    context = "high-volatility context" if rank >= 67 else (
+        "low-volatility context" if rank <= 33 else "mid-range volatility"
+    )
+    return {"status": "ok", "rank": rank, "current_iv": round(current * 100, 1),
+            "low_iv": round(low * 100, 1), "high_iv": round(high * 100, 1),
+            "observations": len(history), "as_of": values[-1][0], "reason": context}
+
+
 def _earnings_risk(symbol: str, min_days: int) -> Dict[str, Any]:
     """Phase 4 catalyst guard using the cached earnings calendar.
 
@@ -240,6 +275,100 @@ def _earnings_risk(symbol: str, min_days: int) -> Dict[str, Any]:
         "details": {"earnings_date": raw, "earnings_days": days,
                     "confirmed": bool(row["next_earn_confirmed"]), "min_days": min_days},
     }
+
+
+def _historical_prices(symbol: str) -> List[Tuple[date, float]]:
+    """Return clean daily closes for a deterministic price-outcome backtest."""
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT date, close FROM price_cache WHERE symbol=? ORDER BY date", (symbol,)
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        con.close()
+    prices: List[Tuple[date, float]] = []
+    for row in rows:
+        try:
+            when = date.fromisoformat(str(row["date"])[:10])
+        except ValueError:
+            continue
+        close = _safe_num(row["close"])
+        if close is not None and close > 0:
+            prices.append((when, close))
+    return prices
+
+
+def _ema(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length:
+        return None
+    value = sum(values[:length]) / length
+    alpha = 2.0 / (length + 1.0)
+    for close in values[length:]:
+        value = alpha * close + (1.0 - alpha) * value
+    return value
+
+
+def _historical_direction(closes: List[float]) -> Optional[str]:
+    """Daily historical signal used for the Phase 5 outcome study.
+
+    It deliberately uses only data available at the entry close: EMA13/EMA50
+    trend placement plus a 10-session momentum check.  We do not pretend that
+    today's cached option chain or sector scan was known on a past date.
+    """
+    ema13, ema50 = _ema(closes, 13), _ema(closes, 50)
+    if ema13 is None or ema50 is None or len(closes) < 11:
+        return None
+    close = closes[-1]
+    momentum = close - closes[-11]
+    if close >= ema13 >= ema50 and momentum >= 0:
+        return "bull"
+    if close <= ema13 <= ema50 and momentum <= 0:
+        return "bear"
+    return None
+
+
+def _backtest_symbol(symbol: str, start: date, days: int, dte: int, direction_mode: str) -> List[Dict[str, Any]]:
+    prices = _historical_prices(symbol)
+    if len(prices) < 50:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for offset in range(days):
+        requested = start + timedelta(days=offset)
+        # A requested non-trading day does not open a duplicate next-session
+        # trade. It is simply skipped, as no closing signal existed that day.
+        entry_idx = next((idx for idx, (when, _) in enumerate(prices) if when == requested), None)
+        if entry_idx is None or entry_idx < 49:
+            continue
+        entry_date, entry_price = prices[entry_idx]
+        side = _historical_direction([close for _, close in prices[:entry_idx + 1]])
+        if side is None or (direction_mode in ("bull", "bear") and side != direction_mode):
+            continue
+        target = entry_date + timedelta(days=dte)
+        exit_idx = next((idx for idx, (when, _) in enumerate(prices) if idx > entry_idx and when >= target), None)
+        if exit_idx is None:
+            rows.append({
+                "symbol": symbol, "trade_date": entry_date.isoformat(), "direction": side,
+                "entry_price": entry_price, "dte": dte, "outcome": "pending",
+                "reason": "No cached close yet at the selected DTE", "exit_date": None,
+                "exit_price": None, "return_pct": None,
+            })
+            continue
+        exit_date, exit_price = prices[exit_idx]
+        raw_return = (exit_price / entry_price - 1.0) * 100.0
+        won = exit_price > entry_price if side == "bull" else exit_price < entry_price
+        rows.append({
+            "symbol": symbol, "trade_date": entry_date.isoformat(), "direction": side,
+            "entry_price": round(entry_price, 2), "dte": dte,
+            "exit_date": exit_date.isoformat(), "exit_price": round(exit_price, 2),
+            "return_pct": round(raw_return, 2), "outcome": "winner" if won else "loser",
+            "reason": (
+                f"{side.title()} signal at entry close; {exit_date.isoformat()} close "
+                f"${exit_price:.2f} is {'above' if exit_price > entry_price else 'below' if exit_price < entry_price else 'equal to'} entry ${entry_price:.2f}"
+            ),
+        })
+    return rows
 
 
 def _safe_num(value: Any) -> Optional[float]:
@@ -359,6 +488,9 @@ def _sector_regime_stage(symbol: str, direction: str) -> Dict[str, Any]:
 
 def _mode(payload: Dict[str, Any], name: str) -> str:
     value = str(payload.get(name, "off")).lower()
+    if name == "earnings_risk":
+        # Earnings is a risk gate, not a directional score contributor.
+        return value if value in {"off", "filter"} else "filter"
     return value if value in STAGE_MODES else "off"
 
 
@@ -372,6 +504,7 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     sector = _sector_regime_stage(symbol, confluence.direction)
     structure = _price_structure(symbol, confluence.direction)
     positioning = _options_positioning(symbol, confluence.direction, structure.get("details", {}).get("price"))
+    iv_rank = _iv_rank(symbol)
     earnings = _earnings_risk(symbol, max(0, int(payload.get("min_earnings_days", 0))))
     stages = {
         "sector_regime": sector,
@@ -390,14 +523,15 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             included = False
     daily = (confluence.timeframe_signals.get("1d") or {}).get("values") or {}
     stage_max = {"sector_regime": 1, "mtf_confluence": 4, "price_structure": 3,
-                 "options_positioning": 2, "earnings_risk": 1}
-    enabled = [name for name in stages if _mode(payload, name) != "off"]
+                 "options_positioning": 2}
+    # Earnings is deliberately excluded: it is Off or Filter only.
+    enabled = [name for name in stage_max if _mode(payload, name) != "off"]
     total_score = round(sum(stages[name]["score"] for name in enabled), 2)
     max_score = sum(stage_max[name] for name in enabled)
     score_breakdown = [
         {"stage": name, "score": stages[name]["score"], "max": stage_max[name],
          "pass": stages[name]["pass"], "status": stages[name]["status"]}
-        for name in stages if _mode(payload, name) == "score"
+        for name in stage_max if _mode(payload, name) == "score"
     ]
     return {
         "symbol": symbol, "included": included, "direction": confluence.direction,
@@ -409,6 +543,7 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             confluence.entry_price_zone[1] or structure.get("details", {}).get("resistance"),
         ],
         "stages": stages,
+        "iv_rank": iv_rank,
     }
 
 
@@ -463,5 +598,55 @@ def run():
             {"stage": "Earnings / catalyst", "count": after_earnings, "mode": _mode(payload, "earnings_risk")},
             {"stage": "Overall score", "count": len(included), "mode": f">= {min_total_score:g}"},
         ],
+        "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    })
+
+
+@institutional_confluence_bp.route("/api/backtest", methods=["POST"])
+def backtest():
+    """Run the daily historical-price outcome study for a selected watchlist.
+
+    This does not reconstruct unavailable historical option, sector, or
+    earnings snapshots.  It uses the entry-date daily close, EMA13/EMA50 and
+    momentum available on that date, then evaluates the close at DTE.  The
+    response makes this limitation explicit so the results are not presented
+    as an options P/L simulation.
+    """
+    payload = request.get_json(silent=True) or {}
+    try:
+        watchlist_id = int(payload.get("watchlist_id"))
+        start = date.fromisoformat(str(payload.get("backtest_from"))[:10])
+        days = max(1, min(90, int(payload.get("backtest_days", 5))))
+        dte = max(1, min(365, int(payload.get("backtest_dte", 30))))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Enter a valid From date, run length, and DTE."}), 400
+    symbols = _watchlist_symbols(watchlist_id)
+    if not symbols:
+        return jsonify({"error": "The selected watchlist has no symbols."}), 400
+    direction = str(payload.get("direction", "both")).lower()
+    if direction not in {"bull", "bear", "both"}:
+        direction = "both"
+    rows: List[Dict[str, Any]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
+        futures = [pool.submit(_backtest_symbol, symbol, start, days, dte, direction) for symbol in symbols]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                rows.extend(future.result())
+            except Exception:
+                continue
+    rows.sort(key=lambda row: (row["trade_date"], row["symbol"]), reverse=True)
+    winners = sum(row["outcome"] == "winner" for row in rows)
+    losers = sum(row["outcome"] == "loser" for row in rows)
+    pending = sum(row["outcome"] == "pending" for row in rows)
+    completed = winners + losers
+    return jsonify({
+        "results": rows,
+        "summary": {
+            "total_trades": len(rows), "winners": winners, "losers": losers,
+            "pending": pending,
+            "win_rate": round(winners / completed * 100, 1) if completed else None,
+            "from_date": start.isoformat(), "days": days, "dte": dte,
+        },
+        "methodology": "Historical daily price signal only: entry-close EMA13/EMA50 plus 10-session momentum; exit is the first cached market close on or after entry date + calendar DTE. This is direction outcome analysis, not option-contract P/L.",
         "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     })
