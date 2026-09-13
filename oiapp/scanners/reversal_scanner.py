@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from flask import Blueprint, jsonify, render_template, request
 from ..config import DB_PATH
 from ..services.technical_snapshot import get_technical_snapshot
+from ..services.option_volatility import option_iv_context
 
 systematic_reversal_bp = Blueprint("systematic_reversal", __name__, url_prefix="/systematic-reversal")
 MODES = {"off", "score", "filter"}
@@ -83,14 +84,23 @@ def _evaluate(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         good=diff<=-20 if target=="bull" else diff>=20
         rsi={"status":"ok","pass":good,"score":2 if good and abs(diff)>=30 else 1 if good else 0,"reason":f"RSIDiff90 {diff:+.1f}; threshold {'≤ -20' if target=='bull' else '≥ +20'}"}
+    iv_context=option_iv_context(symbol,p,dte=max(1,min(365,int(payload.get("volatility_dte",30) or 30))))
+    iv_change=_num(iv_context.get("iv_change_5obs"))
+    if iv_context.get("status")!="ok" or iv_change is None:
+        iv_fade={"status":"unavailable","pass":True,"score":0,"reason":iv_context.get("reason","IV trend unavailable"),"details":iv_context}
+    else:
+        fading=iv_change<=-2.0
+        iv_fade={"status":"ok","pass":fading,"score":2 if iv_change<=-5.0 else 1 if fading else 0,
+                 "reason":f"IV change {iv_change:+.1f} points across five stored observations",
+                 "details":iv_context}
     level=support if target=="bull" else resistance; name="support" if target=="bull" else "resistance"; near=level is not None and (p<=level*1.02 if target=="bull" else p>=level*.98)
     sr={"status":"ok" if level is not None else "unavailable","pass":near if level is not None else True,"score":1 if near else 0,"reason":f"Price {p:.2f}; {name} {level:.2f}" if level is not None else f"{name.title()} unavailable"}
-    stages={"acceleration":acceleration,"streak":streak_stage,"bollinger":boll,"volume":volume,"structure":structure,"rsi_extreme":rsi,"sr_location":sr}
+    stages={"acceleration":acceleration,"streak":streak_stage,"bollinger":boll,"volume":volume,"structure":structure,"rsi_extreme":rsi,"iv_fade":iv_fade,"sr_location":sr}
     included=target!="neutral"
     for name,stage in stages.items():
         if _mode(payload,name)=="filter" and stage["status"]!="unavailable" and not stage["pass"]: included=False
     enabled=[name for name in stages if _mode(payload,name)!="off"]; total=sum(stages[n]["score"] for n in enabled); maximum=sum(1 if n=="sr_location" else 2 for n in enabled)
-    return {"symbol":symbol,"direction":target,"move_direction":move,"price":p,"score":total,"max_score":maximum,"included":included,"stages":stages,"rsidiff90":diff,"support":support,"resistance":resistance}
+    return {"symbol":symbol,"direction":target,"move_direction":move,"price":p,"score":total,"max_score":maximum,"included":included,"stages":stages,"rsidiff90":diff,"support":support,"resistance":resistance,"iv_context":iv_context}
 
 @systematic_reversal_bp.route("/")
 def page(): return render_template("systematic_reversal.html")
