@@ -72,13 +72,16 @@ def _watchlist_symbols(watchlist_id: int) -> List[str]:
         con.close()
 
 
-def _latest_regime(symbol: str) -> Optional[Dict[str, Any]]:
+def _technical_snapshot_as_of(symbol: str, timeframe: str, as_of: Optional[date] = None) -> Optional[Dict[str, Any]]:
+    """Read the latest snapshot available at a historical entry date."""
+    if as_of is None:
+        return get_technical_snapshot(symbol, timeframe)
     con = _conn()
     try:
         row = con.execute(
-            "SELECT regime, confidence, bias, ema_trend, rsi_diff, adx, scan_date "
-            "FROM regime_scan WHERE symbol=? ORDER BY scan_date DESC LIMIT 1",
-            (symbol,),
+            "SELECT * FROM technical_snapshot WHERE symbol=? AND timeframe=? AND date<=? "
+            "ORDER BY date DESC LIMIT 1",
+            (symbol.upper(), timeframe, as_of.isoformat()),
         ).fetchone()
         return dict(row) if row else None
     except sqlite3.Error:
@@ -87,16 +90,35 @@ def _latest_regime(symbol: str) -> Optional[Dict[str, Any]]:
         con.close()
 
 
-def _price_structure(symbol: str, direction: str) -> Dict[str, Any]:
+def _latest_regime(symbol: str, as_of: Optional[date] = None) -> Optional[Dict[str, Any]]:
+    con = _conn()
+    try:
+        query = ("SELECT regime, confidence, bias, ema_trend, rsi_diff, adx, scan_date "
+                 "FROM regime_scan WHERE symbol=?")
+        values: List[Any] = [symbol]
+        if as_of is not None:
+            query += " AND scan_date<=?"
+            values.append(as_of.isoformat())
+        row = con.execute(query + " ORDER BY scan_date DESC LIMIT 1", values).fetchone()
+        return dict(row) if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
+def _price_structure(symbol: str, direction: str, as_of: Optional[date] = None) -> Dict[str, Any]:
     """Phase 2 price/structure evidence from the same cached OHLCV data
     used by the rest of OIAPP.  The cache fallback makes the entry zone
     usable even when a precomputed snapshot has not yet written S/R."""
     con = _conn()
     try:
-        rows = con.execute(
-            "SELECT date, open, high, low, close FROM price_cache "
-            "WHERE symbol=? ORDER BY date DESC LIMIT 60", (symbol,)
-        ).fetchall()
+        query = "SELECT date, open, high, low, close FROM price_cache WHERE symbol=?"
+        values: List[Any] = [symbol]
+        if as_of is not None:
+            query += " AND date<=?"
+            values.append(as_of.isoformat())
+        rows = con.execute(query + " ORDER BY date DESC LIMIT 60", values).fetchall()
     except sqlite3.Error:
         rows = []
     finally:
@@ -118,7 +140,7 @@ def _price_structure(symbol: str, direction: str) -> Dict[str, Any]:
     prior_support = min(lows[-21:-1])
     breakout = price > prior_resistance
     breakdown = price < prior_support
-    snapshot = get_technical_snapshot(symbol, "1d") or {}
+    snapshot = _technical_snapshot_as_of(symbol, "1d", as_of) or {}
     candle_score = _safe_num(snapshot.get("candle_ctx_score"))
     candle_conf = _safe_num(snapshot.get("candle_ctx_confluence"))
     if direction == "bull":
@@ -137,7 +159,8 @@ def _price_structure(symbol: str, direction: str) -> Dict[str, Any]:
     }
 
 
-def _options_positioning(symbol: str, direction: str, spot: Optional[float]) -> Dict[str, Any]:
+def _options_positioning(symbol: str, direction: str, spot: Optional[float],
+                         as_of: Optional[date] = None) -> Dict[str, Any]:
     """Phase 3: use the newest available option-chain snapshot only.
 
     Calls contribute positive gamma (blue in the UI convention) and puts
@@ -146,7 +169,11 @@ def _options_positioning(symbol: str, direction: str, spot: Optional[float]) -> 
     """
     con = _conn()
     try:
-        row = con.execute("SELECT MAX(date) AS d FROM options WHERE symbol=?", (symbol,)).fetchone()
+        query, values = "SELECT MAX(date) AS d FROM options WHERE symbol=?", [symbol]
+        if as_of is not None:
+            query += " AND date<=?"
+            values.append(as_of.isoformat())
+        row = con.execute(query, values).fetchone()
         as_of = row["d"] if row else None
         if not as_of:
             rows = []
@@ -200,7 +227,7 @@ def _options_positioning(symbol: str, direction: str, spot: Optional[float]) -> 
     }
 
 
-def _iv_rank(symbol: str) -> Dict[str, Any]:
+def _iv_rank(symbol: str, as_of: Optional[date] = None) -> Dict[str, Any]:
     """IV Rank from daily stored chain snapshots.
 
     IV Rank is (current IV - lowest observed IV) / observed range.  We use
@@ -209,11 +236,13 @@ def _iv_rank(symbol: str) -> Dict[str, Any]:
     """
     con = _conn()
     try:
-        rows = con.execute(
-            "SELECT date, AVG(iv) AS iv FROM options "
-            "WHERE symbol=? AND iv IS NOT NULL AND iv>0 GROUP BY date ORDER BY date",
-            (symbol,),
-        ).fetchall()
+        query = ("SELECT date, AVG(iv) AS iv FROM options "
+                 "WHERE symbol=? AND iv IS NOT NULL AND iv>0")
+        values: List[Any] = [symbol]
+        if as_of is not None:
+            query += " AND date<=?"
+            values.append(as_of.isoformat())
+        rows = con.execute(query + " GROUP BY date ORDER BY date", values).fetchall()
     except sqlite3.Error:
         rows = []
     finally:
@@ -235,7 +264,8 @@ def _iv_rank(symbol: str) -> Dict[str, Any]:
             "observations": len(history), "as_of": values[-1][0], "reason": context}
 
 
-def _earnings_risk(symbol: str, min_days: int) -> Dict[str, Any]:
+def _earnings_risk(symbol: str, min_days: int, as_of: Optional[date] = None,
+                   dte: Optional[int] = None) -> Dict[str, Any]:
     """Phase 4 catalyst guard using the cached earnings calendar.
 
     An unknown earnings date is reported as unavailable rather than treated
@@ -245,10 +275,13 @@ def _earnings_risk(symbol: str, min_days: int) -> Dict[str, Any]:
     """
     con = _conn()
     try:
-        row = con.execute(
-            "SELECT next_earn_date, next_earn_confirmed, fetch_date FROM earnings_calendar "
-            "WHERE symbol=? ORDER BY fetch_date DESC LIMIT 1", (symbol,)
-        ).fetchone()
+        query = ("SELECT next_earn_date, next_earn_confirmed, fetch_date FROM earnings_calendar "
+                 "WHERE symbol=?")
+        values: List[Any] = [symbol]
+        if as_of is not None:
+            query += " AND fetch_date<=?"
+            values.append(as_of.isoformat())
+        row = con.execute(query + " ORDER BY fetch_date DESC LIMIT 1", values).fetchone()
     except sqlite3.Error:
         row = None
     finally:
@@ -262,18 +295,21 @@ def _earnings_risk(symbol: str, min_days: int) -> Dict[str, Any]:
     except ValueError:
         return {"status": "unavailable", "pass": True, "score": 0,
                 "reason": f"Unparseable earnings date: {raw}", "details": {"earnings_days": None}}
-    days = (earn_date - date.today()).days
+    reference_date = as_of or date.today()
+    days = (earn_date - reference_date).days
     if days < 0:
         return {"status": "unavailable", "pass": True, "score": 0,
                 "reason": "Cached earnings date is no longer upcoming", "details": {"earnings_days": None}}
-    passed = days >= min_days
+    required_days = max(min_days, dte or 0)
+    passed = days >= required_days
     score = 1 if passed else 0
     confirmation = "confirmed" if row["next_earn_confirmed"] else "unconfirmed"
     return {
         "status": "ok", "pass": passed, "score": score,
         "reason": f"Earnings {raw} · {days} calendar day(s) away · {confirmation}",
         "details": {"earnings_date": raw, "earnings_days": days,
-                    "confirmed": bool(row["next_earn_confirmed"]), "min_days": min_days},
+                    "confirmed": bool(row["next_earn_confirmed"]), "min_days": min_days,
+                    "required_days": required_days},
     }
 
 
@@ -329,7 +365,9 @@ def _historical_direction(closes: List[float]) -> Optional[str]:
     return None
 
 
-def _backtest_symbol(symbol: str, start: date, days: int, dte: int, direction_mode: str) -> List[Dict[str, Any]]:
+def _backtest_symbol(symbol: str, start: date, days: int, dte: int,
+                     direction_mode: str, payload: Dict[str, Any],
+                     min_total_score: float) -> List[Dict[str, Any]]:
     prices = _historical_prices(symbol)
     if len(prices) < 50:
         return []
@@ -345,14 +383,27 @@ def _backtest_symbol(symbol: str, start: date, days: int, dte: int, direction_mo
         side = _historical_direction([close for _, close in prices[:entry_idx + 1]])
         if side is None or (direction_mode in ("bull", "bear") and side != direction_mode):
             continue
+        # Every entry date gets its own dated scanner evaluation. For a
+        # Best-of-bull/bear run, force the historical price direction so the
+        # remaining filters evaluate that actual setup.
+        historical_payload = dict(payload)
+        historical_payload["direction"] = side
+        evaluation = _evaluate_symbol(symbol, historical_payload, as_of=entry_date, dte=dte)
+        if not evaluation["included"] or evaluation["score"] < min_total_score:
+            continue
         target = entry_date + timedelta(days=dte)
         exit_idx = next((idx for idx, (when, _) in enumerate(prices) if idx > entry_idx and when >= target), None)
         if exit_idx is None:
             rows.append({
                 "symbol": symbol, "trade_date": entry_date.isoformat(), "direction": side,
                 "entry_price": entry_price, "dte": dte, "outcome": "pending",
-                "reason": "No cached close yet at the selected DTE", "exit_date": None,
+                "reason": (
+                    "No cached close yet at the selected DTE; "
+                    f"historical scanner score {evaluation['score']}/{evaluation['max_score']}"
+                ), "exit_date": None,
                 "exit_price": None, "return_pct": None,
+                "score": evaluation["score"], "max_score": evaluation["max_score"],
+                "stages": evaluation["stages"],
             })
             continue
         exit_date, exit_price = prices[exit_idx]
@@ -365,8 +416,11 @@ def _backtest_symbol(symbol: str, start: date, days: int, dte: int, direction_mo
             "return_pct": round(raw_return, 2), "outcome": "winner" if won else "loser",
             "reason": (
                 f"{side.title()} signal at entry close; {exit_date.isoformat()} close "
-                f"${exit_price:.2f} is {'above' if exit_price > entry_price else 'below' if exit_price < entry_price else 'equal to'} entry ${entry_price:.2f}"
+                f"${exit_price:.2f} is {'above' if exit_price > entry_price else 'below' if exit_price < entry_price else 'equal to'} entry ${entry_price:.2f}; "
+                f"historical scanner score {evaluation['score']}/{evaluation['max_score']}"
             ),
+            "score": evaluation["score"], "max_score": evaluation["max_score"],
+            "stages": evaluation["stages"],
         })
     return rows
 
@@ -412,8 +466,12 @@ def _timeframe_signal(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def MULTI_TIMEFRAME_CONFLUENCE(symbol: str, config: ConfluenceConfig) -> ConfluenceResult:
-    signals = {tf: _timeframe_signal(get_technical_snapshot(symbol, tf)) for tf in TIMEFRAMES}
+def MULTI_TIMEFRAME_CONFLUENCE(symbol: str, config: ConfluenceConfig,
+                               as_of: Optional[date] = None) -> ConfluenceResult:
+    signals = {
+        tf: _timeframe_signal(_technical_snapshot_as_of(symbol, tf, as_of))
+        for tf in TIMEFRAMES
+    }
     available = {tf: s for tf, s in signals.items() if s["status"] == "ok"}
     candidates = ("bull", "bear") if config.direction == "both" else (config.direction,)
     direction = max(
@@ -423,8 +481,9 @@ def MULTI_TIMEFRAME_CONFLUENCE(symbol: str, config: ConfluenceConfig) -> Conflue
     aligned = [tf for tf, signal in available.items() if signal["direction"] == direction]
     score = sum(rule.weight for rule in config.rules if rule.timeframe in aligned)
     daily = signals.get("1d", {}).get("values", {})
-    support = _safe_num((get_technical_snapshot(symbol, "1d") or {}).get("sr_support"))
-    resistance = _safe_num((get_technical_snapshot(symbol, "1d") or {}).get("sr_resistance"))
+    daily_snapshot = _technical_snapshot_as_of(symbol, "1d", as_of) or {}
+    support = _safe_num(daily_snapshot.get("sr_support"))
+    resistance = _safe_num(daily_snapshot.get("sr_resistance"))
     passed = len(aligned) >= config.min_confluences and score >= config.min_confluence_score
     unavailable = [tf for tf, signal in signals.items() if signal["status"] != "ok"]
     reasoning = (
@@ -443,9 +502,10 @@ def MULTI_TIMEFRAME_CONFLUENCE(symbol: str, config: ConfluenceConfig) -> Conflue
     )
 
 
-def _sector_regime_stage(symbol: str, direction: str) -> Dict[str, Any]:
-    regime = _latest_regime(symbol)
-    snapshot = get_technical_snapshot(symbol, "1d") or {}
+def _sector_regime_stage(symbol: str, direction: str,
+                         as_of: Optional[date] = None) -> Dict[str, Any]:
+    regime = _latest_regime(symbol, as_of)
+    snapshot = _technical_snapshot_as_of(symbol, "1d", as_of) or {}
     sector_strength = _safe_num(snapshot.get("sector_strength"))
     sector_rs = _safe_num(snapshot.get("sector_rs"))
     if not regime and sector_strength is None and sector_rs is None:
@@ -494,18 +554,24 @@ def _mode(payload: Dict[str, Any], name: str) -> str:
     return value if value in STAGE_MODES else "off"
 
 
-def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _evaluate_symbol(symbol: str, payload: Dict[str, Any],
+                     as_of: Optional[date] = None,
+                     dte: Optional[int] = None) -> Dict[str, Any]:
     config = ConfluenceConfig(
         direction=str(payload.get("direction", "both")).lower(),
         min_confluences=max(1, min(4, int(payload.get("min_confluences", 3)))),
         min_confluence_score=float(payload.get("min_score", 3)),
     )
-    confluence = MULTI_TIMEFRAME_CONFLUENCE(symbol, config)
-    sector = _sector_regime_stage(symbol, confluence.direction)
-    structure = _price_structure(symbol, confluence.direction)
-    positioning = _options_positioning(symbol, confluence.direction, structure.get("details", {}).get("price"))
-    iv_rank = _iv_rank(symbol)
-    earnings = _earnings_risk(symbol, max(0, int(payload.get("min_earnings_days", 0))))
+    confluence = MULTI_TIMEFRAME_CONFLUENCE(symbol, config, as_of)
+    sector = _sector_regime_stage(symbol, confluence.direction, as_of)
+    structure = _price_structure(symbol, confluence.direction, as_of)
+    positioning = _options_positioning(
+        symbol, confluence.direction, structure.get("details", {}).get("price"), as_of
+    )
+    iv_rank = _iv_rank(symbol, as_of)
+    earnings = _earnings_risk(
+        symbol, max(0, int(payload.get("min_earnings_days", 0))), as_of, dte
+    )
     stages = {
         "sector_regime": sector,
         "mtf_confluence": {
@@ -626,26 +692,13 @@ def backtest():
     direction = str(payload.get("direction", "both")).lower()
     if direction not in {"bull", "bear", "both"}:
         direction = "both"
-    # Apply the same live pipeline first.  Backtest is an outcome study of
-    # the selected setup universe; changing a stage to Filter or changing the
-    # minimum total score must therefore change the universe before any DTE
-    # outcomes are calculated.
-    evaluated: List[Dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
-        futures = [pool.submit(_evaluate_symbol, symbol, payload) for symbol in symbols]
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                evaluated.append(future.result())
-            except Exception:
-                continue
     min_total_score = max(0, float(payload.get("min_total_score", 0) or 0))
-    eligible = [
-        row["symbol"] for row in evaluated
-        if row.get("included") and row.get("score", 0) >= min_total_score
-    ]
     rows: List[Dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(eligible) or 1)) as pool:
-        futures = [pool.submit(_backtest_symbol, symbol, start, days, dte, direction) for symbol in eligible]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
+        futures = [
+            pool.submit(_backtest_symbol, symbol, start, days, dte, direction, payload, min_total_score)
+            for symbol in symbols
+        ]
         for future in concurrent.futures.as_completed(futures):
             try:
                 rows.extend(future.result())
@@ -656,6 +709,7 @@ def backtest():
     losers = sum(row["outcome"] == "loser" for row in rows)
     pending = sum(row["outcome"] == "pending" for row in rows)
     completed = winners + losers
+    eligible_symbols = len({row["symbol"] for row in rows})
     return jsonify({
         "results": rows,
         "summary": {
@@ -663,8 +717,10 @@ def backtest():
             "pending": pending,
             "win_rate": round(winners / completed * 100, 1) if completed else None,
             "from_date": start.isoformat(), "days": days, "dte": dte,
-            "watchlist_symbols": len(symbols), "eligible_symbols": len(eligible),
+            "watchlist_symbols": len(symbols),
+            "eligible_symbols": eligible_symbols,
+            "eligible_setups": len(rows),
         },
-        "methodology": "The enabled live scanner stages and minimum overall score are applied first to choose the setup universe. For each eligible symbol, the historical outcome uses an entry-date daily EMA13/EMA50 plus 10-session momentum signal; exit is the first cached market close on or after entry date + calendar DTE. This is direction outcome analysis, not option-contract P/L.",
+        "methodology": "Every candidate is evaluated using the latest technical, regime, option, and earnings snapshots available on its historical entry date. Earnings Filter requires earnings to be outside both the configured minimum-days window and the selected DTE. Outcome uses the first cached market close on or after entry date + calendar DTE; this is direction outcome analysis, not option-contract P/L.",
         "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     })
