@@ -87,6 +87,56 @@ def _latest_regime(symbol: str) -> Optional[Dict[str, Any]]:
         con.close()
 
 
+def _price_structure(symbol: str, direction: str) -> Dict[str, Any]:
+    """Phase 2 price/structure evidence from the same cached OHLCV data
+    used by the rest of OIAPP.  The cache fallback makes the entry zone
+    usable even when a precomputed snapshot has not yet written S/R."""
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT date, open, high, low, close FROM price_cache "
+            "WHERE symbol=? ORDER BY date DESC LIMIT 60", (symbol,)
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        con.close()
+    if len(rows) < 20:
+        return {"status": "unavailable", "pass": True, "score": 0,
+                "reason": "Insufficient cached daily bars for structure", "details": {}}
+    rows = list(reversed(rows))
+    closes = [_safe_num(row["close"]) for row in rows]
+    highs = [_safe_num(row["high"]) for row in rows]
+    lows = [_safe_num(row["low"]) for row in rows]
+    if not all(value is not None for value in closes + highs + lows):
+        return {"status": "unavailable", "pass": True, "score": 0,
+                "reason": "Incomplete OHLCV data", "details": {}}
+    price = closes[-1]
+    support = round(min(lows[-20:]), 2)
+    resistance = round(max(highs[-20:]), 2)
+    prior_resistance = max(highs[-21:-1])
+    prior_support = min(lows[-21:-1])
+    breakout = price > prior_resistance
+    breakdown = price < prior_support
+    snapshot = get_technical_snapshot(symbol, "1d") or {}
+    candle_score = _safe_num(snapshot.get("candle_ctx_score"))
+    candle_conf = _safe_num(snapshot.get("candle_ctx_confluence"))
+    if direction == "bull":
+        passed = breakout or (price >= support and price > closes[-5])
+        event = "breakout" if breakout else "holding above support" if passed else "no bullish structure confirmation"
+    else:
+        passed = breakdown or (price <= resistance and price < closes[-5])
+        event = "breakdown" if breakdown else "holding below resistance" if passed else "no bearish structure confirmation"
+    score = (2 if breakout or breakdown else 1 if passed else 0) + (1 if (candle_score or 0) >= 4 else 0)
+    return {
+        "status": "ok", "pass": passed, "score": score,
+        "reason": f"{event}; support ${support:.2f} / resistance ${resistance:.2f}",
+        "details": {"price": price, "support": support, "resistance": resistance,
+                    "breakout": breakout, "breakdown": breakdown,
+                    "candle_context_score": candle_score, "candle_context_confluence": candle_conf},
+    }
+
+
 def _safe_num(value: Any) -> Optional[float]:
     try:
         return float(value) if value is not None else None
@@ -201,6 +251,7 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     confluence = MULTI_TIMEFRAME_CONFLUENCE(symbol, config)
     sector = _sector_regime_stage(symbol, confluence.direction)
+    structure = _price_structure(symbol, confluence.direction)
     stages = {
         "sector_regime": sector,
         "mtf_confluence": {
@@ -208,16 +259,21 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             "pass": confluence.is_confluence, "score": confluence.confluence_score,
             "reason": confluence.reasoning, "details": asdict(confluence),
         },
+        "price_structure": structure,
     }
     included = True
-    for name in ("sector_regime", "mtf_confluence"):
+    for name in ("sector_regime", "mtf_confluence", "price_structure"):
         if _mode(payload, name) == "filter" and stages[name]["status"] != "unavailable" and not stages[name]["pass"]:
             included = False
     daily = (confluence.timeframe_signals.get("1d") or {}).get("values") or {}
     return {
         "symbol": symbol, "included": included, "direction": confluence.direction,
         "score": round(sum(stage["score"] for stage in stages.values()), 2),
-        "price": daily.get("close"), "entry_zone": list(confluence.entry_price_zone),
+        "price": daily.get("close") or structure.get("details", {}).get("price"),
+        "entry_zone": [
+            confluence.entry_price_zone[0] or structure.get("details", {}).get("support"),
+            confluence.entry_price_zone[1] or structure.get("details", {}).get("resistance"),
+        ],
         "stages": stages,
     }
 
@@ -248,13 +304,15 @@ def run():
                              "error": f"{type(exc).__name__}: {exc}"})
     rows.sort(key=lambda row: (row.get("included", False), row.get("score", 0)), reverse=True)
     after_sector = sum(1 for row in rows if _mode(payload, "sector_regime") != "filter" or row["stages"]["sector_regime"]["pass"] or row["stages"]["sector_regime"]["status"] == "unavailable")
+    after_mtf = sum(1 for row in rows if _mode(payload, "mtf_confluence") != "filter" or row["stages"]["mtf_confluence"]["pass"] or row["stages"]["mtf_confluence"]["status"] == "unavailable")
     included = [row for row in rows if row.get("included")]
     return jsonify({
         "results": included, "excluded": [row for row in rows if not row.get("included")],
         "funnel": [
             {"stage": "Watchlist", "count": len(symbols)},
             {"stage": "Sector / regime", "count": after_sector, "mode": _mode(payload, "sector_regime")},
-            {"stage": "MTF confluence", "count": len(included), "mode": _mode(payload, "mtf_confluence")},
+            {"stage": "MTF confluence", "count": after_mtf, "mode": _mode(payload, "mtf_confluence")},
+            {"stage": "Price / structure", "count": len(included), "mode": _mode(payload, "price_structure")},
         ],
         "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     })
