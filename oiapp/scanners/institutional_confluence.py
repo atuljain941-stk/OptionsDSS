@@ -626,9 +626,26 @@ def backtest():
     direction = str(payload.get("direction", "both")).lower()
     if direction not in {"bull", "bear", "both"}:
         direction = "both"
-    rows: List[Dict[str, Any]] = []
+    # Apply the same live pipeline first.  Backtest is an outcome study of
+    # the selected setup universe; changing a stage to Filter or changing the
+    # minimum total score must therefore change the universe before any DTE
+    # outcomes are calculated.
+    evaluated: List[Dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
-        futures = [pool.submit(_backtest_symbol, symbol, start, days, dte, direction) for symbol in symbols]
+        futures = [pool.submit(_evaluate_symbol, symbol, payload) for symbol in symbols]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                evaluated.append(future.result())
+            except Exception:
+                continue
+    min_total_score = max(0, float(payload.get("min_total_score", 0) or 0))
+    eligible = [
+        row["symbol"] for row in evaluated
+        if row.get("included") and row.get("score", 0) >= min_total_score
+    ]
+    rows: List[Dict[str, Any]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(eligible) or 1)) as pool:
+        futures = [pool.submit(_backtest_symbol, symbol, start, days, dte, direction) for symbol in eligible]
         for future in concurrent.futures.as_completed(futures):
             try:
                 rows.extend(future.result())
@@ -646,7 +663,8 @@ def backtest():
             "pending": pending,
             "win_rate": round(winners / completed * 100, 1) if completed else None,
             "from_date": start.isoformat(), "days": days, "dte": dte,
+            "watchlist_symbols": len(symbols), "eligible_symbols": len(eligible),
         },
-        "methodology": "Historical daily price signal only: entry-close EMA13/EMA50 plus 10-session momentum; exit is the first cached market close on or after entry date + calendar DTE. This is direction outcome analysis, not option-contract P/L.",
+        "methodology": "The enabled live scanner stages and minimum overall score are applied first to choose the setup universe. For each eligible symbol, the historical outcome uses an entry-date daily EMA13/EMA50 plus 10-session momentum signal; exit is the first cached market close on or after entry date + calendar DTE. This is direction outcome analysis, not option-contract P/L.",
         "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     })
