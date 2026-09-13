@@ -329,17 +329,31 @@ def _sector_regime_stage(symbol: str, direction: str) -> Dict[str, Any]:
                 "details": {"sector_strength": sector_strength, "sector_rs": sector_rs}}
     bias = str(regime.get("bias") or "").lower()
     trend = str(regime.get("ema_trend") or "").lower()
-    bullish = any(word in (bias + " " + trend) for word in ("bull", "up"))
-    bearish = any(word in (bias + " " + trend) for word in ("bear", "down"))
-    regime_pass = bullish if direction == "bull" else bearish if direction == "bear" else bullish or bearish
+    regime_label = str(regime.get("regime") or "").lower()
+    regime_text = " ".join((bias, trend, regime_label))
+    # Determine one explicit regime direction.  A counter-directional regime
+    # is a conflict, not a pass merely because the numerical sector fields
+    # are unavailable.
+    regime_direction = "bull" if any(word in regime_text for word in ("bull", "uptrend", " up")) else (
+        "bear" if any(word in regime_text for word in ("bear", "downtrend", " down")) else "neutral"
+    )
+    regime_pass = regime_direction == direction if direction in ("bull", "bear") else regime_direction != "neutral"
     sector_pass = (sector_strength is None or sector_strength >= 0) and (sector_rs is None or sector_rs >= 0)
     if direction == "bear":
         sector_pass = (sector_strength is None or sector_strength <= 0) and (sector_rs is None or sector_rs <= 0)
     passed = regime_pass and sector_pass
+    conflict = direction in ("bull", "bear") and regime_direction in ("bull", "bear") and regime_direction != direction
+    weak_alignment = passed and any(word in regime_text for word in ("mild", "weak"))
+    score = 0.5 if weak_alignment else 1 if passed else 0
+    reason = (f"CONFLICT: candidate {direction} vs regime {regime_direction}" if conflict else
+              (f"Weak {regime_direction} alignment" if weak_alignment else
+               f"{regime.get('regime') or 'Regime'} · {regime.get('bias') or 'neutral bias'} · sector RS {sector_rs if sector_rs is not None else '—'}"))
     return {
-        "status": "ok", "pass": passed, "score": 1 if passed else 0,
-        "reason": f"{regime.get('regime') or 'Regime'} · {regime.get('bias') or 'neutral bias'} · sector RS {sector_rs if sector_rs is not None else '—'}",
-        "details": {**regime, "sector_strength": sector_strength, "sector_rs": sector_rs},
+        "status": "ok", "pass": passed, "score": score,
+        "reason": reason,
+        "details": {**regime, "sector_strength": sector_strength, "sector_rs": sector_rs,
+                    "regime_direction": regime_direction, "conflict": conflict,
+                    "weak_alignment": weak_alignment},
     }
 
 
@@ -380,9 +394,15 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     enabled = [name for name in stages if _mode(payload, name) != "off"]
     total_score = round(sum(stages[name]["score"] for name in enabled), 2)
     max_score = sum(stage_max[name] for name in enabled)
+    score_breakdown = [
+        {"stage": name, "score": stages[name]["score"], "max": stage_max[name],
+         "pass": stages[name]["pass"], "status": stages[name]["status"]}
+        for name in stages if _mode(payload, name) == "score"
+    ]
     return {
         "symbol": symbol, "included": included, "direction": confluence.direction,
         "score": total_score, "max_score": max_score,
+        "score_breakdown": score_breakdown,
         "price": daily.get("close") or structure.get("details", {}).get("price"),
         "entry_zone": [
             confluence.entry_price_zone[0] or structure.get("details", {}).get("support"),
