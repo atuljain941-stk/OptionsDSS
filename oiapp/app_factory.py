@@ -697,6 +697,13 @@ def create_app():
         print(f"[app] WARNING: scanner_primitives_guide not loaded — {e}")
 
     try:
+        from .scanners.reversal_scanner import systematic_reversal_bp
+        app.register_blueprint(systematic_reversal_bp)
+        print("[app] Systematic Reversal Scanner registered at /systematic-reversal")
+    except Exception as e:
+        print(f"[app] WARNING: systematic_reversal not loaded — {e}")
+
+    try:
         from .charts.chart_routes import charts_bp
         app.register_blueprint(charts_bp)
         print("[app] Charts workspace registered at /charts (this module existed but was never registered here -- that's the actual root cause of the 404 the Pattern Search chart hit)")
