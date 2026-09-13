@@ -9,7 +9,7 @@ from __future__ import annotations
 import concurrent.futures
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, render_template, request
@@ -200,6 +200,48 @@ def _options_positioning(symbol: str, direction: str, spot: Optional[float]) -> 
     }
 
 
+def _earnings_risk(symbol: str, min_days: int) -> Dict[str, Any]:
+    """Phase 4 catalyst guard using the cached earnings calendar.
+
+    An unknown earnings date is reported as unavailable rather than treated
+    as safe.  Calendar days are used deliberately and labelled in the UI;
+    this avoids claiming holiday-aware trading-day precision from a cached
+    company-calendar record.
+    """
+    con = _conn()
+    try:
+        row = con.execute(
+            "SELECT next_earn_date, next_earn_confirmed, fetch_date FROM earnings_calendar "
+            "WHERE symbol=? ORDER BY fetch_date DESC LIMIT 1", (symbol,)
+        ).fetchone()
+    except sqlite3.Error:
+        row = None
+    finally:
+        con.close()
+    if not row or not row["next_earn_date"]:
+        return {"status": "unavailable", "pass": True, "score": 0,
+                "reason": "No cached upcoming earnings date", "details": {"earnings_days": None}}
+    raw = str(row["next_earn_date"])[:10]
+    try:
+        earn_date = date.fromisoformat(raw)
+    except ValueError:
+        return {"status": "unavailable", "pass": True, "score": 0,
+                "reason": f"Unparseable earnings date: {raw}", "details": {"earnings_days": None}}
+    days = (earn_date - date.today()).days
+    if days < 0:
+        return {"status": "unavailable", "pass": True, "score": 0,
+                "reason": "Cached earnings date is no longer upcoming", "details": {"earnings_days": None}}
+    passed = days >= min_days
+    score = 1 if passed else 0
+    confirmation = "confirmed" if row["next_earn_confirmed"] else "unconfirmed"
+    return {
+        "status": "ok", "pass": passed, "score": score,
+        "reason": f"Earnings {raw} · {days} calendar day(s) away · {confirmation}",
+        "details": {"earnings_date": raw, "earnings_days": days,
+                    "confirmed": bool(row["next_earn_confirmed"]), "min_days": min_days},
+    }
+
+
 def _safe_num(value: Any) -> Optional[float]:
     try:
         return float(value) if value is not None else None
@@ -316,6 +358,7 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     sector = _sector_regime_stage(symbol, confluence.direction)
     structure = _price_structure(symbol, confluence.direction)
     positioning = _options_positioning(symbol, confluence.direction, structure.get("details", {}).get("price"))
+    earnings = _earnings_risk(symbol, max(0, int(payload.get("min_earnings_days", 0))))
     stages = {
         "sector_regime": sector,
         "mtf_confluence": {
@@ -325,15 +368,21 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         },
         "price_structure": structure,
         "options_positioning": positioning,
+        "earnings_risk": earnings,
     }
     included = True
-    for name in ("sector_regime", "mtf_confluence", "price_structure", "options_positioning"):
+    for name in ("sector_regime", "mtf_confluence", "price_structure", "options_positioning", "earnings_risk"):
         if _mode(payload, name) == "filter" and stages[name]["status"] != "unavailable" and not stages[name]["pass"]:
             included = False
     daily = (confluence.timeframe_signals.get("1d") or {}).get("values") or {}
+    stage_max = {"sector_regime": 1, "mtf_confluence": 4, "price_structure": 3,
+                 "options_positioning": 2, "earnings_risk": 1}
+    enabled = [name for name in stages if _mode(payload, name) != "off"]
+    total_score = round(sum(stages[name]["score"] for name in enabled), 2)
+    max_score = sum(stage_max[name] for name in enabled)
     return {
         "symbol": symbol, "included": included, "direction": confluence.direction,
-        "score": round(sum(stage["score"] for stage in stages.values()), 2),
+        "score": total_score, "max_score": max_score,
         "price": daily.get("close") or structure.get("details", {}).get("price"),
         "entry_zone": [
             confluence.entry_price_zone[0] or structure.get("details", {}).get("support"),
@@ -371,7 +420,10 @@ def run():
     after_sector = sum(1 for row in rows if _mode(payload, "sector_regime") != "filter" or row["stages"]["sector_regime"]["pass"] or row["stages"]["sector_regime"]["status"] == "unavailable")
     after_mtf = sum(1 for row in rows if _mode(payload, "mtf_confluence") != "filter" or row["stages"]["mtf_confluence"]["pass"] or row["stages"]["mtf_confluence"]["status"] == "unavailable")
     after_structure = sum(1 for row in rows if _mode(payload, "price_structure") != "filter" or row["stages"]["price_structure"]["pass"] or row["stages"]["price_structure"]["status"] == "unavailable")
-    included = [row for row in rows if row.get("included")]
+    after_options = sum(1 for row in rows if _mode(payload, "options_positioning") != "filter" or row["stages"]["options_positioning"]["pass"] or row["stages"]["options_positioning"]["status"] == "unavailable")
+    after_earnings = sum(1 for row in rows if _mode(payload, "earnings_risk") != "filter" or row["stages"]["earnings_risk"]["pass"] or row["stages"]["earnings_risk"]["status"] == "unavailable")
+    min_total_score = max(0, float(payload.get("min_total_score", 0) or 0))
+    included = [row for row in rows if row.get("included") and row.get("score", 0) >= min_total_score]
     return jsonify({
         "results": included, "excluded": [row for row in rows if not row.get("included")],
         "funnel": [
@@ -379,7 +431,9 @@ def run():
             {"stage": "Sector / regime", "count": after_sector, "mode": _mode(payload, "sector_regime")},
             {"stage": "MTF confluence", "count": after_mtf, "mode": _mode(payload, "mtf_confluence")},
             {"stage": "Price / structure", "count": after_structure, "mode": _mode(payload, "price_structure")},
-            {"stage": "Options positioning", "count": len(included), "mode": _mode(payload, "options_positioning")},
+            {"stage": "Options positioning", "count": after_options, "mode": _mode(payload, "options_positioning")},
+            {"stage": "Earnings / catalyst", "count": after_earnings, "mode": _mode(payload, "earnings_risk")},
+            {"stage": "Overall score", "count": len(included), "mode": f">= {min_total_score:g}"},
         ],
         "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     })
