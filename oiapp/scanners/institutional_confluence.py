@@ -16,6 +16,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from ..config import DB_PATH
 from ..services.technical_snapshot import get_technical_snapshot
+from ..services.option_volatility import option_iv_context
 
 institutional_confluence_bp = Blueprint(
     "institutional_confluence", __name__, url_prefix="/institutional-confluence"
@@ -262,6 +263,41 @@ def _iv_rank(symbol: str, as_of: Optional[date] = None) -> Dict[str, Any]:
     return {"status": "ok", "rank": rank, "current_iv": round(current * 100, 1),
             "low_iv": round(low * 100, 1), "high_iv": round(high * 100, 1),
             "observations": len(history), "as_of": values[-1][0], "reason": context}
+
+
+
+def _volatility_fit_stage(direction: str, structure: Dict[str, Any],
+                          iv_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Check whether the directional S/R target is plausible within IV's DTE move.
+
+    IV Rank itself is context for strategy choice. The pass/fail here is only
+    target feasibility, so high IV is not automatically rewarded or punished.
+    """
+    if iv_context.get("status") != "ok" or iv_context.get("expected_move") is None:
+        return {"status": "unavailable", "pass": True, "score": 0,
+                "reason": iv_context.get("reason", "IV context unavailable"), "details": iv_context}
+    details = structure.get("details", {})
+    spot = _safe_num(details.get("price"))
+    target = _safe_num(details.get("resistance" if direction == "bull" else "support"))
+    if spot is None or target is None:
+        return {"status": "partial", "pass": True, "score": 0,
+                "reason": "Expected move available but directional S/R target unavailable",
+                "details": iv_context}
+    distance = abs(target - spot)
+    expected = _safe_num(iv_context.get("expected_move"))
+    ratio = distance / expected if expected else None
+    passed = ratio is not None and ratio <= 1.0
+    score = 2 if ratio is not None and ratio <= 0.75 else 1 if passed else 0
+    side = "resistance" if direction == "bull" else "support"
+    return {
+        "status": "ok", "pass": passed, "score": score,
+        "reason": (
+            f"{side.title()} target {target:.2f} is {ratio:.2f}x the "
+            f"{expected:.2f} {iv_context.get('dte')}D implied move"
+        ),
+        "details": {**iv_context, "target": target, "target_distance": round(distance, 2),
+                    "target_to_expected_move": round(ratio, 2) if ratio is not None else None},
+    }
 
 
 def _earnings_risk(symbol: str, min_days: int, as_of: Optional[date] = None,
@@ -568,7 +604,11 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any],
     positioning = _options_positioning(
         symbol, confluence.direction, structure.get("details", {}).get("price"), as_of
     )
-    iv_rank = _iv_rank(symbol, as_of)
+    iv_dte = max(1, min(365, int(dte or payload.get("volatility_dte", 30) or 30)))
+    iv_rank = option_iv_context(
+        symbol, structure.get("details", {}).get("price"), dte=iv_dte, as_of=as_of
+    )
+    volatility = _volatility_fit_stage(confluence.direction, structure, iv_rank)
     earnings = _earnings_risk(
         symbol, max(0, int(payload.get("min_earnings_days", 0))), as_of, dte
     )
@@ -581,15 +621,16 @@ def _evaluate_symbol(symbol: str, payload: Dict[str, Any],
         },
         "price_structure": structure,
         "options_positioning": positioning,
+        "volatility": volatility,
         "earnings_risk": earnings,
     }
     included = True
-    for name in ("sector_regime", "mtf_confluence", "price_structure", "options_positioning", "earnings_risk"):
+    for name in ("sector_regime", "mtf_confluence", "price_structure", "options_positioning", "volatility", "earnings_risk"):
         if _mode(payload, name) == "filter" and stages[name]["status"] != "unavailable" and not stages[name]["pass"]:
             included = False
     daily = (confluence.timeframe_signals.get("1d") or {}).get("values") or {}
     stage_max = {"sector_regime": 1, "mtf_confluence": 4, "price_structure": 3,
-                 "options_positioning": 2}
+                 "options_positioning": 2, "volatility": 2}
     # Earnings is deliberately excluded: it is Off or Filter only.
     enabled = [name for name in stage_max if _mode(payload, name) != "off"]
     total_score = round(sum(stages[name]["score"] for name in enabled), 2)
@@ -645,11 +686,12 @@ def run():
             or row["stages"][name]["pass"]
             for name in names
         )
-    stage_order = ("sector_regime", "mtf_confluence", "price_structure", "options_positioning", "earnings_risk")
+    stage_order = ("sector_regime", "mtf_confluence", "price_structure", "options_positioning", "volatility", "earnings_risk")
     after_sector = sum(survives(row, stage_order[:1]) for row in rows)
     after_mtf = sum(survives(row, stage_order[:2]) for row in rows)
     after_structure = sum(survives(row, stage_order[:3]) for row in rows)
     after_options = sum(survives(row, stage_order[:4]) for row in rows)
+    after_volatility = sum(survives(row, stage_order[:5]) for row in rows)
     after_earnings = sum(survives(row, stage_order) for row in rows)
     min_total_score = max(0, float(payload.get("min_total_score", 0) or 0))
     included = [row for row in rows if row.get("included") and row.get("score", 0) >= min_total_score]
@@ -661,6 +703,7 @@ def run():
             {"stage": "MTF confluence", "count": after_mtf, "mode": _mode(payload, "mtf_confluence")},
             {"stage": "Price / structure", "count": after_structure, "mode": _mode(payload, "price_structure")},
             {"stage": "Options positioning", "count": after_options, "mode": _mode(payload, "options_positioning")},
+            {"stage": "Volatility fit", "count": after_volatility, "mode": _mode(payload, "volatility")},
             {"stage": "Earnings / catalyst", "count": after_earnings, "mode": _mode(payload, "earnings_risk")},
             {"stage": "Overall score", "count": len(included), "mode": f">= {min_total_score:g}"},
         ],
