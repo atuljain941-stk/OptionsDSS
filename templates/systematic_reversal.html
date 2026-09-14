@@ -2,5 +2,68 @@
 body{margin:0;background:#080d14;color:#e5edf7;font:14px system-ui}.wrap{max-width:1500px;margin:auto;padding:24px}.card{background:#0f1721;border:1px solid #243446;border-radius:10px;padding:14px}label{display:grid;gap:5px;font-size:12px;color:#b7c7d9}select,input,button{background:#101b2a;color:#e5edf7;border:1px solid #31445a;border-radius:6px;padding:8px}button{background:#4385ee;border:0;font-weight:700;cursor:pointer}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #203044;text-align:left;vertical-align:top;font-size:12px}th{color:#8fa7c2;text-transform:uppercase;font-size:10px}small{color:#8fa7c2}
 </style></head><body><main class="wrap"><h2>Systematic Reversal Scanner <small>capitulation / mean-reversion framework</small></h2><p>Scores the measurable reversal conditions from the video: acceleration, streak, Bollinger extension, volume, legs/consolidation, RSIDiff90 extreme, and support/resistance location. This identifies setups to investigate, not a trade instruction.</p>
 <div class="card" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end"><label>Watchlist <select id="w">{% for wl in watchlists %}<option value="{{ wl.id }}"{% if wl.is_default %} selected{% endif %}>{{ wl.name }} ({{ wl.symbol_count }})</option>{% endfor %}</select></label><label>Reversal direction <select id="d"><option value="both">Both</option><option value="bull">Bullish reversal</option><option value="bear">Bearish reversal</option></select></label><label>Acceleration <select id="acceleration"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Streak <select id="streak"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Bollinger <select id="bollinger"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Volume <select id="volume"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Legs / consolidation <select id="structure"><option>off</option><option selected>score</option><option>filter</option></select></label><label>RSIDiff90 extreme <select id="rsi_extreme"><option>off</option><option selected>score</option><option>filter</option></select></label><label>IV fade <select id="iv_fade"><option>off</option><option selected>score</option><option>filter</option></select></label><label>IV DTE <input id="iv-dte" type="number" min="1" max="365" value="30" style="width:55px"></label><label>S/R location <select id="sr_location"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Min score <input id="min" type="number" min="0" step="1" value="5" style="width:55px"></label><button id="run">Run reversal scan</button><span id="status"></span></div><div id="out" class="card" style="margin-top:16px">Choose a watchlist and run the scan.</div></main><script>
-const $=x=>document.getElementById(x),esc=x=>String(x??'—').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));async function lists(){const r=await fetch('/watchlists/',{cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not load watchlists');const items=d.watchlists||[];if(!items.length){if($('w').options.length)return;throw Error('No watchlists found.');}$('w').innerHTML=items.map(x=>`<option value="${x.id}" ${x.is_default?'selected':''}>${esc(x.name)} (${x.symbol_count??0})</option>`).join('')}function cell(s){if(!s)return'—';const c=s.status==='unavailable'?'#8fa7c2':s.pass?'#60a5fa':'#f87171';return `<b style="color:${c}">${s.status==='unavailable'?'N/A':s.pass?'PASS':'FAIL'}</b><br><small>${esc(s.reason)}</small>`}function ivCell(iv){if(!iv||iv.rank==null)return'—';const change=iv.iv_change_5obs==null?'—':iv.iv_change_5obs+' pts';return '<b>'+esc(iv.rank)+'% IVR</b><br><small>'+esc(iv.current_iv)+'% IV · '+esc(change)+'</small>'}function render(d){const rows=d.results||[];$('out').innerHTML=rows.length?`<div style="padding:10px"><b>${rows.length}</b> reversal candidates from ${d.scanned} symbols.</div><table><thead><tr><th>Symbol</th><th>Reversal</th><th>Score</th><th>Price</th><th>RSIDiff90</th><th>Acceleration</th><th>Streak</th><th>Bollinger</th><th>Volume</th><th>Legs / consolidation</th><th>RSIDiff90 extreme</th><th>IV fade</th><th>IV context</th><th>S/R location</th></tr></thead><tbody>${rows.map(r=>`<tr><td><b>${esc(r.symbol)}</b></td><td style="color:${r.direction==='bear'?'#f87171':'#60a5fa'}">${esc(r.direction)}</td><td><b>${r.score}/${r.max_score}</b></td><td>${Number(r.price).toFixed(2)}</td><td>${r.rsidiff90==null?'—':r.rsidiff90.toFixed(1)}</td><td>${cell(r.stages.acceleration)}</td><td>${cell(r.stages.streak)}</td><td>${cell(r.stages.bollinger)}</td><td>${cell(r.stages.volume)}</td><td>${cell(r.stages.structure)}</td><td>${cell(r.stages.rsi_extreme)}</td><td>${cell(r.stages.iv_fade)}</td><td>${ivCell(r.iv_context)}</td><td>${cell(r.stages.sr_location)}</td></tr>`).join('')}</tbody></table>`:'No candidates. Lower the score or change a stage from Filter to Score.'}$('status').textContent=`Complete · ${rows.length} candidates`}$('run').onclick=async()=>{const b=$('run');b.disabled=true;$('status').textContent='Scanning…';try{const p={watchlist_id:$('w').value,direction:$('d').value,min_score:$('min').value};for(const id of ['acceleration','streak','bollinger','volume','structure','rsi_extreme','iv_fade','sr_location'])p[id]=$(id).value;p.volatility_dte=$('iv-dte').value;const r=await fetch('/systematic-reversal/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)}),d=await r.json();if(!r.ok)throw Error(d.error);render(d)}catch(e){$('status').textContent='Error: '+e.message}finally{b.disabled=false}};lists().catch(e=>{if(!$('w').options.length)$('status').textContent='Could not load watchlists: '+e.message});
+(function(){
+  function byId(id){return document.getElementById(id);}
+  function esc(value){var node=document.createElement('div');node.textContent=value==null?'':String(value);return node.innerHTML;}
+  function stageCell(stage){
+    if(!stage)return '—';
+    var color=stage.status==='pass'?'#60a5fa':stage.status==='fail'?'#f87171':'#94a3b8';
+    return '<b style="color:'+color+'">'+esc(stage.status||'—')+'</b><br><small>'+esc(stage.detail||'')+'</small>';
+  }
+  function ivCell(iv){
+    if(!iv||iv.rank==null)return '—';
+    var change=iv.iv_change_5obs==null?'—':iv.iv_change_5obs+' pts';
+    return '<b>'+esc(iv.rank)+'% IVR</b><br><small>'+esc(iv.current_iv)+'% IV · '+esc(change)+'</small>';
+  }
+  function number(value,digits){return value==null?'—':Number(value).toFixed(digits);}
+  function render(data){
+    var rows=data.results||[], html='';
+    if(!rows.length){
+      byId('out').innerHTML='No candidates. Lower the score or change a stage from Filter to Score.';
+      byId('status').textContent='Complete · 0 candidates';
+      return;
+    }
+    html='<div style="padding:10px"><b>'+rows.length+'</b> reversal candidates from '+esc(data.scanned||0)+' symbols.</div>';
+    html+='<table><thead><tr><th>Symbol</th><th>Reversal</th><th>Score</th><th>Price</th><th>RSIDiff90</th><th>Acceleration</th><th>Streak</th><th>Bollinger</th><th>Volume</th><th>Legs / consolidation</th><th>RSIDiff90 extreme</th><th>IV fade</th><th>IV context</th><th>S/R location</th></tr></thead><tbody>';
+    rows.forEach(function(row){
+      var stages=row.stages||{}, direction=String(row.direction||'');
+      html+='<tr><td><b>'+esc(row.symbol)+'</b></td><td style="color:'+(direction==='bear'?'#f87171':'#60a5fa')+'">'+esc(direction)+'</td><td><b>'+esc(row.score)+'/'+esc(row.max_score)+'</b></td><td>'+number(row.price,2)+'</td><td>'+number(row.rsidiff90,1)+'</td><td>'+stageCell(stages.acceleration)+'</td><td>'+stageCell(stages.streak)+'</td><td>'+stageCell(stages.bollinger)+'</td><td>'+stageCell(stages.volume)+'</td><td>'+stageCell(stages.structure)+'</td><td>'+stageCell(stages.rsi_extreme)+'</td><td>'+stageCell(stages.iv_fade)+'</td><td>'+ivCell(row.iv_context)+'</td><td>'+stageCell(stages.sr_location)+'</td></tr>';
+    });
+    byId('out').innerHTML=html+'</tbody></table>';
+    byId('status').textContent='Complete · '+rows.length+' candidates';
+  }
+  async function loadWatchlists(){
+    var response=await fetch('/watchlists/',{cache:'no-store'}), data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Could not load watchlists');
+    var items=data.watchlists||[];
+    if(!items.length){
+      if(byId('w').options.length)return;
+      throw new Error('No watchlists found.');
+    }
+    byId('w').innerHTML=items.map(function(item){
+      return '<option value="'+esc(item.id)+'"'+(item.is_default?' selected':'')+'>'+esc(item.name)+' ('+esc(item.symbol_count||0)+')</option>';
+    }).join('');
+  }
+  async function runScan(){
+    var button=byId('run'), status=byId('status');
+    button.disabled=true;
+    status.textContent='Scanning…';
+    try{
+      var payload={watchlist_id:byId('w').value,direction:byId('d').value,min_score:byId('min').value,volatility_dte:byId('iv-dte').value};
+      ['acceleration','streak','bollinger','volume','structure','rsi_extreme','iv_fade','sr_location'].forEach(function(id){payload[id]=byId(id).value;});
+      var response=await fetch('/systematic-reversal/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      var data=await response.json();
+      if(!response.ok)throw new Error(data.error||'Scan failed');
+      render(data);
+    }catch(error){
+      status.textContent='Error: '+error.message;
+    }finally{
+      button.disabled=false;
+    }
+  }
+  byId('run').addEventListener('click',runScan);
+  loadWatchlists().catch(function(error){
+    if(!byId('w').options.length)byId('status').textContent='Could not load watchlists: '+error.message;
+  });
+}());
 </script></body></html>
