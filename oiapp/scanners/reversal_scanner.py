@@ -108,7 +108,10 @@ def _evaluate(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"symbol":symbol,"direction":target,"move_direction":move,"price":p,"score":total,"max_score":maximum,"included":included,"stages":stages,"rsidiff90":diff,"support":support,"resistance":resistance,"iv_context":iv_context}
 
 @systematic_reversal_bp.route("/")
-def page(): return render_template("systematic_reversal.html")
+def page():
+    # Render the selector server-side. This makes the page usable even if a
+    # browser-side refresh request is blocked or fails after page load.
+    return render_template("systematic_reversal.html", watchlists=_watchlists())
 
 @systematic_reversal_bp.route("/api/watchlists")
 def watchlists():
