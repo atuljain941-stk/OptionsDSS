@@ -254,11 +254,13 @@ def _backtest_symbol(symbol: str, start: date, days: int, dte: int, payload: Dic
     all_bars = _bars(symbol, limit=520)
     by_date = {row["date"]: row for row in all_bars}
     rows: List[Dict[str, Any]] = []
+    seen_entry_dates = set()
     for offset in range(days):
         requested_date = start + timedelta(days=offset)
         entry = next((row for row in all_bars if row["date"] >= requested_date.isoformat()), None)
-        if not entry or entry["date"] > (start + timedelta(days=days)).isoformat():
+        if not entry or entry["date"] > (start + timedelta(days=days)).isoformat() or entry["date"] in seen_entry_dates:
             continue
+        seen_entry_dates.add(entry["date"])
         entry_date = date.fromisoformat(entry["date"])
         evaluation = _evaluate(symbol, payload, entry_date)
         if not evaluation.get("included") or evaluation.get("score", 0) < minimum:
