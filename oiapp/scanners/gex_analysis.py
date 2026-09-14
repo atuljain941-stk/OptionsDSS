@@ -242,9 +242,27 @@ def data_api():
     ordered = sorted(by_strike)
     if not ordered:
         return jsonify({"error": "No call/put gamma rows available"}), 422
-    nearest = min(range(len(ordered)), key=lambda i: abs(ordered[i] - spot))
-    half = strike_count // 2
-    selected = ordered[max(0, nearest - half):min(len(ordered), nearest + half)]
+    # Intraday needs a stable, spot-relative ATM window.  A fixed broad
+    # range becomes stale as the underlying moves, so use the ten nearest
+    # available listed strikes at/below spot and the ten immediately above it.
+    if mode == "intraday":
+        below = [strike for strike in ordered if strike <= spot]
+        above = [strike for strike in ordered if strike > spot]
+        selected = below[-10:] + above[:10]
+        window = {
+            "kind": "intraday_atm",
+            "below_requested": 10, "above_requested": 10,
+            "below_available": len(below[-10:]), "above_available": len(above[:10]),
+        }
+    else:
+        nearest = min(range(len(ordered)), key=lambda i: abs(ordered[i] - spot))
+        half = strike_count // 2
+        selected = ordered[max(0, nearest - half):min(len(ordered), nearest + half)]
+        window = {
+            "kind": "saved_requested",
+            "below_requested": None, "above_requested": None,
+            "below_available": None, "above_available": None,
+        }
 
     series = []
     for strike in selected:
@@ -287,6 +305,7 @@ def data_api():
         "spot": spot,
         "spot_source": spot_source,
         "dte": _dte(expiration) if expiration != "all" else None,
+        "strike_window": window,
         "series": series,
         "summary": {
             "net_gex": net,

@@ -1,69 +1,51 @@
-<!doctype html><html><head><meta charset="utf-8"><title>Systematic Reversal Scanner</title><style>
-body{margin:0;background:#080d14;color:#e5edf7;font:14px system-ui}.wrap{max-width:1500px;margin:auto;padding:24px}.card{background:#0f1721;border:1px solid #243446;border-radius:10px;padding:14px}label{display:grid;gap:5px;font-size:12px;color:#b7c7d9}select,input,button{background:#101b2a;color:#e5edf7;border:1px solid #31445a;border-radius:6px;padding:8px}button{background:#4385ee;border:0;font-weight:700;cursor:pointer}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #203044;text-align:left;vertical-align:top;font-size:12px}th{color:#8fa7c2;text-transform:uppercase;font-size:10px}small{color:#8fa7c2}
-</style></head><body><main class="wrap"><h2>Systematic Reversal Scanner <small>capitulation / mean-reversion framework</small></h2><p>Scores the measurable reversal conditions from the video: acceleration, streak, Bollinger extension, volume, legs/consolidation, RSIDiff90 extreme, and support/resistance location. This identifies setups to investigate, not a trade instruction.</p>
-<div class="card" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end"><label>Watchlist <select id="w">{% for wl in watchlists %}<option value="{{ wl.id }}"{% if wl.is_default %} selected{% endif %}>{{ wl.name }} ({{ wl.symbol_count }})</option>{% endfor %}</select></label><label>Reversal direction <select id="d"><option value="both">Both</option><option value="bull">Bullish reversal</option><option value="bear">Bearish reversal</option></select></label><label>Acceleration <select id="acceleration"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Streak <select id="streak"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Bollinger <select id="bollinger"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Volume <select id="volume"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Legs / consolidation <select id="structure"><option>off</option><option selected>score</option><option>filter</option></select></label><label>RSIDiff90 extreme <select id="rsi_extreme"><option>off</option><option selected>score</option><option>filter</option></select></label><label>IV fade <select id="iv_fade"><option>off</option><option selected>score</option><option>filter</option></select></label><label>IV DTE <input id="iv-dte" type="number" min="1" max="365" value="30" style="width:55px"></label><label>S/R location <select id="sr_location"><option>off</option><option selected>score</option><option>filter</option></select></label><label>Min score <input id="min" type="number" min="0" step="1" value="5" style="width:55px"></label><button id="run">Run reversal scan</button><span id="status"></span></div><div id="out" class="card" style="margin-top:16px">Choose a watchlist and run the scan.</div></main><script>
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Systematic Reversal Scanner</title><style>
+body{margin:0;background:#080d14;color:#e5edf7;font:14px system-ui}.wrap{max-width:1550px;margin:auto;padding:24px}.card{background:#0f1721;border:1px solid #243446;border-radius:10px;padding:14px;margin-bottom:12px}label{display:grid;gap:5px;font-size:12px;color:#b7c7d9}select,input,button{background:#101b2a;color:#e5edf7;border:1px solid #31445a;border-radius:6px;padding:8px}button{background:#4385ee;border:0;font-weight:700;cursor:pointer}button.tab{background:#13233a}button.tab.active{background:#4385ee}button:disabled{opacity:.65;cursor:wait}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #203044;text-align:left;vertical-align:top;font-size:12px}th{color:#8fa7c2;text-transform:uppercase;font-size:10px}small{color:#8fa7c2}.funnel{display:flex;gap:10px;flex-wrap:wrap}.metric{padding:10px 14px;border:1px solid #243446;border-radius:9px;min-width:86px}.metric b{display:block;font-size:22px}.hidden{display:none}
+</style></head>
+<body><main class="wrap">
+<h2>Systematic Reversal Scanner <small>capitulation / mean-reversion framework</small></h2>
+<p>Scores measurable reversal conditions. Earnings is a risk gate; historical outcomes use underlying daily closes, not option-contract P/L.</p>
+<div class="card" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+<label>Watchlist <select id="w">{% for wl in watchlists %}<option value="{{ wl.id }}"{% if wl.is_default %} selected{% endif %}>{{ wl.name }} ({{ wl.symbol_count }})</option>{% endfor %}</select></label>
+<label>Reversal direction <select id="d"><option value="both">Both</option><option value="bull">Bullish reversal</option><option value="bear">Bearish reversal</option></select></label>
+<label>Acceleration <select id="acceleration"><option>off</option><option selected>score</option><option>filter</option></select></label>
+<label>Streak <select id="streak"><option>off</option><option selected>score</option><option>filter</option></select></label>
+<label>Bollinger <select id="bollinger"><option>off</option><option selected>score</option><option>filter</option></select></label>
+<label>Volume <select id="volume"><option>off</option><option selected>score</option><option>filter</option></select></label>
+<label>Legs / consolidation <select id="structure"><option>off</option><option selected>score</option><option>filter</option></select></label>
+<label>RSIDiff90 extreme <select id="rsi_extreme"><option>off</option><option selected>score</option><option>filter</option></select></label>
+<label>IV fade <select id="iv_fade"><option>off</option><option selected>score</option><option>filter</option></select></label>
+<label>IV DTE <input id="iv-dte" type="number" min="1" max="365" value="30"></label>
+<label>S/R location <select id="sr_location"><option>off</option><option selected>score</option><option>filter</option></select></label>
+<label>Earnings risk <select id="earnings_risk"><option value="off">off</option><option value="filter">filter</option></select></label>
+<label>Min earnings days <input id="earnings-days" type="number" min="0" max="365" value="30"></label>
+<label>Min score <input id="min" type="number" min="0" value="5"></label>
+</div>
+<div style="display:flex;gap:8px;margin:12px 0"><button id="live-tab" class="tab active">Live scanner</button><button id="backtest-tab" class="tab">Backtest</button></div>
+<div id="live-panel"><button id="run">Run reversal scan</button></div>
+<div id="backtest-panel" class="card hidden" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+<label>From date <input id="bt-from" type="date"></label><label>Run days <input id="bt-days" type="number" min="1" max="90" value="5"></label><label>DTE <input id="bt-dte" type="number" min="1" max="365" value="30"></label><button id="backtest-run">Run backtest</button>
+</div>
+<div id="status" class="card">Choose settings and run the scan.</div>
+<div id="summary" class="funnel"></div>
+<div id="out" class="card"></div>
+</main>
+<script>
 (function(){
-  function byId(id){return document.getElementById(id);}
-  function esc(value){var node=document.createElement('div');node.textContent=value==null?'':String(value);return node.innerHTML;}
-  function stageCell(stage){
-    if(!stage)return '—';
-    var color=stage.status==='pass'?'#60a5fa':stage.status==='fail'?'#f87171':'#94a3b8';
-    return '<b style="color:'+color+'">'+esc(stage.status||'—')+'</b><br><small>'+esc(stage.detail||'')+'</small>';
-  }
-  function ivCell(iv){
-    if(!iv||iv.rank==null)return '—';
-    var change=iv.iv_change_5obs==null?'—':iv.iv_change_5obs+' pts';
-    return '<b>'+esc(iv.rank)+'% IVR</b><br><small>'+esc(iv.current_iv)+'% IV · '+esc(change)+'</small>';
-  }
-  function number(value,digits){return value==null?'—':Number(value).toFixed(digits);}
-  function render(data){
-    var rows=data.results||[], html='';
-    if(!rows.length){
-      byId('out').innerHTML='No candidates. Lower the score or change a stage from Filter to Score.';
-      byId('status').textContent='Complete · 0 candidates';
-      return;
-    }
-    html='<div style="padding:10px"><b>'+rows.length+'</b> reversal candidates from '+esc(data.scanned||0)+' symbols.</div>';
-    html+='<table><thead><tr><th>Symbol</th><th>Reversal</th><th>Score</th><th>Price</th><th>RSIDiff90</th><th>Acceleration</th><th>Streak</th><th>Bollinger</th><th>Volume</th><th>Legs / consolidation</th><th>RSIDiff90 extreme</th><th>IV fade</th><th>IV context</th><th>S/R location</th></tr></thead><tbody>';
-    rows.forEach(function(row){
-      var stages=row.stages||{}, direction=String(row.direction||'');
-      html+='<tr><td><b>'+esc(row.symbol)+'</b></td><td style="color:'+(direction==='bear'?'#f87171':'#60a5fa')+'">'+esc(direction)+'</td><td><b>'+esc(row.score)+'/'+esc(row.max_score)+'</b></td><td>'+number(row.price,2)+'</td><td>'+number(row.rsidiff90,1)+'</td><td>'+stageCell(stages.acceleration)+'</td><td>'+stageCell(stages.streak)+'</td><td>'+stageCell(stages.bollinger)+'</td><td>'+stageCell(stages.volume)+'</td><td>'+stageCell(stages.structure)+'</td><td>'+stageCell(stages.rsi_extreme)+'</td><td>'+stageCell(stages.iv_fade)+'</td><td>'+ivCell(row.iv_context)+'</td><td>'+stageCell(stages.sr_location)+'</td></tr>';
-    });
-    byId('out').innerHTML=html+'</tbody></table>';
-    byId('status').textContent='Complete · '+rows.length+' candidates';
-  }
-  async function loadWatchlists(){
-    var response=await fetch('/watchlists/',{cache:'no-store'}), data=await response.json();
-    if(!response.ok)throw new Error(data.error||'Could not load watchlists');
-    var items=data.watchlists||[];
-    if(!items.length){
-      if(byId('w').options.length)return;
-      throw new Error('No watchlists found.');
-    }
-    byId('w').innerHTML=items.map(function(item){
-      return '<option value="'+esc(item.id)+'"'+(item.is_default?' selected':'')+'>'+esc(item.name)+' ('+esc(item.symbol_count||0)+')</option>';
-    }).join('');
-  }
-  async function runScan(){
-    var button=byId('run'), status=byId('status');
-    button.disabled=true;
-    status.textContent='Scanning…';
-    try{
-      var payload={watchlist_id:byId('w').value,direction:byId('d').value,min_score:byId('min').value,volatility_dte:byId('iv-dte').value};
-      ['acceleration','streak','bollinger','volume','structure','rsi_extreme','iv_fade','sr_location'].forEach(function(id){payload[id]=byId(id).value;});
-      var response=await fetch('/systematic-reversal/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-      var data=await response.json();
-      if(!response.ok)throw new Error(data.error||'Scan failed');
-      render(data);
-    }catch(error){
-      status.textContent='Error: '+error.message;
-    }finally{
-      button.disabled=false;
-    }
-  }
-  byId('run').addEventListener('click',runScan);
-  loadWatchlists().catch(function(error){
-    if(!byId('w').options.length)byId('status').textContent='Could not load watchlists: '+error.message;
-  });
+function byId(id){return document.getElementById(id)}
+function esc(value){var n=document.createElement('div');n.textContent=value==null?'':String(value);return n.innerHTML}
+function n(value,digits){return value==null?'—':Number(value).toFixed(digits)}
+function stage(stage){if(!stage)return '—';var color=stage.status==='ok'?(stage.pass?'#60a5fa':'#f87171'):'#94a3b8';return '<b style="color:'+color+'">'+esc(stage.pass?'pass':stage.status||'—')+'</b><br><small>'+esc(stage.reason||'')+'</small>'}
+function iv(iv){if(!iv||iv.rank==null)return '—';return '<b>'+esc(iv.rank)+'% IVR</b><br><small>'+esc(iv.current_iv)+'% IV</small>'}
+function payload(){var p={watchlist_id:byId('w').value,direction:byId('d').value,min_score:byId('min').value,volatility_dte:byId('iv-dte').value,min_earnings_days:byId('earnings-days').value};['acceleration','streak','bollinger','volume','structure','rsi_extreme','iv_fade','sr_location','earnings_risk'].forEach(function(id){p[id]=byId(id).value});return p}
+function setSummary(items){byId('summary').innerHTML=(items||[]).map(function(x){return '<div class="metric"><small>'+esc(x.label)+'</small><b>'+esc(x.value)+'</b></div>'}).join('')}
+function renderLive(data){var rows=data.results||[],html='';setSummary([{label:'Watchlist symbols',value:data.scanned||0},{label:'Candidates',value:rows.length}]);if(!rows.length){byId('out').innerHTML='No candidates passed the enabled filters.';return}html='<table><thead><tr><th>Symbol</th><th>Reversal</th><th>Score</th><th>Price</th><th>Support / resistance</th><th>Put wall</th><th>Call wall</th><th>Earnings</th><th>IV context</th><th>RSIDiff90</th><th>Acceleration</th><th>Streak</th><th>Bollinger</th><th>Volume</th><th>S/R location</th></tr></thead><tbody>';rows.forEach(function(r){var st=r.stages||{},color=r.direction==='bear'?'#f87171':'#60a5fa';html+='<tr><td><b>'+esc(r.symbol)+'</b></td><td style="color:'+color+'">'+esc(r.direction)+'</td><td><b>'+esc(r.score)+'/'+esc(r.max_score)+'</b></td><td>'+n(r.price,2)+'</td><td>Support '+n(r.support,2)+'<br>Resistance '+n(r.resistance,2)+'</td><td>'+n(r.put_wall,2)+'</td><td>'+n(r.call_wall,2)+'</td><td>'+stage(st.earnings_risk)+'</td><td>'+iv(r.iv_context)+'</td><td>'+n(r.rsidiff90,1)+'</td><td>'+stage(st.acceleration)+'</td><td>'+stage(st.streak)+'</td><td>'+stage(st.bollinger)+'</td><td>'+stage(st.volume)+'</td><td>'+stage(st.sr_location)+'</td></tr>'});byId('out').innerHTML=html+'</tbody></table>'}
+function renderBacktest(data){var rows=data.results||[],s=data.summary||{};setSummary([{label:'Watchlist symbols',value:data.watchlist_symbols||0},{label:'Eligible after filters',value:data.eligible_after_filters||0},{label:'Total trades',value:s.total_trades||0},{label:'Winners',value:s.winners||0},{label:'Losers',value:s.losers||0},{label:'Pending',value:s.pending||0},{label:'Win rate',value:s.win_rate==null?'—':s.win_rate+'%'}]);var html='<p><small>'+esc(data.note||'')+'</small></p>';if(!rows.length){byId('out').innerHTML=html+'No historical signals passed the enabled filters.';return}html+='<table><thead><tr><th>Symbol</th><th>Trade date</th><th>Direction</th><th>Score</th><th>Entry close</th><th>DTE</th><th>Exit date</th><th>Exit close</th><th>Move</th><th>Outcome</th><th>Detail</th></tr></thead><tbody>';rows.forEach(function(r){var color=r.outcome==='winner'?'#60a5fa':r.outcome==='loser'?'#f87171':'#94a3b8';html+='<tr><td><b>'+esc(r.symbol)+'</b></td><td>'+esc(r.trade_date)+'</td><td>'+esc(r.direction)+'</td><td>'+esc(r.score)+'/'+esc(r.max_score)+'</td><td>'+n(r.entry_close,2)+'</td><td>'+esc(r.dte)+'</td><td>'+esc(r.exit_date||'—')+'</td><td>'+n(r.exit_close,2)+'</td><td>'+n(r.move_pct,2)+'%</td><td style="color:'+color+'"><b>'+esc(r.outcome)+'</b></td><td><small>'+esc(r.detail)+'</small></td></tr>'});byId('out').innerHTML=html+'</tbody></table>'}
+async function call(url,p,renderer,button){button.disabled=true;byId('status').textContent='Scanning…';try{var response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)}),data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');renderer(data);byId('status').textContent='Complete'}catch(error){byId('status').textContent='Error: '+error.message}finally{button.disabled=false}}
+byId('run').addEventListener('click',function(){call('/systematic-reversal/api/run',payload(),renderLive,byId('run'))});
+byId('backtest-run').addEventListener('click',function(){var p=payload();p.backtest_from=byId('bt-from').value;p.backtest_days=byId('bt-days').value;p.backtest_dte=byId('bt-dte').value;call('/systematic-reversal/api/backtest',p,renderBacktest,byId('backtest-run'))});
+function switchMode(backtest){byId('live-panel').classList.toggle('hidden',backtest);byId('backtest-panel').classList.toggle('hidden',!backtest);byId('live-tab').classList.toggle('active',!backtest);byId('backtest-tab').classList.toggle('active',backtest)}
+byId('live-tab').addEventListener('click',function(){switchMode(false)});byId('backtest-tab').addEventListener('click',function(){switchMode(true)});
+byId('bt-from').value=new Date().toISOString().slice(0,10);
 }());
 </script></body></html>
