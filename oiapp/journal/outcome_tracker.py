@@ -56,6 +56,21 @@ def _migrate():
         if col not in existing:
             con.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
             added.append(col)
+    # Outcome summary joins this table even when no conviction snapshot has
+    # ever been saved. Create its lightweight schema here so that reporting
+    # remains available on a fresh database.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS trade_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            total_score REAL,
+            label TEXT,
+            signals_json TEXT,
+            components_json TEXT,
+            snapshot_at TEXT
+        )
+    """)
     con.commit(); con.close()
     return added
 
@@ -82,8 +97,17 @@ def save_grade(trade_id):
     if "setup_grade"      in d: fields["setup_grade"]      = str(d["setup_grade"])[:2]
     if "followed_rules"   in d: fields["followed_rules"]   = int(bool(d["followed_rules"]))
     if "hindsight_notes"  in d: fields["hindsight_notes"]  = str(d["hindsight_notes"])[:500]
-    if "expected_move"    in d: fields["expected_move"]    = float(d["expected_move"])
-    if "actual_move"      in d: fields["actual_move"]      = float(d["actual_move"])
+    for name in ("expected_move", "actual_move"):
+        if name not in d:
+            continue
+        raw = d[name]
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            fields[name] = None
+            continue
+        try:
+            fields[name] = float(raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": f"{name} must be numeric or blank"}), 400
     if not fields:
         return jsonify({"error": "no fields provided"}), 400
     con = _conn()
