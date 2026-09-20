@@ -355,7 +355,7 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
     """One watchlist's worth of the sequence: price/OI -> earnings ->
     indicators -> corporate events -> volume profile -> intraday price. Each step only
     executes if it HAS a configured time (blank/None means "don't run this
-    step" -- opt-in per watchlist, per step) AND that time has passed today
+    step" -- opt-in per watchlist, per step) AND the current minute exactly matches that time
     AND it hasn't already run today. All steps after price/OI additionally
     require price/OI to have ALREADY completed today -- a real dependency
     gate, not just "set the clock times in the right order" advice: if
@@ -370,7 +370,7 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
 
     price_ran_today = (d_price == today)
 
-    if t_price and not price_ran_today and hh_mm >= t_price:
+    if t_price and not price_ran_today and hh_mm == t_price:
         try:
             from ..scanners.watchlist_manager import _fetch_data_for_watchlist_core
             status, payload = _fetch_data_for_watchlist_core(wl_id, source="scheduler", blocking=True)
@@ -385,7 +385,7 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
         price_ran_today = True  # ran (success or failure) -- don't retry again today, and
                                  # unblocks earnings/indicators immediately within this same tick
 
-    if t_earn and d_earn != today and hh_mm >= t_earn:
+    if t_earn and d_earn != today and hh_mm == t_earn:
         if not price_ran_today:
             print(f"[watchlist_schedule] earnings for '{wl_name}': waiting on price/OI to complete first")
         else:
@@ -421,7 +421,7 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
                 _notify_job("WATCHLIST_EARNINGS", f"Earnings fetch FAILED: \"{wl_name}\"", str(e), severity="error")
             _set_watchlist_schedule_date(wl_id, "schedule_earnings_last_date", today)
 
-    if t_ind and d_ind != today and hh_mm >= t_ind:
+    if t_ind and d_ind != today and hh_mm == t_ind:
         if not price_ran_today:
             print(f"[watchlist_schedule] indicators for '{wl_name}': waiting on price/OI to complete first")
         else:
@@ -441,7 +441,7 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
                 _notify_job("WATCHLIST_INDICATORS", f"Indicators computation FAILED: \"{wl_name}\"", str(e), severity="error")
             _set_watchlist_schedule_date(wl_id, "schedule_indicators_last_date", today)
 
-    if t_events and d_events != today and hh_mm >= t_events:
+    if t_events and d_events != today and hh_mm == t_events:
         if not price_ran_today:
             print(f"[watchlist_schedule] corporate events for '{wl_name}': waiting on price/OI to complete first")
         else:
@@ -477,7 +477,7 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
                 _notify_job("WATCHLIST_CORPORATE_EVENTS", f"Corporate events fetch FAILED: \"{wl_name}\"", str(e), severity="error")
             _set_watchlist_schedule_date(wl_id, "schedule_corporate_events_last_date", today)
 
-    if t_vp and d_vp != today and hh_mm >= t_vp:
+    if t_vp and d_vp != today and hh_mm == t_vp:
         if not price_ran_today:
             print(f"[watchlist_schedule] volume profile for '{wl_name}': waiting on price/OI to complete first")
         else:
@@ -508,7 +508,7 @@ def _process_watchlist_schedule_row(row: tuple, today: str, hh_mm: str) -> None:
     # This is deliberately independent of the normal price/OI job: it is an
     # end-of-day snapshot for intraday backtests, and needs no per-minute
     # polling.  Tastytrade's 1m response is compacted to 2m before SQLite.
-    if t_intraday and d_intraday != today and hh_mm >= t_intraday:
+    if t_intraday and d_intraday != today and hh_mm == t_intraday:
         if _dt.datetime.now().weekday() >= 5:
             print(f"[watchlist_schedule] intraday price for '{wl_name}': weekend, skipped")
         else:
@@ -539,7 +539,7 @@ def _run_future_oi_if_due(today: str, hh_mm: str) -> None:
         from ..scanners.watchlist_manager import _get_setting, _set_setting
         sched_time = (_get_setting("future_oi_schedule_time", "") or "").strip()
         last_date = _get_setting("future_oi_schedule_last_date", "")
-        if not sched_time or last_date == today or hh_mm < sched_time:
+        if not sched_time or last_date == today or hh_mm != sched_time:
             return
         from .futures_oi_schwab import fetch_futures_oi_three_layer, SCHWAB_ROOTS
         from .task_executor import get_background_executor
