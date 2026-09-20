@@ -1101,21 +1101,15 @@ class TastytradeFeed:
                     # to flood the log for a whole watchlist run). This is
                     # the fastest path to a precise fix: whatever this
                     # prints IS the real attribute name to use, no more
-                    # guessing from a sandbox without the SDK installed.
+                    # Missing OI is normal for some contracts. Keep one
+                    # compact diagnostic per symbol; avoid dumping SDK
+                    # attributes into stdout during a live watchlist fetch.
                     if not diagnostic_logged:
                         diagnostic_logged = True
-                        try:
-                            static_attrs = [a for a in dir(o) if not a.startswith("_")]
-                            summary_attrs = [a for a in dir(summary)] if summary is not None else None
-                            print(f"[tastytrade_feed] DIAGNOSTIC: {underlying_symbol} strike {getattr(o, 'strike_price', '?')} "
-                                  f"{'call' if is_call else 'put'} -- OI came back empty from both sources.\n"
-                                  f"  Static instrument object attributes: {static_attrs}\n"
-                                  f"  open_interest value on static object: {oi_from_static!r}\n"
-                                  f"  Summary event received: {summary is not None}\n"
-                                  f"  Summary object attributes (if received): {summary_attrs}\n"
-                                  f"  open_interest value on Summary (if received): {oi_from_summary!r}")
-                        except Exception as diag_e:
-                            print(f"[tastytrade_feed] DIAGNOSTIC logging itself failed: {diag_e}")
+                        print(f"[tastytrade_feed] {underlying_symbol}: OI unavailable "
+                              f"for one contract (static={oi_from_static!r}, "
+                              f"summary={oi_from_summary!r}); using 0.")
+
 
                 by_expiry.setdefault(exp_str, []).append({
                     "strike": float(o.strike_price), "type": "call" if is_call else "put",

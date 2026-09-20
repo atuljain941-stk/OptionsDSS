@@ -171,7 +171,10 @@ def data_api():
     mode = (request.args.get("mode") or "saved").lower()
     oi_from_date = (request.args.get("oi_from") or _prior_business_day()).strip()
     oi_to_date = (request.args.get("oi_to") or date.today().isoformat()).strip()
-    strike_count = max(10, min(120, int(request.args.get("strikes") or 40)))
+    # This is deliberately a *per-side* count. Both saved and intraday
+    # views return every available listed strike in the contiguous ATM window:
+    # N strikes at/below spot plus N strikes above it.
+    strikes_per_side = max(1, min(60, int(request.args.get("strikes") or 10)))
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
     if mode not in {"saved", "intraday"}:
@@ -242,27 +245,19 @@ def data_api():
     ordered = sorted(by_strike)
     if not ordered:
         return jsonify({"error": "No call/put gamma rows available"}), 422
-    # Intraday needs a stable, spot-relative ATM window.  A fixed broad
-    # range becomes stale as the underlying moves, so use the ten nearest
-    # available listed strikes at/below spot and the ten immediately above it.
-    if mode == "intraday":
-        below = [strike for strike in ordered if strike <= spot]
-        above = [strike for strike in ordered if strike > spot]
-        selected = below[-10:] + above[:10]
-        window = {
-            "kind": "intraday_atm",
-            "below_requested": 10, "above_requested": 10,
-            "below_available": len(below[-10:]), "above_available": len(above[:10]),
-        }
-    else:
-        nearest = min(range(len(ordered)), key=lambda i: abs(ordered[i] - spot))
-        half = strike_count // 2
-        selected = ordered[max(0, nearest - half):min(len(ordered), nearest + half)]
-        window = {
-            "kind": "saved_requested",
-            "below_requested": None, "above_requested": None,
-            "below_available": None, "above_available": None,
-        }
+    # Use the actual sorted listed strikes, rather than an arithmetic
+    # price range, so no available strike inside the requested ATM window is
+    # skipped. This same series powers GEX, OI, OI-change, and volume charts.
+    below = [strike for strike in ordered if strike <= spot]
+    above = [strike for strike in ordered if strike > spot]
+    selected = below[-strikes_per_side:] + above[:strikes_per_side]
+    window = {
+        "kind": "spot_relative",
+        "per_side_requested": strikes_per_side,
+        "below_available": len(below[-strikes_per_side:]),
+        "above_available": len(above[:strikes_per_side]),
+        "total_selected": len(selected),
+    }
 
     series = []
     for strike in selected:
