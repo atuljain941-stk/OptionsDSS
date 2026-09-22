@@ -1505,6 +1505,13 @@ def _watcher_loop(app):
                 except Exception as e:
                     print(f"[signal_notifier] alert outbox consumer error: {e}")
 
+                # With scanner alerts disabled, Telegram/outbox is the only
+                # permitted lean-mode work.  Do not write an empty source-
+                # sweep start/finish pair to SQLite every watcher tick.
+                if not cfg["enabled"]:
+                    time.sleep(_WATCHER_TICK_SEC)
+                    continue
+
                 # per-source sweep -- this is the part most likely to run
                 # long (N configured sources, each doing a full scan), so
                 # it's what "running"/"Stop" on the Scheduler Hub page

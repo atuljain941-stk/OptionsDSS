@@ -2794,33 +2794,12 @@ def add_trade():
     ))
     new_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
     con.commit(); con.close()
-    # Capture entry snapshot in background thread (non-blocking)
-    if _SNAPSHOT_AVAILABLE:
-        import threading
-        threading.Thread(
-            target=capture_entry_snapshot,
-            args=(new_id, d["symbol"].upper(), d["trade_type"]),
-            kwargs={"spot": float(d.get("entry_price") or 0) or None},
-            daemon=True,
-        ).start()
-
-    # Cache the same journal health score asynchronously so the open journal row
-    # starts with the score previewed on Add Trade.  Alerts still use the normal
-    # journal refresh path and are not changed by this preview route.
-    def _cache_new_live(_tid):
-        try:
-            con2 = _conn()
-            row2 = con2.execute("SELECT * FROM trades WHERE id=?", (_tid,)).fetchone()
-            con2.close()
-            if row2:
-                live2 = _compute_live_pnl(row2)
-                _cache_live(_tid, live2)
-        except Exception as _e:
-            print(f"[journal] initial live score cache failed for trade {_tid}: {_e}")
-    try:
-        threading.Thread(target=_cache_new_live, args=(new_id,), daemon=True).start()
-    except Exception:
-        pass
+    # Lean mode: a trade save must be a single short SQLite transaction.
+    # The old code started two unmanaged daemon threads here (entry snapshot
+    # and live P&L/health scoring).  They bypassed Scheduler Hub/global pause,
+    # could make remote calls, and contended for SQLite every time a trade was
+    # added.  Snapshot/live analysis remains available from its explicit UI
+    # actions; it must never be triggered implicitly by saving a trade.
 
     return jsonify({"ok": True, "id": new_id})
 
@@ -5797,4 +5776,3 @@ def health_alert_state():
     }
     payload.update({"global_alert_settings": _alert_settings_payload()})
     return _jsonify_safe(payload)
-
