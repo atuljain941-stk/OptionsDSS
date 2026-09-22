@@ -184,114 +184,28 @@ def create_app():
     except Exception as e:
         print(f"[app] WARNING: watchlist_manager not loaded — {e}")
 
-    try:
-        from .scanners.scanner_builder import start_price_backfill_watcher
-        started3 = start_price_backfill_watcher(interval_seconds=120, batch_size=5)
-        print(f"[app] Scanner price backfill {'registered' if started3 else 'already registered'} (manual only -- Run Now on /scheduler-hub, not automatic)")
-    except Exception as e:
-        print(f"[app] WARNING: price backfill watcher not started — {e}")
+    # Scanner cache/backfill loops are deliberately not started in lean mode.
+    # They create persistent watcher threads and bulk SQLite/network work.
+    print("[app] Lean mode: Scanner cache/backfill loops are on-demand only")
 
     try:
-        from .scanners.scanner_builder import start_intraday_backfill_watcher
-        started3b = start_intraday_backfill_watcher(interval_seconds=150, batch_size=3)
-        print(f"[app] Scanner intraday backfill {'registered' if started3b else 'already registered'} (manual only -- Run Now on /scheduler-hub, not automatic)")
-    except Exception as e:
-        print(f"[app] WARNING: intraday backfill watcher not started — {e}")
-
-    try:
-        from .scanners.scanner_builder import start_daily_price_refresh_watcher
-        started3c = start_daily_price_refresh_watcher(interval_seconds=300, batch_size=25)
-        print(f"[app] Scanner daily price refresh {'registered' if started3c else 'already registered'} (runs at 7:30 AM via the morning data pipeline, not a separate watcher)")
-    except Exception as e:
-        print(f"[app] WARNING: daily price refresh watcher not started — {e}")
-
-    try:
-        from .scanners.scanner_builder import start_intraday_price_refresh_watcher
-        started3d = start_intraday_price_refresh_watcher(interval_seconds=420, batch_size=15)
-        print(f"[app] Scanner intraday price refresh {'registered' if started3d else 'already registered'} (runs at 7:30 AM via the morning data pipeline, not a separate watcher)")
-    except Exception as e:
-        print(f"[app] WARNING: intraday price refresh watcher not started — {e}")
-
-    try:
-        from .services.technical_snapshot import technical_snapshot_bp, start_technical_snapshot_watcher
+        from .services.technical_snapshot import technical_snapshot_bp
         app.register_blueprint(technical_snapshot_bp)
-        started4 = start_technical_snapshot_watcher(interval_seconds=180, batch_symbols=10)
-        print(f"[app] Technical snapshot cache {'registered' if started4 else 'already registered'} (runs at 7:30 AM via the morning data pipeline, not a separate watcher)")
+        print("[app] Technical snapshot routes registered (on-demand only)")
     except Exception as e:
         print(f"[app] WARNING: technical snapshot cache not started — {e}")
 
-    try:
-        # V104: 0-10 DTE Intraday Buildup + Positional Trend pages
-        # (SPY/QQQ/SPX/IWM). Positional trend runs as step 7 of the
-        # 7:30 AM morning pipeline; intraday buildup gets its own
-        # 20-min interval job here (registered for Scheduler Hub
-        # visibility + manual "Run Now", same pattern as the other
-        # watchers on this page).
-        from .services.dte_pages import register_dte_jobs
-        from .services import unified_scheduler as _sched, dte_pages as _dte
-        register_dte_jobs()
-        _sched.register("dte_intraday_buildup", lambda: _dte.compute_intraday_buildup(),
-                         interval_seconds=20 * 60, low_priority=True)
-        print("[app] DTE pages (Intraday Buildup + Positional Trend) registered")
-    except Exception as e:
-        print(f"[app] WARNING: DTE pages not started — {e}")
-
-    try:
-        # V113: ICICI Direct auto-trading P&L monitor -- checks every
-        # OPEN position's combined rupee P&L every 30s and auto-closes
-        # (safe short-first sequencing) on target/stop-loss hit.
-        from .services.icici_positions import register_icici_monitor_job
-        from .services import unified_scheduler as _sched2, icici_positions as _icici
-        register_icici_monitor_job()
-        _sched2.register("icici_pnl_monitor", lambda: _icici.monitor_tick(),
-                          interval_seconds=30, low_priority=False)
-        print("[app] ICICI auto-trading P&L monitor registered")
-    except Exception as e:
-        print(f"[app] WARNING: ICICI auto-trading monitor not started — {e}")
-
-    try:
-        # V125: ICICI strategy evaluator -- checks every ENABLED
-        # strategy's opening/closing conditions (price or reused
-        # Scanner Builder live query) once a minute, resolving
-        # ITM/ATM/OTM legs against live spot and firing tracked
-        # positions automatically.
-        from .services.icici_strategy_engine import register_strategy_evaluator_job
-        from .services import unified_scheduler as _sched3, icici_strategy_engine as _strat
-        register_strategy_evaluator_job()
-        _sched3.register("icici_strategy_evaluator", lambda: _strat.evaluate_strategies_tick(),
-                          interval_seconds=60, low_priority=False)
-        print("[app] ICICI strategy evaluator registered")
-    except Exception as e:
-        print(f"[app] WARNING: ICICI strategy evaluator not started — {e}")
-
-    try:
-        # V134: Schwab auto-trading P&L monitor + strategy evaluator --
-        # same architecture as the ICICI jobs, built on Schwab's
-        # existing OAuth infrastructure.
-        from .services.schwab_positions import register_monitor_job as _register_schwab_monitor
-        from .services.schwab_strategy_engine import register_strategy_evaluator_job as _register_schwab_strategy
-        from .services import unified_scheduler as _sched4, schwab_positions as _schwab_pos, schwab_strategy_engine as _schwab_strat
-        _register_schwab_monitor()
-        _register_schwab_strategy()
-        _sched4.register("schwab_pnl_monitor", lambda: _schwab_pos.monitor_tick(), interval_seconds=30, low_priority=False)
-        _sched4.register("schwab_strategy_evaluator", lambda: _schwab_strat.evaluate_strategies_tick(), interval_seconds=60, low_priority=False)
-        print("[app] Schwab auto-trading monitor + strategy evaluator registered")
-    except Exception as e:
-        print(f"[app] WARNING: Schwab auto-trading jobs not started — {e}")
+    # DTE, ICICI, and Schwab auto-trading checks must not exist as startup
+    # jobs.  Their 30–60 second ticks were still consuming workers in a
+    # supposedly lean process.  The corresponding pages remain on-demand.
+    print("[app] Lean mode: DTE and broker auto-trading monitors are on-demand only")
 
     # Candle Context is intentionally on-demand in lean mode.  Registering
     # its scheduled scan on startup allowed a saved Scheduler Hub setting to
     # scan an entire watchlist even when nobody had opened that page.
     print("[app] Lean mode: Candle Context scan is on-demand only")
 
-    try:
-        from .services.schwab_positions import register_pending_entries_job
-        from .services import unified_scheduler as _sched5, schwab_positions as _schwab_pos2
-        register_pending_entries_job()
-        _sched5.register("schwab_pending_entries", lambda: _schwab_pos2.check_pending_entries(), interval_seconds=60, low_priority=False)
-        print("[app] Schwab pending-order fill sync registered")
-    except Exception as e:
-        print(f"[app] WARNING: Schwab pending-order fill sync not started — {e}")
+    print("[app] Lean mode: Schwab pending-order sync is on-demand only")
 
     try:
         from .scanners.institutional_scanner import inst_bp
@@ -653,17 +567,7 @@ def create_app():
     except Exception as e:
         print(f"[app] WARNING: option_sale_framework not loaded — {e}")
 
-    try:
-        # No blueprint -- this module has no routes, just the scheduled
-        # daily futures OI fetch that was confirmed missing entirely
-        # (no register_scheduler_job existed anywhere in this module),
-        # which is why api_weekly_rolling's futures OI context has been
-        # showing NO_DATA(0) for SPY/QQQ/IWM.
-        from .services.futures_oi_real import register_scheduler_job as _futures_oi_register
-        _futures_oi_started = _futures_oi_register(interval_seconds=21600)
-        print(f"[app] Futures OI daily fetch scheduler {'started' if _futures_oi_started else 'already running'} (SPY/QQQ/IWM every 6h)")
-    except Exception as e:
-        print(f"[app] WARNING: futures_oi_real scheduler not loaded — {e}")
+    print("[app] Lean mode: futures OI scheduler is on-demand only")
 
     try:
         from .services.scanner_primitives_guide import scanner_primitives_guide_bp
