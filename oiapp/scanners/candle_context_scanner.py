@@ -172,7 +172,10 @@ def _detect_current_candle(ctx, p):
     if n < max(int(p.get("avg_change_bars", 20)), 25) + 2:
         return None
 
-    change_pct = c.pct_change() * 100
+    # Do not forward-fill missing close values: that both avoids pandas'
+    # deprecated default and prevents a missing bar from becoming a fake 0%
+    # candle move.
+    change_pct = c.pct_change(fill_method=None) * 100
     avg_abs_change = change_pct.abs().ewm(span=int(p.get("avg_change_bars", 20)), adjust=False, min_periods=5).mean()
     vol_avg = v.ewm(span=20, adjust=False, min_periods=5).mean()
 

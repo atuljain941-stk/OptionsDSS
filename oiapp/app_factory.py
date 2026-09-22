@@ -279,16 +279,10 @@ def create_app():
     except Exception as e:
         print(f"[app] WARNING: Schwab auto-trading jobs not started — {e}")
 
-    try:
-        # V145: Candle Context scheduled scan -- reuses the existing
-        # Scheduler Hub time-based schedule UI (daily by default, or
-        # weekly by restricting to one weekday) instead of building a
-        # separate scheduling control.
-        from .scanners.candle_context_scanner import register_scheduled_scan_job
-        register_scheduled_scan_job()
-        print("[app] Candle Context scheduled scan registered")
-    except Exception as e:
-        print(f"[app] WARNING: Candle Context scheduled scan not started — {e}")
+    # Candle Context is intentionally on-demand in lean mode.  Registering
+    # its scheduled scan on startup allowed a saved Scheduler Hub setting to
+    # scan an entire watchlist even when nobody had opened that page.
+    print("[app] Lean mode: Candle Context scan is on-demand only")
 
     try:
         from .services.schwab_positions import register_pending_entries_job
