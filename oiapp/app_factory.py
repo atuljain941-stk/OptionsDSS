@@ -547,9 +547,10 @@ def create_app():
         print(f"[app] WARNING: iron_condor_candidates not loaded — {e}")
 
     try:
-        from .scanners.gex_predictive_analysis import gex_predictive_bp
+        from .scanners.gex_predictive_analysis import gex_predictive_bp, gex_analysis_compat_bp
         app.register_blueprint(gex_predictive_bp)
-        print("[app] GEX Predictive Analysis registered at /gex-predictive-analysis")
+        app.register_blueprint(gex_analysis_compat_bp)
+        print("[app] GEX Predictive Analysis registered at /gex-predictive-analysis and /gex-analysis")
     except Exception as e:
         print(f"[app] WARNING: gex_predictive_analysis not loaded — {e}")
 

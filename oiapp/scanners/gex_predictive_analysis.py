@@ -37,6 +37,10 @@ except ImportError:
     HAVE_SCIPY = False
 
 gex_predictive_bp = Blueprint("gex_predictive_analysis", __name__, url_prefix="/gex-predictive-analysis")
+# Keep the original GEX Analysis bookmark working.  This is deliberately a
+# second, thin route only: importing or registering it does not start a GEX
+# worker, fetch data, or schedule any recurring work.
+gex_analysis_compat_bp = Blueprint("gex_analysis_compat", __name__, url_prefix="/gex-analysis")
 
 FORWARD_HORIZONS_MIN = [5, 15, 30, 60]
 MATCH_TOLERANCE_MIN = 2.5
@@ -312,3 +316,16 @@ def api_run():
         import traceback
         traceback.print_exc()
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+
+# Older navigation and saved browser links used /gex-analysis.  Keep both
+# slash variants so Flask does not turn a missing legacy URL into a 404.
+@gex_analysis_compat_bp.route("", strict_slashes=False)
+@gex_analysis_compat_bp.route("/", strict_slashes=False)
+def legacy_page():
+    return page()
+
+
+@gex_analysis_compat_bp.route("/api/run")
+def legacy_api_run():
+    return api_run()
