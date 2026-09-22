@@ -330,8 +330,8 @@ def _load_symbol_history(
     required_tfs: Iterable[str],
     start: date,
     end: date,
-    data_provider: str = "auto",
-    auto_fetch: bool = True,
+    data_provider: str = "sqlite",
+    auto_fetch: bool = False,
 ) -> SymbolHistory:
     # Keep a warmup window so scanner functions such as EMA200, RSI, and
     # rsidiff90() can be evaluated without looking into the future. Daily bars
@@ -353,9 +353,7 @@ def _load_symbol_history(
     # internal fill, but this older final fallback used to bypass that policy
     # and fetch anyway. Keep an explicit yfinance-only request working, while
     # making cache-only/auto-without-fill genuinely network-free.
-    allow_remote_fetch = data_provider == "yfinance" or (
-        data_provider != "sqlite" and auto_fetch
-    )
+    allow_remote_fetch = data_provider == "yfinance"
     if (daily is None or daily.empty) and allow_remote_fetch:
         # Final safety fallback keeps the current yfinance-only behavior working
         # when the local SQLite cache is unavailable or empty.
@@ -1283,7 +1281,7 @@ def _run_chronological_backtest(config: Dict[str, Any]) -> Dict[str, Any]:
     # history. Missing data is reported in the result; users can explicitly
     # opt into a yfinance fill from the advanced data-source controls.
     data_provider = str(config.get("data_provider") or "sqlite").strip().lower()
-    if data_provider == "mongo":
+    if data_provider in {"mongo", "auto"}:
         data_provider = "sqlite"
     if data_provider not in {"auto", "sqlite", "yfinance"}:
         data_provider = "sqlite"
@@ -1695,7 +1693,7 @@ def _run_forward_return_backtest(config: Dict[str, Any]) -> Dict[str, Any]:
 
     benchmark = _clean_symbol(config.get("benchmark") or "SPY") or "SPY"
     data_provider = str(config.get("data_provider") or "sqlite").strip().lower()
-    if data_provider == "mongo":
+    if data_provider in {"mongo", "auto"}:
         data_provider = "sqlite"
     if data_provider not in {"auto", "sqlite", "yfinance"}:
         data_provider = "sqlite"
