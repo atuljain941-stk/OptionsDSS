@@ -1365,7 +1365,11 @@ def _watcher_loop(app):
     while True:
         try:
             cfg = get_config()
-            if cfg["enabled"]:
+            # Lean mode keeps this one lightweight loop for Telegram price
+            # alerts/outbox delivery only. The expensive scanner and journal
+            # passes remain off unless the main Signal Notifier is explicitly
+            # enabled from its own page.
+            if cfg["enabled"] or cfg.get("telegram_price_alerts_enabled", False):
                 now = datetime.now()
                 # legacy/default trade-scanner sweep (backward compatible),
                 # now honoring schedule_kind ('interval' or 'time' -- see
@@ -1517,7 +1521,7 @@ def _watcher_loop(app):
                     _run_id = _log_start("signal_notifier")
                     _sources_run = 0
                     try:
-                        for source in list_sources():
+                        for source in (list_sources() if cfg["enabled"] else []):
                             if _is_stop_requested("signal_notifier"):
                                 print("[signal_notifier] stop requested -- aborting rest of this source sweep")
                                 break

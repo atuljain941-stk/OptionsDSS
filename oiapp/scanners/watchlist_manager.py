@@ -1199,7 +1199,7 @@ def watchlist_fetch_history(wl_id):
 _last_oi_fetch_result: dict = {}
 
 
-def _fetch_data_for_watchlist_core(wl_id, source="manual", remote_addr="?", user_agent="?", referer="?", blocking=False, oi_source="tastytrade"):
+def _fetch_data_for_watchlist_core(wl_id, source="manual", remote_addr="?", user_agent="?", referer="?", blocking=False, oi_source="yfinance"):
     """The actual fetch logic, extracted from the fetch_data_for_watchlist
     Flask route below so it can ALSO be called from the new per-watchlist
     scheduler (_watchlist_schedule_loop) without needing a Flask request
@@ -1590,16 +1590,14 @@ def fetch_data_for_watchlist(wl_id):
     docstring above) -- this is the only place flask.request gets
     touched, so the core logic stays callable from the scheduler too.
 
-    oi_source: "tastytrade" (default; real broker Greeks) or
-    "yfinance" (fast fallback; no real Greeks). Tastytrade is the default
-    because the Watchlist OI workflow is expected to populate Greeks as well
-    as open interest. Read from JSON body or query string; callers can still
-    explicitly select yfinance for a quick non-Greeks refresh.
+    oi_source: "yfinance" (default; fast OI/price refresh with no broker
+    Greeks) or "tastytrade" (explicit enrichment only). Read from JSON body
+    or query string.
     """
     body = request.get_json(silent=True) or {}
-    oi_source = (body.get("oi_source") or request.args.get("oi_source") or "tastytrade").strip().lower()
+    oi_source = (body.get("oi_source") or request.args.get("oi_source") or "yfinance").strip().lower()
     if oi_source not in ("yfinance", "tastytrade"):
-        oi_source = "tastytrade"
+        oi_source = "yfinance"
     status, payload = _fetch_data_for_watchlist_core(
         wl_id, source="manual-button",
         remote_addr=request.remote_addr,
