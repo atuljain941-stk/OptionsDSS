@@ -47,6 +47,17 @@ def create_app():
     from .db import init_db
     init_db()
 
+    # Stabilization baseline: interval/timed Scheduler Hub work is paused
+    # across restarts. Per-watchlist yfinance refreshes and Telegram price
+    # alerts use their own lean loops below; every other job remains visible
+    # in Scheduler Hub and requires an explicit enable/unpause action.
+    try:
+        from .services.job_registry import set_global_pause
+        set_global_pause(True)
+        print("[app] Lean mode: nonessential Scheduler Hub jobs paused")
+    except Exception as e:
+        print(f"[app] WARNING: could not apply lean scheduler pause — {e}")
+
     try:
         from .services.schema_registry import ensure_all_schemas
         ensure_all_schemas()
@@ -128,21 +139,9 @@ def create_app():
         print(f"[app] WARNING: routes_strategy not loaded — {e}")
 
     try:
-        from .journal.journal_routes import journal_bp, start_trade_alert_watcher, start_health_alert_watcher
+        from .journal.journal_routes import journal_bp
         app.register_blueprint(journal_bp)
-        # 4h to match signal_notifier's own journal_pnl_alerts_interval_sec
-        # default -- this value only feeds Scheduler Hub's displayed
-        # schedule (the actual cadence is driven by Signal Notifier's
-        # loop, which reads the configurable setting), so leaving it at
-        # 60s here would have shown a schedule that doesn't match what
-        # actually runs.
-        started = start_trade_alert_watcher(interval_seconds=14400)
-        print(f"[app] Trade P&L alerts {'registered' if started else 'already registered'} (runs via Signal Notifier, not a separate watcher -- configure at /signal-notifier)")
-        try:
-            started_health = start_health_alert_watcher(interval_seconds=300)
-            print(f"[app] Trade health alerts {'registered' if started_health else 'already registered'} (runs via Signal Notifier, not a separate watcher -- configure at /signal-notifier)")
-        except Exception as e:
-            print(f"[app] WARNING: health alert watcher not started — {e}")
+        print("[app] Journal routes registered (journal background alerts disabled by lean mode)")
     except Exception as e:
         print(f"[app] WARNING: journal_routes not loaded — {e}")
 
@@ -179,13 +178,9 @@ def create_app():
         print(f"[app] WARNING: earnings_calendar not loaded — {e}")
 
     try:
-        from .scanners.watchlist_manager import wl_bp, start_alert_rule_watcher
+        from .scanners.watchlist_manager import wl_bp
         app.register_blueprint(wl_bp)
-        try:
-            started2 = start_alert_rule_watcher(interval_seconds=900)
-            print(f"[app] Alert rule watcher {'started' if started2 else 'already running'} (this one DOES run continuously in the background -- the only one that still does; see /scheduler-hub)")
-        except Exception as e:
-            print(f"[app] WARNING: alert rule watcher not started — {e}")
+        print("[app] Watchlist routes registered (alert-rule watcher disabled by lean mode)")
     except Exception as e:
         print(f"[app] WARNING: watchlist_manager not loaded — {e}")
 
@@ -370,12 +365,6 @@ def create_app():
     except Exception as e:
         print(f"[app] WARN: scanner_builder failed: {e}")
     try:
-        from .scanners.institutional_confluence import institutional_confluence_bp
-        app.register_blueprint(institutional_confluence_bp)
-        print("[app] Institutional Confluence Scanner registered at /institutional-confluence")
-    except Exception as e:
-        print(f"[app] WARN: institutional_confluence failed: {e}")
-    try:
         from .scanners.backtest import backtest_bp
         app.register_blueprint(backtest_bp)
         print("[app] Backtest API registered at /backtest")
@@ -477,9 +466,20 @@ def create_app():
 
     try:
         from .scanners.signal_notifier import signal_notifier_bp, start_signal_notifier_watcher
+        from .scanners.signal_notifier import set_config as _set_signal_notifier_config
         app.register_blueprint(signal_notifier_bp)
+        # Preserve Telegram price alerts while preventing every scanner,
+        # journal-risk, and health sweep from starting at boot. Those can be
+        # re-enabled intentionally from Signal Notifier/Scheduler Hub.
+        _set_signal_notifier_config(
+            enabled=False,
+            journal_pnl_alerts_enabled=False,
+            journal_deep_loss_alerts_enabled=False,
+            journal_health_alerts_enabled=False,
+            telegram_price_alerts_enabled=True,
+        )
         start_signal_notifier_watcher(app)
-        print("[app] Signal notifier watcher started")
+        print("[app] Lean alert loop started (Telegram price alerts only)")
     except Exception as e:
         print(f"[app] WARNING: signal notifier not started — {e}")
 
@@ -548,16 +548,14 @@ def create_app():
     try:
         from .services.scheduled_jobs import start_daily_jobs
         started_daily = start_daily_jobs(app)
-        print(f"[app] Daily watchlist/GEX scheduler {'started' if started_daily else 'already running'}")
+        print(f"[app] Scheduler Hub dispatcher {'started' if started_daily else 'already running'} (nonessential jobs paused by lean mode)")
     except Exception as e:
         print(f"[app] WARNING: daily jobs scheduler not started — {e}")
 
     try:
         from .services.scheduled_jobs import start_watchlist_schedule
         started_wl_sched = start_watchlist_schedule(app)
-        print(f"[app] Per-watchlist schedule (price/OI -> earnings -> indicators -> corp events -> "
-              f"volume profile, futures OI) "
-              f"{'started' if started_wl_sched else 'already running'}")
+        print(f"[app] Per-watchlist yfinance refresh schedule {'started' if started_wl_sched else 'already running'}")
     except Exception as e:
         print(f"[app] WARNING: per-watchlist schedule not started — {e}")
 
@@ -604,32 +602,25 @@ def create_app():
         print(f"[app] WARNING: metals_oi_gate not loaded — {e}")
 
     try:
-        from .services.gex_trend_tracker import gex_trend_bp, _ensure_table as _gex_trend_ensure, register_scheduler_job as _gex_trend_register
+        from .services.gex_trend_tracker import gex_trend_bp, _ensure_table as _gex_trend_ensure
         app.register_blueprint(gex_trend_bp)
         _gex_trend_ensure()
-        _gex_trend_started = _gex_trend_register(interval_seconds=5 * 60)
-        print(f"[app] GEX Trend Tracker registered at /gex-trend (scheduler {'started' if _gex_trend_started else 'already running'})")
+        print("[app] GEX Trend Tracker registered at /gex-trend (on-demand only)")
     except Exception as e:
         print(f"[app] WARNING: gex_trend_tracker not loaded — {e}")
 
     try:
-        from .services.live_chain_tracker import live_chain_bp, _ensure_table as _live_chain_ensure, register_scheduler_job as _live_chain_register
+        from .services.live_chain_tracker import live_chain_bp, _ensure_table as _live_chain_ensure
         app.register_blueprint(live_chain_bp)
         _live_chain_ensure()
-        _live_chain_started = _live_chain_register(interval_seconds=5 * 60)
-        print(f"[app] Live Chain Tracker registered at /live-chain (scheduler {'started' if _live_chain_started else 'already running'})")
+        print("[app] Live Chain Tracker registered at /live-chain (on-demand only)")
     except Exception as e:
         print(f"[app] WARNING: live_chain_tracker not loaded — {e}")
 
     try:
-        # queue starts empty until /tastytrade-backfill/api/enqueue_watchlist
-        # is POSTed once -- seeding the full watchlist is a deliberate
-        # action, not something that should fire silently on every app restart.
-        from .services.tastytrade_options_backfill import tastytrade_backfill_bp, register_scheduler_job as _tt_backfill_register
+        from .services.tastytrade_options_backfill import tastytrade_backfill_bp
         app.register_blueprint(tastytrade_backfill_bp)
-        _tt_backfill_started = _tt_backfill_register(interval_seconds=90)
-        print(f"[app] Tastytrade Options Backfill registered at /tastytrade-backfill, scheduler {'started' if _tt_backfill_started else 'already running'} "
-              f"(queue empty until /api/enqueue_watchlist is POSTed once)")
+        print("[app] Tastytrade Options Backfill registered (manual/on-demand only)")
     except Exception as e:
         print(f"[app] WARNING: tastytrade_options_backfill not loaded — {e}")
 
@@ -653,15 +644,6 @@ def create_app():
         print("[app] GEX Predictive Analysis registered at /gex-predictive-analysis")
     except Exception as e:
         print(f"[app] WARNING: gex_predictive_analysis not loaded — {e}")
-
-    # Keep this independent: a predictive-analysis dependency must not hide
-    # the saved-chain GEX dashboard route.
-    try:
-        from .scanners.gex_analysis import gex_analysis_bp
-        app.register_blueprint(gex_analysis_bp)
-        print("[app] GEX Analysis registered at /gex-analysis")
-    except Exception as e:
-        print(f"[app] WARNING: gex_analysis not loaded — {e}")
 
     try:
         from .scanners.greeks_strategy_scanner import greeks_strategy_bp
@@ -697,13 +679,6 @@ def create_app():
         print(f"[app] WARNING: scanner_primitives_guide not loaded — {e}")
 
     try:
-        from .scanners.reversal_scanner import systematic_reversal_bp
-        app.register_blueprint(systematic_reversal_bp)
-        print("[app] Systematic Reversal Scanner registered at /systematic-reversal")
-    except Exception as e:
-        print(f"[app] WARNING: systematic_reversal not loaded — {e}")
-
-    try:
         from .charts.chart_routes import charts_bp
         app.register_blueprint(charts_bp)
         print("[app] Charts workspace registered at /charts (this module existed but was never registered here -- that's the actual root cause of the 404 the Pattern Search chart hit)")
@@ -711,12 +686,9 @@ def create_app():
         print(f"[app] WARNING: charts module not loaded — {e}")
 
     try:
-        from .scanners.realtime_dashboard import realtime_bp, init_realtime
+        from .scanners.realtime_dashboard import realtime_bp
         app.register_blueprint(realtime_bp)
-        # Symbols to keep streaming live on app start — extend with whatever
-        # you actively watch (uses your 104-ticker watchlist / futures roots).
-        init_realtime(default_symbols=["SPY", "/MGC", "/GC"])
-        print("[app] Realtime tastytrade dashboard registered at /realtime/<symbol>")
+        print("[app] Realtime dashboard registered at /realtime/<symbol> (no feed starts until opened)")
     except Exception as e:
         print(f"[app] WARNING: realtime_dashboard (tastytrade) not loaded — {e}")
 

@@ -330,12 +330,14 @@ def _load_symbol_history(
     required_tfs: Iterable[str],
     start: date,
     end: date,
-    data_provider: str = "auto",
-    auto_fetch: bool = True,
+    data_provider: str = "sqlite",
+    auto_fetch: bool = False,
 ) -> SymbolHistory:
     # Keep a warmup window so scanner functions such as EMA200, RSI, and
-    # rsidiff90() can be evaluated without looking into the future.  Daily bars
-    # are read from the local SQLite cache when available and filled from yfinance when needed.
+    # rsidiff90() can be evaluated without looking into the future. Daily bars
+    # come from the local SQLite cache by default. A live yfinance fill is an
+    # explicit opt-in because one stalled remote request must not make a whole
+    # watchlist backtest appear hung.
     warmup_days = 260
     fetch_start = start - timedelta(days=warmup_days)
     daily: Optional[pd.DataFrame] = None
@@ -347,7 +349,12 @@ def _load_symbol_history(
     except Exception as e:
         err = str(e)
 
-    if (daily is None or daily.empty) and data_provider not in {"sqlite"}:
+    # ``ensure_daily_history(..., auto_fetch=False)`` correctly avoids its
+    # internal fill, but this older final fallback used to bypass that policy
+    # and fetch anyway. Keep an explicit yfinance-only request working, while
+    # making cache-only/auto-without-fill genuinely network-free.
+    allow_remote_fetch = data_provider == "yfinance"
+    if (daily is None or daily.empty) and allow_remote_fetch:
         # Final safety fallback keeps the current yfinance-only behavior working
         # when the local SQLite cache is unavailable or empty.
         daily, err = _fetch_yfinance_history(symbol, fetch_start, end, "1d")
@@ -1270,12 +1277,15 @@ def _run_chronological_backtest(config: Dict[str, Any]) -> Dict[str, Any]:
     allow_overlap = _as_bool(config.get("allow_overlap"), False)
     earn_raw = config.get("earnings_avoid_days") if "earnings_avoid_days" in config else config.get("earnings_avoid")
     earnings_avoid_days = _parse_nonnegative_int(earn_raw, 35, 365)
-    data_provider = str(config.get("data_provider") or "auto").strip().lower()
-    if data_provider == "mongo":
+    # Backtests should be repeatable and fast against the locally prepared
+    # history. Missing data is reported in the result; users can explicitly
+    # opt into a yfinance fill from the advanced data-source controls.
+    data_provider = str(config.get("data_provider") or "sqlite").strip().lower()
+    if data_provider in {"mongo", "auto"}:
         data_provider = "sqlite"
     if data_provider not in {"auto", "sqlite", "yfinance"}:
-        data_provider = "auto"
-    auto_fetch = _as_bool(config.get("auto_fetch"), True)
+        data_provider = "sqlite"
+    auto_fetch = _as_bool(config.get("auto_fetch"), False)
     try:
         otm_pct = float(config.get("otm_pct") or 2.0)
     except Exception:
@@ -1347,6 +1357,7 @@ def _run_chronological_backtest(config: Dict[str, Any]) -> Dict[str, Any]:
 
     from concurrent.futures import ThreadPoolExecutor
     ex = ThreadPoolExecutor(max_workers=min(8, max(1, len(fetch_symbols))))
+    futures = {}
     try:
         # V111 fix: price history must extend past end_date by at least
         # the selected DTE, or every trade entered near the end of the
@@ -1375,6 +1386,12 @@ def _run_chronological_backtest(config: Dict[str, Any]) -> Dict[str, Any]:
             if hist.error:
                 errors.append({"symbol": sym, "error": hist.error})
     finally:
+        # Do not leave queued yfinance jobs behind after a bounded wait. A
+        # running third-party request cannot be force-killed safely, but all
+        # not-yet-started jobs can be cancelled so a retry does not compound
+        # the backlog.
+        for future in futures:
+            future.cancel()
         ex.shutdown(wait=False)
 
     benchmark_hist = histories.get(benchmark)
@@ -1675,12 +1692,12 @@ def _run_forward_return_backtest(config: Dict[str, Any]) -> Dict[str, Any]:
         forward_days = 30
 
     benchmark = _clean_symbol(config.get("benchmark") or "SPY") or "SPY"
-    data_provider = str(config.get("data_provider") or "auto").strip().lower()
-    if data_provider == "mongo":
+    data_provider = str(config.get("data_provider") or "sqlite").strip().lower()
+    if data_provider in {"mongo", "auto"}:
         data_provider = "sqlite"
     if data_provider not in {"auto", "sqlite", "yfinance"}:
-        data_provider = "auto"
-    auto_fetch = _as_bool(config.get("auto_fetch"), True)
+        data_provider = "sqlite"
+    auto_fetch = _as_bool(config.get("auto_fetch"), False)
     # Unlike /api/run, overlapping signals don't need to be gated behind
     # "position already open" -- each signal is measured independently,
     # there's no capital being tied up in a simulated trade.
@@ -1728,6 +1745,7 @@ def _run_forward_return_backtest(config: Dict[str, Any]) -> Dict[str, Any]:
 
     from concurrent.futures import ThreadPoolExecutor
     ex = ThreadPoolExecutor(max_workers=min(8, max(1, len(fetch_symbols))))
+    futures = {}
     try:
         futures = {ex.submit(_load_symbol_history, sym, required_tfs, start_date, fetch_end, data_provider, auto_fetch): sym for sym in fetch_symbols}
         from ..services.bounded_wait import bounded_as_completed
@@ -1745,6 +1763,8 @@ def _run_forward_return_backtest(config: Dict[str, Any]) -> Dict[str, Any]:
             if hist.error:
                 errors.append({"symbol": sym, "error": hist.error})
     finally:
+        for future in futures:
+            future.cancel()
         ex.shutdown(wait=False)
 
     benchmark_hist = histories.get(benchmark)
