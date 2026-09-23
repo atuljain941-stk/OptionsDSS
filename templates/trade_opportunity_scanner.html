@@ -131,6 +131,10 @@
         <input type="range" id="min-score" min="30" max="85" value="50" oninput="document.getElementById('score-lbl').textContent=this.value" style="width:100px;padding:0"/>
       </div>
       <div>
+        <label>Minimum R:R (credit ÷ max loss)</label>
+        <input type="number" id="min-rr" value="0.35" min="0.05" max="3" step="0.05" style="width:80px"/>
+      </div>
+      <div>
         <label>Earnings Guard (days)</label>
         <input type="number" id="earn-guard" value="14" min="7" max="60" style="width:80px"/>
       </div>
@@ -730,7 +734,7 @@ function _applyResults(d, fromCache) {
     ageEl.innerHTML = '📦 Cached: <b>'+_cacheAge(d.scanned_at)+'</b> · '+opps.length+' opportunities';
     const p = d.params || {};
     const paramsEl = document.getElementById('cache-params');
-    if (paramsEl) paramsEl.textContent = 'DTE '+(p.dte_min||7)+'–'+(p.dte_max||30)+' · Min score '+(p.min_score||50)+' · '+(p.trade_type||'ALL');
+    if (paramsEl) paramsEl.textContent = 'DTE '+(p.dte_min||7)+'–'+(p.dte_max||30)+' · Min score '+(p.min_score||50)+' · Min R:R '+(p.min_rr||0.35)+' · '+(p.trade_type||'ALL');
   }
 }
 
@@ -752,6 +756,7 @@ async function _runScan() {
       dte_max: parseInt(document.getElementById('dte-max').value),
       min_score: parseInt(document.getElementById('min-score').value),
       min_earn_days: parseInt(document.getElementById('earn-guard').value),
+      min_rr: parseFloat(document.getElementById('min-rr').value),
       limit: parseInt(document.getElementById('max-results').value),
       trade_type: document.getElementById('type-filter').value,
     };

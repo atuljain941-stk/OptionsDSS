@@ -157,9 +157,10 @@ def create_app():
         from .scanners.spy_strategies import spy_bp
         app.register_blueprint(spy_bp)
         try:
-            from .scanners.gex_pine_export import gex_pine_bp
+            from .scanners.gex_pine_export import gex_pine_bp, gex_analysis_bp
             app.register_blueprint(gex_pine_bp)
-            print("[app] GEX Pine routes registered at /gex/pine and /gex/live")
+            app.register_blueprint(gex_analysis_bp)
+            print("[app] GEX Pine routes registered at /gex/pine, /gex/live, and /gex-analysis")
         except Exception as _gpe:
             print(f"[app] WARNING: gex_pine_bp not loaded — {_gpe}")
     except Exception as e:
@@ -547,10 +548,9 @@ def create_app():
         print(f"[app] WARNING: iron_condor_candidates not loaded — {e}")
 
     try:
-        from .scanners.gex_predictive_analysis import gex_predictive_bp, gex_analysis_compat_bp
+        from .scanners.gex_predictive_analysis import gex_predictive_bp
         app.register_blueprint(gex_predictive_bp)
-        app.register_blueprint(gex_analysis_compat_bp)
-        print("[app] GEX Predictive Analysis registered at /gex-predictive-analysis and /gex-analysis")
+        print("[app] GEX Predictive Analysis registered at /gex-predictive-analysis")
     except Exception as e:
         print(f"[app] WARNING: gex_predictive_analysis not loaded — {e}")
 

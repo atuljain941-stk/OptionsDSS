@@ -1366,7 +1366,7 @@ def _build_trade(
 
 # ── Main scan function for one symbol ─────────────────────────────────────
 
-def _scan_one(symbol: str, dte_min: int, dte_max: int, min_earn_days: int, min_score: int,
+def _scan_one(symbol: str, dte_min: int, dte_max: int, min_earn_days: int, min_score: int, min_rr: float = 0.35,
                allowed_types: Optional[List[str]] = None, prefetched_df=None,
                params: Optional[Dict] = None) -> Optional[Dict]:
     """
@@ -1492,6 +1492,13 @@ def _scan_one(symbol: str, dte_min: int, dte_max: int, min_earn_days: int, min_s
             trade = trades[0]
         else:
             return {"symbol": symbol, "filtered": True, "filter_reason": "Could not build viable trade legs"}
+
+        # Seller guardrail: do not surface a trade whose actual estimated
+        # credit/max-loss ratio is below the user-selected minimum.
+        actual_rr = float(trade.get("rr") or 0)
+        if actual_rr < min_rr:
+            return {"symbol": symbol, "filtered": True,
+                    "filter_reason": f"R:R {actual_rr:.2f} below minimum {min_rr:.2f}"}
 
         # 8. Compute final entry score for this trade type
         final_eq = _entry_score(
@@ -1705,6 +1712,7 @@ def api_scan():
     dte_max      = int(payload.get("dte_max", DTE_MAX))
     min_score    = int(payload.get("min_score", 50))
     min_earn_days= int(payload.get("min_earn_days", MIN_EARN_DAYS))
+    min_rr       = max(0.05, min(float(payload.get("min_rr", 0.35)), 3.0))
     limit        = int(payload.get("limit", 40))
     trade_filter = (payload.get("trade_type") or "ALL").upper()
 
@@ -1721,7 +1729,7 @@ def api_scan():
     ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     try:
         futs = {
-            ex.submit(_scan_one, sym, dte_min, dte_max, min_earn_days, min_score,
+            ex.submit(_scan_one, sym, dte_min, dte_max, min_earn_days, min_score, min_rr,
                       prefetched_df=histories.get(sym.upper())): sym
             for sym in symbols
         }
@@ -1778,7 +1786,7 @@ def api_scan():
 
     scanned_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     params = {"dte_min": dte_min, "dte_max": dte_max, "min_score": min_score,
-              "min_earn_days": min_earn_days, "trade_type": trade_filter}
+              "min_earn_days": min_earn_days, "min_rr": min_rr, "trade_type": trade_filter}
     summary = {
         "total": len(opportunities),
         "bull": total_bull, "bear": total_bear, "neutral": total_neutral,

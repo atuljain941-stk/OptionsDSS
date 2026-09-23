@@ -6,6 +6,9 @@ import math, os
 from datetime import date, datetime
 
 gex_pine_bp = Blueprint("gex_pine", __name__, url_prefix="/gex")
+# The live, symbol-level GEX analysis is intentionally separate from the
+# statistical GEX Predictive Analytics page.
+gex_analysis_bp = Blueprint("gex_analysis", __name__, url_prefix="/gex-analysis")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -202,12 +205,8 @@ def gex_pine_export():
         return Response("# error: " + str(e), mimetype="text/plain", status=500)
 
 
-@gex_pine_bp.route("/live")
-def gex_live_dashboard():
-    """Auto-refreshing dashboard with Copy Pine String button."""
-    sym = (request.args.get("symbol") or "SPY").upper()
-    req_path = request.path   # /gex/live or /spy/gex/live
-    api_base = req_path[:-5]  # strip /live
+def _render_gex_live_dashboard(sym: str, req_path: str, api_base: str):
+    """Render the live dashboard without starting a background worker."""
 
     html_path = os.path.join(_HERE, "gex_live.html")
     with open(html_path) as f:
@@ -225,3 +224,18 @@ def gex_live_dashboard():
         .replace("{{SYM_LINKS}}", sym_links)
     )
     return Response(html, mimetype="text/html")
+
+
+@gex_pine_bp.route("/live")
+def gex_live_dashboard():
+    """Live GEX dashboard, backed by a request-time calculation."""
+    sym = (request.args.get("symbol") or "SPY").upper()
+    return _render_gex_live_dashboard(sym, request.path, "/gex")
+
+
+@gex_analysis_bp.route("", strict_slashes=False)
+@gex_analysis_bp.route("/", strict_slashes=False)
+def gex_analysis_dashboard():
+    """Legacy intraday, any-symbol GEX Analysis page."""
+    sym = (request.args.get("symbol") or "SPY").upper()
+    return _render_gex_live_dashboard(sym, request.path, "/gex")
