@@ -362,6 +362,7 @@
           <button type="button" class="nav-item" data-tab="rsi-mtf">RSI MTF</button>
           <button type="button" class="nav-item" data-tab="spy">SPY Strategies</button>
           <button type="button" class="nav-item" data-tab="scanner">Scanner</button>
+          <a href="/trade-scanner/" class="nav-item" style="text-decoration:none;display:inline-block">🎯 Seller Trade Scanner</a>
           <button type="button" class="nav-item" data-tab="market-structure">Market Structure</button>
         </div>
       </details>
@@ -419,7 +420,6 @@
           <button type="button" class="nav-item" data-tab="swing-positioning">📐 Swing Positioning</button>
           <button type="button" class="nav-item" data-tab="iron-condor-scanner">🦅 Iron Condor / Vertical Scanner</button>
           <button type="button" class="nav-item" data-tab="gex-predictive-analysis">📊 GEX Predictive Analysis</button>
-          <button type="button" class="nav-item" data-tab="gex-analysis">⚡ GEX Analysis</button>
           <button type="button" class="nav-item" data-tab="greeks-strategy-scanner">🎯 Greeks Strategy Scanner</button>
           <button type="button" class="nav-item" data-tab="option-sale-framework">🧭 Option Sale Framework</button>
           <button type="button" class="nav-item" data-tab="scanner-primitives-guide">📖 Scanner Primitives Guide</button>
@@ -1884,8 +1884,7 @@
     </div>
     <!-- ═══════════════ MTF ALIGNMENT SCANNER ══════════════════ -->
     <div id="tab-mtf-scan" class="section">
-      <div id="mtf-shared-tabs" style="display:flex;gap:6px;margin:0 0 8px"><button id="mtf-tab-a2" class="btn btn-primary" type="button" onclick="if(window.mtfShowTab){window.mtfShowTab(false)}else{['mtf-align-controls','mtf-status','mtf-client-filters','mtf-results'].forEach(function(i){var e=document.getElementById(i);if(e)e.style.display=''});var p=document.getElementById('mtf-mw-panel');if(p)p.style.display='none'}">Alignment</button><button id="mtf-tab-m2" class="btn btn-ghost" type="button" onclick="if(window.mtfShowTab){window.mtfShowTab(true)}">M/W Reversal &amp; Trade Ideas</button><span id="mtf-tab-a" style="display:none"></span><span id="mtf-tab-m" style="display:none"></span></div>
-      <div id="mtf-align-controls" class="card" data-pt-pin="top" data-pt-title="MTF Alignment Controls" style="padding:14px 16px;margin-bottom:10px">
+      <div class="card" data-pt-pin="top" data-pt-title="MTF Alignment Controls" style="padding:14px 16px;margin-bottom:10px">
         <div class="card-title" style="margin:0 0 4px">📊 Multi-Timeframe Alignment</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Compares a higher timeframe's trend against a lower timeframe's structure -- misalignment with a fresh counter-move (possible rejection), alignment (continuation), or an LTF base significant enough to matter on the timeframe above it. Reuses ChochBullish/Bearish, BosBullish/Bearish, SqueezeOn, and VolumeDryup -- the same primitives usable in any custom query.</div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
@@ -1933,25 +1932,20 @@
         <b style="color:var(--muted)">Filter existing results:</b>
         <label>RSIΔ90 ≥ <input id="mtf-filter-rsi-min" type="number" step="1" placeholder="e.g. 20" oninput="_mtfApplyClientFilters()" style="width:62px"/></label>
         <label>≤ <input id="mtf-filter-rsi-max" type="number" step="1" placeholder="e.g. -20" oninput="_mtfApplyClientFilters()" style="width:62px"/></label>
+        <label>Setup <select id="mtf-filter-setup" onchange="_mtfApplyClientFilters()"><option value="">All</option><option>MRT</option><option>Trending Bull</option><option>Trending Bear</option></select></label>
+        <label>Trade <select id="mtf-filter-trade" onchange="_mtfApplyClientFilters()"><option value="">All</option><option>Put Credit Vertical</option><option>Call Credit Vertical</option><option>Signal only</option></select></label>
         <label>Sort <select id="mtf-sort-key" onchange="_mtfApplyClientFilters()" style="font-size:11px">
           <option value="Symbol">Symbol</option><option value="Close">Close</option><option value="Close / EMA13">Close / EMA13</option>
           <option value="EMA13 / EMA50">EMA13 / EMA50</option><option value="RSI Diff 90" selected>RSIΔ90</option>
           <option value="Major Support">Support</option><option value="Major Resistance">Resistance</option>
           <option value="Put Wall">Put Wall</option><option value="Call Wall">Call Wall</option>
+          <option value="Score">Score</option><option value="RR">RR</option><option value="PoP">PoP proxy</option><option value="DTE">DTE</option><option value="IV">IV</option><option value="Delta">Delta</option>
         </select></label>
         <select id="mtf-sort-dir" onchange="_mtfApplyClientFilters()" style="font-size:11px"><option value="desc">High → low</option><option value="asc">Low → high</option></select>
         <button class="btn btn-ghost" type="button" onclick="_mtfClearClientFilters()" style="font-size:10px;padding:3px 7px">Clear</button>
         <span id="mtf-client-count" style="color:var(--muted)"></span>
       </div>
       <div class="tbl-wrap" id="mtf-results"></div>
-      <div id="mtf-mw-panel" style="display:none">
-        <div class="card"><div class="card-title">M/W Reversal & Trade Ideas</div>
-          <label>Watchlist <select id="mw-watchlist"></select></label>
-          <label>Pattern <select id="mw-pattern"><option value="both">M Tops + W Bottoms</option><option value="m">M Tops</option><option value="w">W Bottoms</option></select></label>
-          <label>Sort <select id="mw-sort" onchange="mwRender()"><option value="symbol">Symbol</option><option value="pattern">Pattern</option><option value="rsi">RSIΔ90</option><option value="ema13">Close / EMA13</option><option value="ema50">EMA13 / EMA50</option><option value="rr">Risk / Reward</option></select></label>
-          <button class="btn btn-primary" onclick="mwRun()">Run M/W Scan</button>
-        </div><div id="mw-status" class="status"></div><div id="mw-results" class="tbl-wrap"></div>
-      </div>
     </div>
     <!-- ═══════════════ CANDLE CONTEXT SCANNER ══════════════════ -->
     <div id="tab-candle-ctx-scan" class="section">
@@ -3366,12 +3360,6 @@
       </div>
     </div>
 
-    <div id="tab-gex-analysis" class="section">
-      <div class="card" style="padding:12px">
-        <iframe src="/gex-analysis/" title="GEX Analysis" style="width:100%;height:90vh;border:0;border-radius:12px;background:#0b1020"></iframe>
-      </div>
-    </div>
-
     <div id="tab-greeks-strategy-scanner" class="section">
       <div class="card" style="padding:12px">
         <iframe data-src="/greeks-strategy-scanner/" title="Greeks Strategy Scanner" style="width:100%;height:90vh;border:0;border-radius:12px;background:#0b1020"></iframe>
@@ -3896,6 +3884,13 @@
     var key = (document.getElementById('mtf-sort-key') || {}).value || 'Symbol';
     var direction = (document.getElementById('mtf-sort-dir') || {}).value === 'asc' ? 1 : -1;
     var value = function (row, column) {
+      var trade = row.trade || {};
+      if (column === 'Score') return trade.score;
+      if (column === 'RR') return trade.rr;
+      if (column === 'PoP') return trade.pop_proxy;
+      if (column === 'DTE') return trade.dte;
+      if (column === 'IV') return trade.iv;
+      if (column === 'Delta') return trade.delta;
       if (column === 'Symbol') return String(row.symbol || '');
       if (column === 'Close') return (row.metrics || {})['Close'] == null ? row.price : (row.metrics || {})['Close'];
       return (row.metrics || {})[column];
@@ -3904,6 +3899,12 @@
       var rsi = Number((row.metrics || {})['RSI Diff 90']);
       if (minRsi != null && (!isFinite(rsi) || rsi < minRsi)) return false;
       if (maxRsi != null && (!isFinite(rsi) || rsi > maxRsi)) return false;
+      var setup = (row.trade || {}).setup || '';
+      var recommendation = (row.trade || {}).recommendation || '';
+      var setupFilter = (document.getElementById('mtf-filter-setup') || {}).value || '';
+      var tradeFilter = (document.getElementById('mtf-filter-trade') || {}).value || '';
+      if (setupFilter && setup !== setupFilter) return false;
+      if (tradeFilter && recommendation !== tradeFilter) return false;
       return true;
     });
     rows.sort(function (a, b) {
@@ -3922,6 +3923,7 @@
     var scenarioCell = cell + ';padding-left:24px;min-width:310px;border-left:2px solid var(--border);white-space:normal';
     var body = rows.map(function (row) {
       var m = row.metrics || {};
+      var t = row.trade || {};
       return '<tr><td style="' + cell + ';font-weight:700">' + esc(row.symbol) + '</td>' +
         '<td align="right" style="' + cell + '">' + money(m['Close'] == null ? row.price : m['Close']) + '</td>' +
         '<td align="right" style="' + cell + '">' + ratio(m['Close / EMA13']) + '</td>' +
@@ -3931,10 +3933,11 @@
         '<td align="right" style="' + cell + '">' + money(m['Major Resistance']) + '</td>' +
         '<td align="right" style="' + cell + '">' + money(m['Put Wall']) + '</td>' +
         '<td align="right" style="' + cell + '">' + money(m['Call Wall']) + '</td>' +
-        '<td style="' + scenarioCell + '">' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td></tr>';
+        '<td style="' + scenarioCell + '">' + esc((row.scenarios || []).map(function (x) { return x.label; }).join(' · ')) + '</td>' +
+        '<td style="' + cell + '">' + esc(t.setup || 'Signal only') + '</td><td style="' + cell + '">' + esc(t.recommendation || 'Signal only') + '</td><td style="' + cell + '">' + esc(t.expiry || '—') + (t.dte != null ? ' / ' + esc(t.dte) + 'd' : '') + '</td><td style="' + cell + ';white-space:normal">' + esc(t.legs || '—') + '</td><td style="' + cell + '">' + esc(t.score == null ? '—' : t.score) + '</td><td style="' + cell + '">' + esc(t.rr == null ? '—' : t.rr) + '</td><td style="' + cell + '">' + esc(t.pop_proxy == null ? '—' : t.pop_proxy + '%') + '</td><td style="' + cell + '">' + esc((t.flags || []).join(' · ')) + '</td><td style="' + cell + ';white-space:normal">' + esc(t.comment || '') + '</td></tr>';
     }).join('');
     var headerStyle = 'padding:8px 12px;background:var(--card);color:var(--muted);font-size:10px;letter-spacing:.04em;white-space:nowrap;border-bottom:2px solid var(--border);position:sticky;top:0;z-index:1';
-    var header = '<thead><tr><th align="left" style="' + headerStyle + '">Symbol</th><th align="right" style="' + headerStyle + '">Close</th><th align="right" style="' + headerStyle + '">Close/EMA13</th><th align="right" style="' + headerStyle + '">EMA13/EMA50</th><th align="right" style="' + headerStyle + '">RSIΔ90</th><th align="right" style="' + headerStyle + '">Support</th><th align="right" style="' + headerStyle + '">Resistance</th><th align="right" style="' + headerStyle + '">Put Wall</th><th align="right" style="' + headerStyle + '">Call Wall</th><th align="left" style="' + headerStyle + ';padding-left:24px;border-left:2px solid var(--border);min-width:310px">Confirmed scenario</th></tr></thead>';
+    var header = '<thead><tr><th align="left" style="' + headerStyle + '">Symbol</th><th align="right" style="' + headerStyle + '">Close</th><th align="right" style="' + headerStyle + '">Close/EMA13</th><th align="right" style="' + headerStyle + '">EMA13/EMA50</th><th align="right" style="' + headerStyle + '">RSIΔ90</th><th align="right" style="' + headerStyle + '">Support</th><th align="right" style="' + headerStyle + '">Resistance</th><th align="right" style="' + headerStyle + '">Put Wall</th><th align="right" style="' + headerStyle + '">Call Wall</th><th align="left" style="' + headerStyle + ';padding-left:24px;border-left:2px solid var(--border);min-width:310px">Confirmed scenario</th><th style="' + headerStyle + '">Setup</th><th style="' + headerStyle + '">Recommendation</th><th style="' + headerStyle + '">Expiry / DTE</th><th style="' + headerStyle + '">Legs</th><th style="' + headerStyle + '">Score</th><th style="' + headerStyle + '">RR</th><th style="' + headerStyle + '">PoP</th><th style="' + headerStyle + '">Flags</th><th style="' + headerStyle + '">Rationale</th></tr></thead>';
     var empty = '<tr><td colspan="10" style="padding:14px;color:var(--muted)">No existing results match the client-side filters.</td></tr>';
     output.innerHTML = '<table style="width:100%;min-width:1280px;font-size:12px;border-collapse:collapse">' + header + '<tbody>' + (body || empty) + '</tbody></table>';
   };
@@ -3946,66 +3949,5 @@
     window._mtfApplyClientFilters();
   };
 </script>
-<script>
-(function () {
-  function byId(id) { return document.getElementById(id); }
-  function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-  function n(value) { var x = Number(value); return isFinite(x) ? x : null; }
-  function money(value) { var x=n(value); return x == null ? '—' : '$' + x.toFixed(2); }
-  function ratio(value) { var x=n(value); return x == null ? '—' : x.toFixed(3); }
-  function signed(value) { var x=n(value); return x == null ? '—' : (x > 0 ? '+' : '') + x.toFixed(1); }
-
-  window.mtfShowTab = function (isMw) {
-    ['mtf-align-controls','mtf-status','mtf-client-filters','mtf-results'].forEach(function(id) {
-      var el=byId(id); if (el) el.style.display=isMw ? 'none' : '';
-    });
-    var panel=byId('mtf-mw-panel'); if (panel) panel.style.display=isMw ? '' : 'none';
-    [['mtf-tab-a',!isMw],['mtf-tab-m',isMw],['mtf-tab-a2',!isMw],['mtf-tab-m2',isMw]].forEach(function(pair) {
-      var el=byId(pair[0]); if (el) el.className=pair[1] ? 'btn btn-primary' : 'btn btn-ghost';
-    });
-    if (isMw) {
-      var source=byId('mtf-watchlist'), target=byId('mw-watchlist');
-      if (source && target) { target.innerHTML=source.innerHTML; target.value=source.value; }
-    }
-  };
-
-  window.mwRun = async function () {
-    var status=byId('mw-status'), output=byId('mw-results'), watchlist=byId('mw-watchlist');
-    if (!watchlist || !watchlist.value) { if (status) status.textContent='Choose a watchlist first.'; return; }
-    if (status) status.textContent='⏳ Scanning M/W patterns and saved option chains…';
-    if (output) output.innerHTML='';
-    try {
-      var response=await fetch('/mtf-scanner/mw-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-        watchlist_id:Number(watchlist.value), pattern:(byId('mw-pattern')||{}).value || 'both'
-      })});
-      var data=await response.json();
-      if (!response.ok || data.error) throw new Error(data.error || ('HTTP '+response.status));
-      window.mwRows=data.results || [];
-      if (status) status.textContent='✅ '+window.mwRows.length+' M/W match(es) — technical results are retained when no saved-chain idea is available.';
-      window.mwRender();
-    } catch (error) {
-      if (status) status.textContent='❌ '+error.message;
-    }
-  };
-
-  window.mwSetSort = function (key) { var select=byId('mw-sort'); if (select) { select.value=key; window.mwRender(); } };
-
-  window.mwRender = function () {
-    var output=byId('mw-results'), sort=(byId('mw-sort')||{}).value || 'Symbol';
-    if (!output) return;
-    var rows=(window.mwRows || []).slice();
-    var values={symbol:function(r){return r.symbol;},pattern:function(r){return r.pattern;},rsi:function(r){return (r.metrics||{})['RSI Diff 90'];},ema13:function(r){return (r.metrics||{})['Close / EMA13'];},ema50:function(r){return (r.metrics||{})['EMA13 / EMA50'];},rr:function(r){return (r.trade||{}).rr;}};
-    rows.sort(function(a,b){var av=values[sort] ? values[sort](a) : a.symbol, bv=values[sort] ? values[sort](b) : b.symbol; var an=n(av), bn=n(bv); return an != null && bn != null ? bn-an : String(av||'').localeCompare(String(bv||''));});
-    var cell='padding:7px 10px;vertical-align:top;border-bottom:1px solid var(--border);white-space:nowrap';
-    var head='padding:8px 10px;background:var(--card);color:var(--muted);font-size:10px;letter-spacing:.04em;border-bottom:2px solid var(--border);white-space:nowrap';
-    var body=rows.map(function(row) {
-      var m=row.metrics||{}, t=row.trade||{}, flags=(t.flags||[]).join(' · ');
-      var idea=t.kind==='vertical' ? esc(t.label)+' — '+esc(t.strategy)+'<br><span style="color:var(--muted)">'+esc(t.legs)+' · '+esc(t.expiry)+' ('+esc(t.dte)+' DTE)</span>' : esc(t.label||'Signal only');
-      var terms=t.kind==='vertical' ? 'Credit '+money(t.credit)+'<br>Max loss '+money(t.max_loss)+'<br>BE '+money(t.breakeven) : esc(t.comment||'');
-      return '<tr><td style="'+cell+';font-weight:700">'+esc(row.symbol)+'</td><td style="'+cell+'">'+esc(row.pattern)+'</td><td align="right" style="'+cell+'">'+money(m.Close==null?row.price:m.Close)+'</td><td align="right" style="'+cell+'">'+ratio(m['Close / EMA13'])+'</td><td align="right" style="'+cell+'">'+ratio(m['EMA13 / EMA50'])+'</td><td align="right" style="'+cell+'">'+signed(m['RSI Diff 90'])+'</td><td align="right" style="'+cell+'">'+money(m['Major Support'])+'</td><td align="right" style="'+cell+'">'+money(m['Major Resistance'])+'</td><td align="right" style="'+cell+'">'+money(m['Put Wall'])+'</td><td align="right" style="'+cell+'">'+money(m['Call Wall'])+'</td><td style="'+cell+';min-width:225px;white-space:normal">'+idea+'</td><td style="'+cell+';min-width:145px;white-space:normal">'+terms+'</td><td align="right" style="'+cell+'">'+(n(t.rr)==null?'—':Number(t.rr).toFixed(2))+'</td><td align="right" style="'+cell+'">'+(n(t.pop_proxy)==null?'—':Number(t.pop_proxy).toFixed(0)+'%')+'</td><td style="'+cell+';min-width:180px;white-space:normal;color:'+(flags?'#fbbf24':'var(--muted)')+'">'+esc(flags || '—')+'</td></tr>';
-    }).join('');
-    output.innerHTML='<div style="overflow:auto"><table style="width:100%;min-width:1780px;font-size:12px;border-collapse:collapse"><thead><tr><th onclick="mwSetSort('symbol')" style="'+head+';cursor:pointer">Symbol ↕</th><th onclick="mwSetSort('pattern')" style="'+head+';cursor:pointer">Pattern ↕</th><th style="'+head+'">Close</th><th onclick="mwSetSort('ema13')" align="right" style="'+head+';cursor:pointer">Close/EMA13 ↕</th><th onclick="mwSetSort('ema50')" align="right" style="'+head+';cursor:pointer">EMA13/EMA50 ↕</th><th onclick="mwSetSort('rsi')" align="right" style="'+head+';cursor:pointer">RSIΔ90 ↕</th><th align="right" style="'+head+'">Support</th><th align="right" style="'+head+'">Resistance</th><th align="right" style="'+head+'">Put Wall</th><th align="right" style="'+head+'">Call Wall</th><th style="'+head+'">Trade idea</th><th style="'+head+'">Economics</th><th align="right" style="'+head+'">R/R</th><th align="right" style="'+head+'">PoP*</th><th style="'+head+'">Flags</th></tr></thead><tbody>'+(body || '<tr><td colspan="15" style="padding:14px;color:var(--muted)">No M/W matches for this watchlist and pattern selection.</td></tr>')+'</tbody></table></div><div style="padding:7px 2px;color:var(--muted);font-size:10px">*PoP is a delta-based proxy, not a forecast. Ideas use only the newest saved option chain; verify current prices, liquidity, and risk before any trade.</div>';
-  };
-})();
-</script></body>
+</body>
 </html>
