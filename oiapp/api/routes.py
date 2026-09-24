@@ -4091,122 +4091,88 @@ def schwab_auto_run_diagnostics():
 
 @api_bp.route("/oi_buildup_trend")
 def api_oi_buildup_trend():
-    """Multi-day OI buildup view -- unlike /api/oi_change (single day
-    vs prior day), this walks the last N captured days for a symbol/
-    expiration and returns a proper time series: total call/put OI
-    each day, plus which SPECIFIC strike had the largest OI buildup
-    on each side over the window (not just the largest OI overall --
-    buildup means the increase from the first day in the window to
-    the last), so the chart can highlight the strike that's actually
-    accumulating fresh interest, not just the biggest static number.
+    """Read one final saved option-chain snapshot per date.
+
+    A calendar day can have multiple chain captures.  Summing every capture
+    makes OI appear to grow throughout the window even when it fell, so this
+    endpoint intentionally selects the latest fetch_ts for each date first.
     """
-    from ..db import _connect
     symbol = (request.args.get("symbol") or "").upper().strip()
-    expiration = request.args.get("expiration", "").strip()
-    days = request.args.get("days", "10").strip()
-    if not symbol or not expiration:
-        return jsonify({"ok": False, "error": "symbol and expiration are required"}), 400
+    expiration = (request.args.get("expiration") or "").strip()
     try:
-        days = max(2, int(days))
+        days = max(2, min(30, int(request.args.get("days") or 10)))
     except ValueError:
         days = 10
+    if not symbol or not expiration:
+        return jsonify({"ok": False, "error": "symbol and expiration are required"}), 400
 
     con = _connect()
     try:
         date_rows = con.execute(
-            "SELECT DISTINCT date FROM options WHERE UPPER(symbol)=? AND expiration=? ORDER BY date DESC LIMIT ?",
-            (symbol, expiration, days)
+            """SELECT date, MAX(fetch_ts) AS stamp
+               FROM options
+               WHERE UPPER(symbol)=? AND expiration=?
+               GROUP BY date
+               ORDER BY date DESC LIMIT ?""",
+            (symbol, expiration, days),
         ).fetchall()
-        dates = sorted([r["date"] for r in date_rows])
-        if len(dates) < 2:
-            sample_exps = con.execute(
-                "SELECT DISTINCT expiration FROM options WHERE UPPER(symbol)=? ORDER BY expiration DESC LIMIT 8",
-                (symbol,)
-            ).fetchall()
-            return jsonify({
-                "ok": False,
-                "error": f"only {len(dates)} day(s) of history for {symbol} {expiration!r} -- need at least 2 to show a trend",
-                "debug": {
-                    "sent_symbol": symbol, "sent_expiration": expiration,
-                    "dates_found_for_this_exact_expiration": dates,
-                    "other_expirations_available_for_this_symbol": [r["expiration"] for r in sample_exps],
-                },
-            }), 400
+        snapshots = [(r["date"], r["stamp"]) for r in reversed(date_rows) if r["stamp"]]
+        if len(snapshots) < 2:
+            return jsonify({"ok": False, "error": "Need at least two dated OI snapshots"}), 400
 
-        # Per-day totals, and a per-strike OI matrix (strike -> {date: oi})
-        total_call_oi, total_put_oi = [], []
-        call_by_strike: dict = {}
-        put_by_strike: dict = {}
-        for d in dates:
+        dates = [d for d, _ in snapshots]
+        matrices = {"call": {}, "put": {}}
+        totals = {"call": [], "put": []}
+        for day, stamp in snapshots:
             rows = con.execute(
-                "SELECT type, strike, oi FROM options WHERE UPPER(symbol)=? AND expiration=? AND date=?",
-                (symbol, expiration, d)
+                """SELECT lower(type) AS side, strike, SUM(COALESCE(oi,0)) AS oi
+                   FROM options
+                   WHERE UPPER(symbol)=? AND expiration=? AND fetch_ts=?
+                   GROUP BY lower(type), strike""",
+                (symbol, expiration, stamp),
             ).fetchall()
-            call_sum, put_sum = 0, 0
-            for r in rows:
-                oi = int(r["oi"] or 0)
-                strike = float(r["strike"])
-                if r["type"] == "call":
-                    call_sum += oi
-                    call_by_strike.setdefault(strike, {})[d] = oi
-                elif r["type"] == "put":
-                    put_sum += oi
-                    put_by_strike.setdefault(strike, {})[d] = oi
-            total_call_oi.append(call_sum)
-            total_put_oi.append(put_sum)
-
-        def _top_buildup(by_strike: dict):
-            best_strike, best_buildup = None, None
-            for strike, series in by_strike.items():
-                # Only consider strikes with data on both the first and
-                # last day of the window -- a strike that only appeared
-                # partway through isn't a fair "buildup" comparison.
-                if dates[0] not in series or dates[-1] not in series:
+            by_side = {"call": 0, "put": 0}
+            for row in rows:
+                side = str(row["side"] or "")
+                if side not in matrices:
                     continue
-                buildup = series[dates[-1]] - series[dates[0]]
-                if best_buildup is None or buildup > best_buildup:
-                    best_strike, best_buildup = strike, buildup
-            if best_strike is None:
+                strike, oi = float(row["strike"]), int(row["oi"] or 0)
+                matrices[side].setdefault(strike, {})[day] = oi
+                by_side[side] += oi
+            for side in ("call", "put"):
+                totals[side].append(by_side[side])
+
+        def _matrix(side, top_n=10):
+            ranked = []
+            for strike, series in matrices[side].items():
+                # Missing contracts are a real zero, not a reason to omit
+                # the strike from the signed OI-change history.
+                change = series.get(dates[-1], 0) - series.get(dates[0], 0)
+                ranked.append((strike, change, series))
+            ranked.sort(key=lambda row: abs(row[1]), reverse=True)
+            return [{"strike": strike, "change": change,
+                     "values": [series.get(day, 0) for day in dates]}
+                    for strike, change, series in ranked[:top_n]]
+
+        def _top(side):
+            rows = _matrix(side, 1)
+            if not rows:
                 return None
-            series = by_strike[best_strike]
-            return {
-                "strike": best_strike, "buildup": best_buildup,
-                "oi_series": [series.get(d, None) for d in dates],
-            }
-
-        def _build_matrix(by_strike: dict, top_n: int = 10):
-            """Table-friendly view: top N strikes by absolute OI
-            change over the window (both build-UP and build-DOWN are
-            useful to see, so this ranks by magnitude, not just
-            positive buildup), each with its full day-by-day series.
-            No Plotly dependency at all -- a plain table always
-            renders if the data exists, unlike the line chart."""
-            scored = []
-            for strike, series in by_strike.items():
-                if dates[0] not in series or dates[-1] not in series:
-                    continue
-                change = series[dates[-1]] - series[dates[0]]
-                scored.append((strike, change, series))
-            scored.sort(key=lambda t: abs(t[1]), reverse=True)
-            rows = []
-            for strike, change, series in scored[:top_n]:
-                rows.append({
-                    "strike": strike, "change": change,
-                    "values": [series.get(d, None) for d in dates],
-                })
-            return rows
+            row = rows[0]
+            return {"strike": row["strike"], "buildup": row["change"],
+                    "oi_series": row["values"]}
 
         return jsonify({
-            "ok": True, "symbol": symbol, "expiration": expiration, "dates": dates,
-            "total_call_oi": total_call_oi, "total_put_oi": total_put_oi,
-            "top_call_buildup": _top_buildup(call_by_strike),
-            "top_put_buildup": _top_buildup(put_by_strike),
-            "call_matrix": _build_matrix(call_by_strike),
-            "put_matrix": _build_matrix(put_by_strike),
+            "ok": True, "symbol": symbol, "expiration": expiration,
+            "dates": dates,
+            "total_call_oi": totals["call"], "total_put_oi": totals["put"],
+            "top_call_buildup": _top("call"),
+            "top_put_buildup": _top("put"),
+            "call_matrix": _matrix("call"),
+            "put_matrix": _matrix("put"),
         })
     finally:
         con.close()
-
 
 # Saved-snapshot OI change history for the OI Viewer.  This endpoint is
 # read-only and deliberately does not fetch option chains or start workers.
