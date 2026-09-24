@@ -6,9 +6,6 @@ import math, os
 from datetime import date, datetime
 
 gex_pine_bp = Blueprint("gex_pine", __name__, url_prefix="/gex")
-# The live, symbol-level GEX analysis is intentionally separate from the
-# statistical GEX Predictive Analytics page.
-gex_analysis_bp = Blueprint("gex_analysis", __name__, url_prefix="/gex-analysis")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -232,10 +229,3 @@ def gex_live_dashboard():
     sym = (request.args.get("symbol") or "SPY").upper()
     return _render_gex_live_dashboard(sym, request.path, "/gex")
 
-
-@gex_analysis_bp.route("", strict_slashes=False)
-@gex_analysis_bp.route("/", strict_slashes=False)
-def gex_analysis_dashboard():
-    """Legacy intraday, any-symbol GEX Analysis page."""
-    sym = (request.args.get("symbol") or "SPY").upper()
-    return _render_gex_live_dashboard(sym, request.path, "/gex")
