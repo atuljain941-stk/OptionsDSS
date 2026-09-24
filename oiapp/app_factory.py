@@ -157,14 +157,20 @@ def create_app():
         from .scanners.spy_strategies import spy_bp
         app.register_blueprint(spy_bp)
         try:
-            from .scanners.gex_pine_export import gex_pine_bp, gex_analysis_bp
+            from .scanners.gex_pine_export import gex_pine_bp
             app.register_blueprint(gex_pine_bp)
-            app.register_blueprint(gex_analysis_bp)
-            print("[app] GEX Pine routes registered at /gex/pine, /gex/live, and /gex-analysis")
+            print("[app] GEX Pine routes registered at /gex/pine and /gex/live")
         except Exception as _gpe:
             print(f"[app] WARNING: gex_pine_bp not loaded — {_gpe}")
     except Exception as e:
         print(f"[app] WARNING: spy_strategies not loaded — {e}")
+
+    try:
+        from .scanners.gex_analysis import gex_analysis_bp
+        app.register_blueprint(gex_analysis_bp)
+        print("[app] Saved GEX Analysis registered at /gex-analysis")
+    except Exception as e:
+        print(f"[app] WARNING: gex_analysis not loaded — {e}")
 
     try:
         from .scanners.earnings import earnings_bp
