@@ -4206,3 +4206,58 @@ def api_oi_buildup_trend():
         })
     finally:
         con.close()
+
+
+# Saved-snapshot OI change history for the OI Viewer.  This endpoint is
+# read-only and deliberately does not fetch option chains or start workers.
+@api_bp.route("/oi_change_history")
+def oi_change_history_api():
+    symbol = (request.args.get("symbol") or "").upper().strip()
+    expiration = (request.args.get("expiration") or "").strip()
+    days = max(2, min(10, int(request.args.get("days") or 5)))
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+
+    where = "symbol=?"
+    args = [symbol]
+    if expiration and expiration.lower() != "all":
+        where += " AND expiration=?"
+        args.append(expiration)
+
+    with _connect() as con:
+        dates = [r[0] for r in con.execute(
+            f"SELECT DISTINCT date(fetch_ts) FROM options WHERE {where} "
+            "AND fetch_ts IS NOT NULL ORDER BY date(fetch_ts) DESC LIMIT ?",
+            (*args, days + 1),
+        ).fetchall()]
+        dates.reverse()
+        if len(dates) < 2:
+            return jsonify({"error": "Need at least two saved OI snapshot dates", "dates": dates}), 422
+
+        snapshots = []
+        for day in dates:
+            stamp = con.execute(
+                f"SELECT MAX(fetch_ts) FROM options WHERE {where} AND date(fetch_ts)=?",
+                (*args, day),
+            ).fetchone()[0]
+            rows = con.execute(
+                f"SELECT strike, lower(type), SUM(oi) FROM options WHERE {where} AND fetch_ts=? "
+                "GROUP BY strike, lower(type)",
+                (*args, stamp),
+            ).fetchall()
+            snapshots.append((day, {(float(k), str(t or '')[:1]): int(v or 0) for k, t, v in rows}))
+
+    points = []
+    for idx in range(1, len(snapshots)):
+        prior_day, prior = snapshots[idx - 1]
+        day, current = snapshots[idx]
+        for strike, side in sorted(set(prior) | set(current)):
+            if side not in ("c", "p"):
+                continue
+            delta = current.get((strike, side), 0) - prior.get((strike, side), 0)
+            if delta:
+                points.append({"strike": strike, "side": side, "change": delta,
+                               "date": day, "from_date": prior_day,
+                               "oi": current.get((strike, side), 0)})
+    return jsonify({"symbol": symbol, "expiration": expiration or "all",
+                    "days": len(dates) - 1, "dates": dates, "points": points})
