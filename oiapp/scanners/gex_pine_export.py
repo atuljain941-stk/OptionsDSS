@@ -392,7 +392,7 @@ _MARKET_OVERVIEW_TEMPLATE = """<!doctype html>
 <style>
 body{background:#0b1120;color:#e5e7eb;font:14px system-ui;margin:24px}.top{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.controls{display:flex;gap:6px}.controls button{background:#1f2937}.controls button.active{background:#2563eb}.grid{display:grid;grid-template-columns:repeat(3,minmax(320px,1fr));gap:16px;margin-top:18px}.card{background:#111827;border:1px solid #263349;border-radius:10px;padding:16px}.good{color:#60a5fa}.bad{color:#f87171}.muted{color:#9ca3af}.metric{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid #1f2937}button{background:#2563eb;color:white;border:0;border-radius:6px;padding:9px 14px;cursor:pointer}.gamma{width:100%;height:260px;margin-top:14px;background:#0b1018;border-radius:7px}.axis{stroke:#334155;stroke-width:1}.spot{stroke:#60a5fa;stroke-width:2;stroke-dasharray:4 3}.label{fill:#94a3b8;font-size:10px}.chart-title{fill:#e5e7eb;font-size:12px;font-weight:600}
 </style>
-<div class=top><h2>GEX Market Overview</h2><button id=refresh>Refresh live view</button><div class=controls><button data-mode=net class=active>Net gamma</button><button data-mode=absolute>Absolute gamma</button><button data-mode=split>Put / call gamma</button></div><span class=muted id=status>Saved GEX/OI + live spot and option volume</span></div><div id=grid class=grid></div>
+<div class=top><h2>GEX Market Overview</h2><button id=refresh>Refresh live view</button><label class=muted>Auto refresh <select id=interval><option value=0>Off</option><option value=60>1 minute</option><option value=300>5 minutes</option><option value=900>15 minutes</option></select></label><div class=controls><button data-mode=net class=active>Net gamma</button><button data-mode=absolute>Absolute gamma</button><button data-mode=split>Put / call gamma</button></div><span class=muted id=status>Saved GEX/OI + live spot and option volume</span></div><div id=grid class=grid></div>
 <script>
 var overviewRows=[], mode='net';
 var n=function(v){return v==null?'—':typeof v==='number'?v.toLocaleString(undefined,{maximumFractionDigits:2}):v};
@@ -412,6 +412,10 @@ function card(x){var l=x.live_volume||{},s=x.saved_volume||{},dc=(l.call_volume|
 function draw(){grid.innerHTML=overviewRows.map(card).join('')||'<p>No saved GEX data is available.</p>'}
 document.querySelectorAll('[data-mode]').forEach(function(button){button.onclick=function(){mode=button.dataset.mode;document.querySelectorAll('[data-mode]').forEach(function(b){b.classList.toggle('active',b===button)});draw()}});
 async function load(){status.textContent='Loading saved GEX/OI and live volume…';try{var r=await fetch('/gex/market-overview?format=json',{cache:'no-store'}),d=await r.json();overviewRows=d.results||[];draw();status.textContent='Updated '+d.updated+(d.errors&&d.errors.length?' • '+d.errors.map(function(e){return e.symbol}).join(', ')+' unavailable':'')}catch(e){status.textContent='Could not load overview: '+e.message}}
+var refreshTimer=null;
+function setRefreshInterval(){if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}var seconds=Number(interval.value||0);if(seconds){refreshTimer=setInterval(load,seconds*1000);status.textContent='Auto refresh every '+seconds/60+' minute'+(seconds===60?'':'s')}}
+interval.onchange=setRefreshInterval;
+window.addEventListener('pagehide',function(){if(refreshTimer)clearInterval(refreshTimer)});
 refresh.onclick=load;load();
 </script>""";
 
