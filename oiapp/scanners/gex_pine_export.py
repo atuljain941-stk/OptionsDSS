@@ -1,8 +1,8 @@
 # oiapp/scanners/gex_pine_export.py
 """GEX Pine Export -- auto-feeds TradingView indicator."""
 
-from flask import Blueprint, jsonify, request, Response
-import math, os
+from flask import Blueprint, jsonify, request, Response, render_template_string
+import math, os, sqlite3
 from datetime import date, datetime
 
 gex_pine_bp = Blueprint("gex_pine", __name__, url_prefix="/gex")
@@ -229,3 +229,153 @@ def gex_live_dashboard():
     sym = (request.args.get("symbol") or "SPY").upper()
     return _render_gex_live_dashboard(sym, request.path, "/gex")
 
+
+
+# ── GEX Market Overview (on-demand only) ─────────────────────────────────
+# No scheduler, timer, worker, or write is associated with this page.
+
+_MARKET_OVERVIEW_SYMBOLS = ("SPY", "QQQ", "IWM")
+
+
+def _number(value, default=None):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _saved_volume_snapshot(symbol, expiry):
+    """Last persisted call/put volume for the expiry; read-only."""
+    try:
+        from ..config import DB_PATH
+        con = sqlite3.connect(DB_PATH)
+        row = con.execute("SELECT MAX(date) FROM options WHERE symbol=? AND expiration=?", (symbol, expiry)).fetchone()
+        saved_date = row[0] if row else None
+        if not saved_date:
+            con.close()
+            return {"date": None, "call_volume": 0, "put_volume": 0}
+        totals = con.execute(
+            """SELECT SUM(CASE WHEN lower(type)='call' THEN COALESCE(volume, 0) ELSE 0 END),
+                      SUM(CASE WHEN lower(type)='put' THEN COALESCE(volume, 0) ELSE 0 END)
+                 FROM options WHERE symbol=? AND expiration=? AND date=?""",
+            (symbol, expiry, saved_date),
+        ).fetchone()
+        con.close()
+        return {"date": str(saved_date), "call_volume": int((totals or [0, 0])[0] or 0), "put_volume": int((totals or [0, 0])[1] or 0)}
+    except Exception:
+        return {"date": None, "call_volume": 0, "put_volume": 0}
+
+
+def _live_volume_snapshot(symbol, expiry):
+    """Current option volume for a single selected expiry; never persisted."""
+    try:
+        import yfinance as yf
+        chain = yf.Ticker(symbol).option_chain(expiry)
+        calls = int(chain.calls["volume"].fillna(0).sum()) if "volume" in chain.calls else 0
+        puts = int(chain.puts["volume"].fillna(0).sum()) if "volume" in chain.puts else 0
+        return {"available": True, "call_volume": calls, "put_volume": puts}
+    except Exception as exc:
+        return {"available": False, "call_volume": 0, "put_volume": 0, "error": str(exc)[:120]}
+
+
+def _overview_location(spot, gamma_flip, put_wall, call_wall):
+    if spot is None:
+        return "Spot unavailable"
+    if put_wall and call_wall and put_wall <= spot <= call_wall:
+        return "Inside put/call-wall range"
+    if call_wall and spot > call_wall:
+        return "Above call wall"
+    if put_wall and spot < put_wall:
+        return "Below put wall"
+    if gamma_flip:
+        return "Above gamma flip" if spot >= gamma_flip else "Below gamma flip"
+    return "Location unavailable"
+
+
+def _overview_trade_read(regime, spot, put_wall, call_wall, live_pcv):
+    """Conservative context only; no order is placed by this page."""
+    regime_text = (regime or "").lower()
+    positive = "positive" in regime_text or "long" in regime_text
+    negative = "negative" in regime_text or "short" in regime_text
+    inside_walls = bool(put_wall and call_wall and put_wall <= spot <= call_wall)
+    if negative:
+        return "Wait — negative gamma can expand moves; do not sell premium solely from this view."
+    if positive and inside_walls and live_pcv is not None and 0.75 <= live_pcv <= 1.25:
+        return "Range setup — consider a defined-risk iron condor only if price action confirms both walls."
+    if positive and put_wall and spot and spot <= put_wall * 1.01 and (live_pcv or 0) < 1.0:
+        return "Support test — consider a defined-risk bull put spread only after support holds."
+    if positive and call_wall and spot and spot >= call_wall * 0.99 and (live_pcv or 0) > 1.0:
+        return "Resistance test — consider a defined-risk bear call spread only after resistance holds."
+    return "No clear premium-selling setup — wait for price, regime, and volume flow to align."
+
+
+def _market_overview_row(symbol):
+    """Merge saved GEX/OI with request-time spot and put/call volume."""
+    from .spy_strategies import _compute_ta, _future_exps, _oi_rows, _compute_gex, _score_gex_walls, _five_factor_score, _pick_exp
+    ta = _compute_ta(symbol) or {}
+    try:
+        from ..services.market import get_spot_snapshot
+        spot_snapshot = get_spot_snapshot(symbol) or {}
+    except Exception:
+        spot_snapshot = {}
+    spot = _number(spot_snapshot.get("price"), _number(ta.get("price")))
+    exps = _future_exps(symbol) or []
+    expiry, dte = _pick_exp(exps, 0, 5, 0) if exps else (None, 0)
+    if not expiry or not spot:
+        raise ValueError("Saved option-chain data or live spot is unavailable")
+    rows = _oi_rows(symbol, expiry) or []
+    iv_atm = _number(ta.get("iv_est"), 20.0)
+    gex = _compute_gex(rows, spot, max(1, dte or 1), iv_atm) if rows else {}
+    wall_strength = _score_gex_walls(rows, spot, gex, side=5) if rows else {}
+    calls_oi = sum(int(row.get("oi") or 0) for row in rows if row.get("type") == "call")
+    puts_oi = sum(int(row.get("oi") or 0) for row in rows if row.get("type") == "put")
+    oi_pcr = round(puts_oi / max(calls_oi, 1), 3)
+    score, confidence, regime, _ = _five_factor_score(gex.get("total_gex", 0), oi_pcr, 0, spot, gex.get("pin_strike", spot), gex.get("gamma_flip", spot), rows, gex_ratio=gex.get("gex_ratio"), max_pain=gex.get("max_pain"))
+    top_puts = wall_strength.get("top_put_walls") or []
+    top_calls = wall_strength.get("top_call_walls") or []
+    put_wall = _number(top_puts[0].get("strike")) if top_puts else None
+    call_wall = _number(top_calls[0].get("strike")) if top_calls else None
+    live = _live_volume_snapshot(symbol, expiry)
+    saved = _saved_volume_snapshot(symbol, expiry)
+    live_pcv = round(live["put_volume"] / max(live["call_volume"], 1), 3) if live.get("available") else None
+    return {
+        "symbol": symbol, "expiry": expiry, "dte": dte, "spot": spot,
+        "spot_source": spot_snapshot.get("source") or "technical fallback",
+        "regime": regime, "score": score, "confidence": confidence,
+        "net_gex": _number(gex.get("total_gex"), 0), "gamma_flip": _number(gex.get("gamma_flip")),
+        "pin": _number(gex.get("pin_strike")), "put_wall": put_wall, "call_wall": call_wall,
+        "location": _overview_location(spot, _number(gex.get("gamma_flip")), put_wall, call_wall),
+        "live_volume": live, "saved_volume": saved, "live_pcv": live_pcv,
+        "trade_read": _overview_trade_read(regime, spot, put_wall, call_wall, live_pcv),
+    }
+
+
+@gex_pine_bp.route("/market-overview")
+@gex_pine_bp.route("/market-overview/")
+def gex_market_overview():
+    """In-app SPY/QQQ/IWM overview. All work is performed at request time."""
+    results, errors = [], []
+    for symbol in _MARKET_OVERVIEW_SYMBOLS:
+        try:
+            results.append(_market_overview_row(symbol))
+        except Exception as exc:
+            errors.append({"symbol": symbol, "error": str(exc)[:180]})
+    if request.args.get("format") == "json":
+        return jsonify({"results": results, "errors": errors, "updated": datetime.now().isoformat(timespec="seconds")})
+    return render_template_string(_MARKET_OVERVIEW_TEMPLATE)
+
+
+_MARKET_OVERVIEW_TEMPLATE = """<!doctype html>
+<title>GEX Market Overview</title>
+<style>
+body{background:#0b1120;color:#e5e7eb;font:14px system-ui;margin:24px}.top{display:flex;gap:16px;align-items:center}.grid{display:grid;grid-template-columns:repeat(3,minmax(280px,1fr));gap:16px;margin-top:18px}.card{background:#111827;border:1px solid #263349;border-radius:10px;padding:16px}.good{color:#60a5fa}.bad{color:#f87171}.muted{color:#9ca3af}.metric{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid #1f2937}button{background:#2563eb;color:white;border:0;border-radius:6px;padding:9px 14px;cursor:pointer}
+</style>
+<div class=top><h2>GEX Market Overview</h2><button id=refresh>Refresh live view</button><span class=muted id=status>Saved GEX/OI + live spot and option volume</span></div><div id=grid class=grid></div>
+<script>
+const n=function(v){return v==null?'—':typeof v==='number'?v.toLocaleString(undefined,{maximumFractionDigits:2}):v};
+function row(k,v,c){return '<div class="metric '+(c||'')+'"><span>'+k+'</span><b>'+v+'</b></div>'}
+function card(x){var l=x.live_volume||{},s=x.saved_volume||{},dc=(l.call_volume||0)-(s.call_volume||0),dp=(l.put_volume||0)-(s.put_volume||0),klass=(x.regime||'').toLowerCase().includes('positive')?'good':'bad';return '<section class=card><h2>'+x.symbol+' <small class=muted>'+x.expiry+' • '+x.dte+' DTE</small></h2>'+row('Regime',x.regime,klass)+row('Live spot',n(x.spot))+row('Price location',x.location)+row('Net GEX',n(x.net_gex))+row('Gamma flip',n(x.gamma_flip))+row('Put / call wall',n(x.put_wall)+' / '+n(x.call_wall))+row('Live call / put volume',n(l.call_volume)+' / '+n(l.put_volume))+row('Live put/call volume',n(x.live_pcv))+row('Volume vs saved','C '+(dc>=0?'+':'')+n(dc)+' • P '+(dp>=0?'+':'')+n(dp))+'<p class=muted>Saved volume: '+(s.date||'unavailable')+'</p><p><b>Read:</b> '+x.trade_read+'</p></section>'}
+async function load(){status.textContent='Loading saved GEX/OI and live volume…';try{var r=await fetch('/gex/market-overview?format=json',{cache:'no-store'}),d=await r.json();grid.innerHTML=d.results.map(card).join('')||'<p>No saved GEX data is available.</p>';status.textContent='Updated '+d.updated+(d.errors&&d.errors.length?' • '+d.errors.map(function(e){return e.symbol}).join(', ')+' unavailable':'')}catch(e){status.textContent='Could not load overview: '+e.message}}
+refresh.onclick=load;load();
+</script>""";
