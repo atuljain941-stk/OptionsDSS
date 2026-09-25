@@ -1167,18 +1167,19 @@ async function _loadOiBuildupTrend() {
   const makeTrace = kind => {
     const rows = points.filter(p => p.kind === kind);
     return {type:'scatter',mode:'markers',name:kind === 'call' ? 'Calls' : 'Puts',
-      x:rows.map(p => p.date), y:rows.map(p => kind === 'call' ? p.strike : -p.strike),
+      x:rows.map(p => p.strike), y:rows.map(p => p.date), yaxis:kind === 'call' ? 'y' : 'y2',
       customdata:rows.map(p => [p.kind,p.strike,p.from,p.date,p.change,p.previous,p.current]),
       marker:{symbol:'circle',color:rows.map(p => p.change >= 0 ? '#3b82f6' : '#ef4444'),size:rows.map(p => Math.max(7,Math.sqrt(Math.abs(p.change)/maxAbs)*32)),opacity:.9,line:{color:'#dbeafe',width:.4}},
       hovertemplate:'%{customdata[0]} · Strike %{customdata[1]}<br>%{customdata[2]} → %{customdata[3]}<br>ΔOI: %{customdata[4]:,.0f}<br>Prior OI: %{customdata[5]:,.0f}<br>Current OI: %{customdata[6]:,.0f}<extra></extra>'};
   };
-  const strikes = [...new Set(points.map(p => p.strike))].sort((a,b) => a-b);
-  const sampled = strikes.length > 14 ? strikes.filter((_,i) => i % Math.ceil(strikes.length/14) === 0) : strikes;
   Plotly.newPlot(holder, [makeTrace('call'), makeTrace('put')], {
     ...PL, title:(d.symbol || dashSym)+' '+(d.expiration || currentExpiration)+' — day-to-day signed OI change',
-    xaxis:{title:'Snapshot date',type:'category',gridcolor:'#263243'},
-    yaxis:{title:'Strike — calls above centre / puts below',tickvals:sampled.concat(sampled.map(v => -v)),ticktext:sampled.map(v => 'Call '+v).concat(sampled.map(v => 'Put '+v)),gridcolor:'#263243',zeroline:true,zerolinecolor:'#aab6c6',zerolinewidth:2},
-    legend:{orientation:'h',y:-.2},hovermode:'closest',margin:{l:95,r:24,t:48,b:55}
+    xaxis:{title:'Strike',type:'linear',gridcolor:'#263243',zeroline:false},
+    yaxis:{title:'Calls',type:'category',categoryorder:'array',categoryarray:dates,domain:[.56,1],gridcolor:'#263243'},
+    yaxis2:{title:'Puts',type:'category',categoryorder:'array',categoryarray:dates,domain:[0,.43],gridcolor:'#263243'},
+    shapes:[{type:'line',xref:'paper',yref:'paper',x0:0,x1:1,y0:.5,y1:.5,line:{color:'#aab6c6',width:2}}],
+    annotations:[{xref:'paper',yref:'paper',x:.5,y:.525,text:'Calls above • Puts below',showarrow:false,font:{size:11,color:'#aab6c6'}}],
+    legend:{orientation:'h',y:-.16},hovermode:'closest',margin:{l:85,r:24,t:48,b:55}
   }, PC);
 }
 
