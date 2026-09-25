@@ -46,8 +46,19 @@
       yaxis:{title:"Strike — calls above centre / puts below",tickvals:tickvals,ticktext:ticktext,gridcolor:"#263243",zeroline:true,zerolinecolor:"#aab6c6",zerolinewidth:2},
       legend:{orientation:"h",y:-.2},hovermode:"closest"
     },{responsive:true,displaylogo:false});
-    if (table) table.innerHTML='<table style="width:100%;font-size:11px;border-collapse:collapse"><thead><tr><th>Date change</th><th>Side</th><th>Strike</th><th>ΔOI</th><th>Prior OI</th><th>Current OI</th></tr></thead><tbody>'+
-      points.slice().sort(function(a,b){return Math.abs(b.change)-Math.abs(a.change);}).map(function(p){var c=p.change>=0?"#3b82f6":"#ef4444";return '<tr><td>'+p.from+' → '+p.date+'</td><td>'+p.side+'</td><td>'+p.strike+'</td><td style="color:'+c+'">'+(p.change>=0?"+":"")+comma(p.change)+'</td><td>'+comma(p.prior)+'</td><td>'+comma(p.current)+'</td></tr>';}).join("")+'</tbody></table>';
+    if (table) {
+      var byStrike={};
+      points.forEach(function(p){
+        var key=p.side+"|"+p.strike, item=byStrike[key];
+        if(!item) item=byStrike[key]={side:p.side,strike:p.strike,from:p.from,date:p.date,prior:p.prior,current:p.current,change:0};
+        item.change+=p.change; item.current=p.current; item.date=p.date;
+      });
+      var rows=Object.keys(byStrike).map(function(key){return byStrike[key];}).sort(function(a,b){
+        return a.side===b.side ? a.strike-b.strike : (a.side==="call" ? -1 : 1);
+      });
+      table.innerHTML='<table style="width:100%;font-size:11px;border-collapse:collapse"><thead><tr><th>Window</th><th>Side</th><th>Strike</th><th>Net ΔOI</th><th>Start OI</th><th>End OI</th></tr></thead><tbody>'+
+        rows.map(function(p){var c=p.change>=0?"#3b82f6":"#ef4444";return '<tr><td>'+p.from+' → '+p.date+'</td><td>'+p.side+'</td><td>'+p.strike+'</td><td style="color:'+c+'">'+(p.change>=0?"+":"")+comma(p.change)+'</td><td>'+comma(p.prior)+'</td><td>'+comma(p.current)+'</td></tr>';}).join("")+'</tbody></table>';
+    }
   }
   function load() {
     var chart=byId("oiBuildupTrendChart"),symbol=(byId("symbol-input")||{}).value||"",expiration=(byId("expiration-select")||{}).value||"",days=Math.max(2,Math.min(30,n((byId("oi-trend-days")||{}).value)||5));
@@ -63,6 +74,9 @@
     var button=old.cloneNode(true); old.parentNode.replaceChild(button,old);
     button.addEventListener("click",load);
     document.querySelectorAll('input[name="oi-trend-side"]').forEach(function(node){node.addEventListener("change",function(){if(cached)render(cached);});});
+    // The legacy OI viewer also paints this container on load.  Render last so this
+    // day-to-day bubble matrix is the sole owner of the panel and raw-data table.
+    window.setTimeout(load, 0);
   }
   if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",boot);else boot();
 })();
