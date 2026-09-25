@@ -1,89 +1,68 @@
-/* Saved OI Buildup Trend panel. Runs only when its Refresh button is clicked. */
+/* Saved OI day-to-day change bubble matrix.  Loads only on Refresh. */
 (function () {
   "use strict";
   function byId(id) { return document.getElementById(id); }
-  function esc(v) { return String(v == null ? "" : v).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
   function n(v) { return Number(v || 0); }
-  function num(v) { return n(v).toLocaleString(); }
+  function selectedSide() { var el=document.querySelector('input[name="oi-trend-side"]:checked'); return el ? el.value : "both"; }
+  function comma(v) { return n(v).toLocaleString(); }
+  var cached=null;
 
-  function selectedSide() {
-    var x = document.querySelector('input[name="oi-trend-side"]:checked');
-    return x ? x.value : "both";
-  }
-
-  function changes(data, side) {
-    var out = [], dates = data.dates || [];
-    ["call", "put"].forEach(function(kind) {
-      if (side !== "both" && side !== kind) return;
-      (data[kind + "_matrix"] || []).forEach(function(row) {
-        var values = row.values || [];
-        for (var i = 1; i < Math.min(dates.length, values.length); i++) {
-          var delta = n(values[i]) - n(values[i - 1]);
-          if (delta) out.push({date:dates[i], from:dates[i-1], side:kind, strike:n(row.strike), change:delta, oi:n(values[i])});
+  function render(data) {
+    var chart=byId("oiBuildupTrendChart"), table=byId("oiBuildupTrendTable");
+    if (!chart || !window.Plotly) return;
+    var side=selectedSide(), points=[], maxAbs=1, dates=data.dates || [];
+    ["call","put"].forEach(function(kind) {
+      if (side!=="both" && side!==kind) return;
+      (data[kind+"_matrix"] || []).forEach(function(row) {
+        var values=row.values || [];
+        for (var i=1; i<Math.min(values.length,dates.length); i++) {
+          var change=n(values[i])-n(values[i-1]);
+          maxAbs=Math.max(maxAbs,Math.abs(change));
+          points.push({side:kind,strike:n(row.strike),from:dates[i-1],date:dates[i],prior:n(values[i-1]),current:n(values[i]),change:change});
         }
       });
     });
-    return out;
-  }
-
-  function render(data) {
-    var chart = byId("oiBuildupTrendChart"), table = byId("oiBuildupTrendTable");
-    if (!chart || !table) return;
-    var side = selectedSide(), pts = changes(data, side), dates = (data.dates || []).slice(1);
-    if (!pts.length) {
-      chart.style.height = "auto";
-      chart.innerHTML = '<div style="height:260px;display:grid;place-items:center;color:var(--muted)">No non-zero OI changes in the selected saved snapshots.</div>';
-      table.innerHTML = "";
-      return;
+    if (!points.length) { chart.innerHTML='<div style="height:300px;display:grid;place-items:center;color:var(--muted)">No consecutive saved OI snapshots are available.</div>'; return; }
+    var calls=points.filter(function(p){return p.side==="call";}), puts=points.filter(function(p){return p.side==="put";});
+    function trace(rows, kind) {
+      return {
+        type:"scatter", mode:"markers", name:kind==="call"?"Calls":"Puts",
+        x:rows.map(function(p){return p.date;}),
+        y:rows.map(function(p){return kind==="call"?p.strike:-p.strike;}),
+        customdata:rows.map(function(p){return [p.from,p.date,p.side,p.strike,p.change,p.prior,p.current];}),
+        marker:{color:rows.map(function(p){return p.change>=0?"#3b82f6":"#ef4444";}),size:rows.map(function(p){return Math.max(7,Math.sqrt(Math.abs(p.change)/maxAbs)*32);}),symbol:kind==="call"?"circle":"diamond",opacity:.9,line:{color:"#dbeafe",width:.3}},
+        hovertemplate:"%{customdata[2]} · Strike %{customdata[3]}<br>%{customdata[0]} → %{customdata[1]}<br>ΔOI: %{customdata[4]:,.0f}<br>Prior OI: %{customdata[5]:,.0f}<br>Current OI: %{customdata[6]:,.0f}<extra></extra>"
+      };
     }
-    var strikes = Array.from(new Set(pts.map(function(p){return p.strike;}))).sort(function(a,b){return a-b;});
-    var maxAbs = Math.max.apply(null, pts.map(function(p){return Math.abs(p.change);})); 
-    var width = Math.max(840, strikes.length * 62 + 120), rowH = 112, height = Math.max(300, dates.length * rowH + 60);
-    function x(strike) { return 64 + strikes.indexOf(strike) * ((width - 105) / Math.max(1, strikes.length - 1)); }
-    function mid(date) { return 28 + dates.indexOf(date) * rowH + rowH / 2; }
-    var svg = '<svg viewBox="0 0 '+width+' '+height+'" width="'+width+'" height="'+height+'" role="img" aria-label="Saved signed OI change by strike and date">';
-    dates.forEach(function(date) {
-      var m=mid(date);
-      svg += '<text x="6" y="'+(m+4)+'" fill="#aab6c6" font-size="11">'+esc(date)+'</text>'+
-        '<line x1="58" y1="'+m+'" x2="'+(width-18)+'" y2="'+m+'" stroke="#64748b" stroke-width="1"/>'+
-        '<text x="'+(width-20)+'" y="'+(m-19)+'" fill="#6ea8fe" font-size="9" text-anchor="end">CALLS</text>'+
-        '<text x="'+(width-20)+'" y="'+(m+34)+'" fill="#d78a8a" font-size="9" text-anchor="end">PUTS</text>';
-    });
-    strikes.forEach(function(strike) {
-      var xx=x(strike);
-      svg += '<line x1="'+xx+'" y1="18" x2="'+xx+'" y2="'+(height-28)+'" stroke="#243247" stroke-width="1"/>'+
-        '<text x="'+xx+'" y="'+(height-8)+'" fill="#aab6c6" font-size="10" text-anchor="middle">'+strike+'</text>';
-    });
-    pts.forEach(function(p) {
-      var radius=4+17*Math.sqrt(Math.abs(p.change)/maxAbs), yy=mid(p.date)+(p.side==="call"?-27:27);
-      var color=p.change>0 ? "#3b82f6" : "#ef4444";
-      var label=(p.side==="call"?"Call":"Put")+" "+p.strike+" · "+p.from+" → "+p.date+" · ΔOI "+(p.change>0?"+":"")+num(p.change)+" · OI "+num(p.oi);
-      svg += '<circle cx="'+x(p.strike)+'" cy="'+yy+'" r="'+radius.toFixed(1)+'" fill="'+color+'" fill-opacity=".88" stroke="#dbeafe" stroke-opacity=".35"><title>'+esc(label)+'</title></circle>';
-    });
-    svg += '</svg>';
-    chart.style.height = "auto";
-    chart.innerHTML = '<div style="font-size:11px;color:var(--muted);margin:2px 0 7px">X = strike · each row = consecutive snapshot comparison · <span style="color:#60a5fa">blue: OI added</span> · <span style="color:#f87171">red: OI reduced</span> · calls above / puts below centre line</div><div style="overflow-x:auto">'+svg+'</div>';
-    var rows=pts.slice().sort(function(a,b){return b.date.localeCompare(a.date)||Math.abs(b.change)-Math.abs(a.change);});
-    table.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr><th style="text-align:left">Date</th><th>Side</th><th>Strike</th><th>ΔOI</th><th>Current OI</th></tr></thead><tbody>'+
-      rows.map(function(p){return '<tr><td style="padding:5px;border-top:1px solid var(--border)">'+esc(p.from)+' → '+esc(p.date)+'</td><td style="text-align:center">'+(p.side==="call"?"Call":"Put")+'</td><td style="text-align:right">'+p.strike+'</td><td style="text-align:right;color:'+(p.change>0?"#60a5fa":"#f87171")+'">'+(p.change>0?"+":"")+num(p.change)+'</td><td style="text-align:right">'+num(p.oi)+'</td></tr>';}).join("")+'</tbody></table>';
+    var strikes=Array.from(new Set(points.map(function(p){return p.strike;}))).sort(function(a,b){return a-b;});
+    var shown=strikes.length>14?strikes.filter(function(_,i){return i%Math.ceil(strikes.length/14)===0;}):strikes;
+    var tickvals=shown.concat(shown.map(function(v){return -v;}));
+    var ticktext=shown.map(function(v){return "Call "+v;}).concat(shown.map(function(v){return "Put "+v;}));
+    Plotly.react(chart,[trace(calls,"call"),trace(puts,"put")],{
+      title:(data.symbol||"")+" "+(data.expiration||"")+" — Saved day-to-day signed OI change",
+      paper_bgcolor:"#0b1018",plot_bgcolor:"#0b1018",font:{color:"#d1d5db"},
+      margin:{l:85,r:25,t:48,b:54},
+      xaxis:{title:"Snapshot date",type:"category",gridcolor:"#263243"},
+      yaxis:{title:"Strike — calls above centre / puts below",tickvals:tickvals,ticktext:ticktext,gridcolor:"#263243",zeroline:true,zerolinecolor:"#aab6c6",zerolinewidth:2},
+      legend:{orientation:"h",y:-.2},hovermode:"closest"
+    },{responsive:true,displaylogo:false});
+    if (table) table.innerHTML='<table style="width:100%;font-size:11px;border-collapse:collapse"><thead><tr><th>Date change</th><th>Side</th><th>Strike</th><th>ΔOI</th><th>Prior OI</th><th>Current OI</th></tr></thead><tbody>'+
+      points.slice().sort(function(a,b){return Math.abs(b.change)-Math.abs(a.change);}).map(function(p){var c=p.change>=0?"#3b82f6":"#ef4444";return '<tr><td>'+p.from+' → '+p.date+'</td><td>'+p.side+'</td><td>'+p.strike+'</td><td style="color:'+c+'">'+(p.change>=0?"+":"")+comma(p.change)+'</td><td>'+comma(p.prior)+'</td><td>'+comma(p.current)+'</td></tr>';}).join("")+'</tbody></table>';
   }
-
   function load() {
-    var chart=byId("oiBuildupTrendChart"), symbol=(byId("symbol-input")||{}).value||"", expiration=(byId("expiration-select")||{}).value||"";
-    var days=Math.max(2,Math.min(30,n((byId("oi-trend-days")||{}).value)||10));
-    if (!symbol || !expiration || expiration.toLowerCase()==="all") {
-      chart.innerHTML='<div style="height:220px;display:grid;place-items:center;color:var(--muted)">Choose one symbol and a specific expiry, then Refresh.</div>'; return;
-    }
-    chart.style.height="340px"; chart.innerHTML='<div style="height:100%;display:grid;place-items:center;color:var(--muted)">Loading saved OI snapshots…</div>';
-    fetch("/api/oi_buildup_trend?symbol="+encodeURIComponent(symbol)+"&expiration="+encodeURIComponent(expiration)+"&days="+days,{credentials:"same-origin"})
+    var chart=byId("oiBuildupTrendChart"),symbol=(byId("symbol-input")||{}).value||"",expiration=(byId("expiration-select")||{}).value||"",days=Math.max(2,Math.min(30,n((byId("oi-trend-days")||{}).value)||10));
+    if (!symbol || !expiration || expiration.toLowerCase()==="all") { chart.innerHTML='<div style="height:220px;display:grid;place-items:center;color:var(--muted)">Choose one symbol and a specific expiry, then Refresh.</div>'; return; }
+    chart.innerHTML='<div style="height:300px;display:grid;place-items:center;color:var(--muted)">Loading saved OI changes…</div>';
+    fetch("/api/oi_buildup_trend?symbol="+encodeURIComponent(symbol)+"&expiration="+encodeURIComponent(expiration)+"&days="+days,{credentials:"same-origin",cache:"no-store"})
       .then(function(r){return r.json().then(function(d){if(!r.ok||d.ok===false)throw new Error(d.error||"Unable to load OI history");return d;});})
-      .then(render).catch(function(e){chart.style.height="auto";chart.innerHTML='<div style="height:220px;display:grid;place-items:center;color:#f87171">'+esc(e.message)+'</div>';});
+      .then(function(data){cached=data;render(data);})
+      .catch(function(e){chart.innerHTML='<div style="height:220px;display:grid;place-items:center;color:#f87171">'+e.message+'</div>';});
   }
-
   function boot() {
-    var button=byId("oi-trend-refresh-btn"); if (!button || button.dataset.oiTrendBound) return;
-    button.dataset.oiTrendBound="1"; button.addEventListener("click",load);
-    document.querySelectorAll('input[name="oi-trend-side"]').forEach(function(node){node.addEventListener("change",function(){ if (byId("oiBuildupTrendTable").innerHTML) load(); });});
+    var old=byId("oi-trend-refresh-btn"); if (!old) return;
+    var button=old.cloneNode(true); old.parentNode.replaceChild(button,old);
+    button.addEventListener("click",load);
+    document.querySelectorAll('input[name="oi-trend-side"]').forEach(function(node){node.addEventListener("change",function(){if(cached)render(cached);});});
   }
-  if (document.readyState==="loading") document.addEventListener("DOMContentLoaded",boot); else boot();
+  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",boot);else boot();
 })();
