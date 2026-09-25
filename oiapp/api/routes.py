@@ -4142,7 +4142,7 @@ def api_oi_buildup_trend():
             for side in ("call", "put"):
                 totals[side].append(by_side[side])
 
-        def _matrix(side, top_n=10):
+        def _matrix(side, top_n=40):
             ranked = []
             for strike, series in matrices[side].items():
                 # Missing contracts are a real zero, not a reason to omit
