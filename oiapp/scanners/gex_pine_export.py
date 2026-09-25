@@ -312,7 +312,7 @@ def _overview_trade_read(regime, spot, put_wall, call_wall, live_pcv):
 
 def _market_overview_row(symbol):
     """Merge saved GEX/OI with request-time spot and put/call volume."""
-    from .spy_strategies import _compute_ta, _compute_gex, _score_gex_walls, _five_factor_score
+    from .spy_strategies import _compute_ta, _compute_gex, _score_gex_walls, _five_factor_score, _bs_gamma
     from .gex_analysis import _latest_stamp, _saved_rows, _oi_by_stamp, _stamp_on_or_before, _prior_business_day
     ta = _compute_ta(symbol) or {}
     try:
@@ -364,7 +364,17 @@ def _market_overview_row(symbol):
         strike = _number(option.get("strike"))
         gamma = _number(option.get("gamma"), 0.0)
         oi = _number(option.get("oi"), 0.0)
-        if strike is None or not gamma or not oi:
+        if strike is None or not oi:
+            continue
+        # Some saved broker/yfinance snapshots have IV and OI but no gamma.
+        # Derive Black-Scholes gamma from that same saved IV so the overview
+        # still renders the identical per-strike exposure chart.
+        if not gamma:
+            strike_iv = _number(option.get("iv"), iv_atm) or iv_atm
+            if strike_iv <= 3:
+                strike_iv *= 100.0
+            gamma = _bs_gamma(spot, strike, max(1, dte), strike_iv)
+        if not gamma:
             continue
         exposure = abs(gamma * oi * 100 * spot * spot * 0.01)
         item = gamma_by_strike.setdefault(strike, {"strike": strike, "call": 0.0, "put": 0.0})
