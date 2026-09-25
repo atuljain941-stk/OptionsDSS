@@ -1134,10 +1134,11 @@ async function _loadOiBuildupTrend() {
   if (!currentExpiration) return;
   const token = ++_oiTrendRenderToken;
   const days = document.getElementById('oi-trend-days')?.value || 5;
+  const perSide = Math.max(1, Number(document.getElementById('per-side-input')?.value || 12));
   const side = document.querySelector('input[name="oi-trend-side"]:checked')?.value || 'both';
   try { if (window.Plotly) Plotly.purge(holder); } catch(_e) {}
   holder.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px">Loading signed OI-change bubbles…</div>';
-  const d = await api('/api/oi_buildup_trend?symbol='+encodeURIComponent(dashSym)+'&expiration='+encodeURIComponent(currentExpiration)+'&days='+encodeURIComponent(days)).catch(e => ({ok:false,error:e.message||String(e)}));
+  const d = await api('/api/oi_buildup_trend?symbol='+encodeURIComponent(dashSym)+'&expiration='+encodeURIComponent(currentExpiration)+'&days='+encodeURIComponent(days)+'&per_side='+encodeURIComponent(perSide)).catch(e => ({ok:false,error:e.message||String(e)}));
   if (token !== _oiTrendRenderToken) return;
   const tableHolder = document.getElementById('oiBuildupTrendTable');
   if (!d || !d.ok) {
