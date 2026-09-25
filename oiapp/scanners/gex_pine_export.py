@@ -312,7 +312,8 @@ def _overview_trade_read(regime, spot, put_wall, call_wall, live_pcv):
 
 def _market_overview_row(symbol):
     """Merge saved GEX/OI with request-time spot and put/call volume."""
-    from .spy_strategies import _compute_ta, _future_exps, _oi_rows, _compute_gex, _score_gex_walls, _five_factor_score, _pick_exp
+    from .spy_strategies import _compute_ta, _compute_gex, _score_gex_walls, _five_factor_score
+    from .gex_analysis import _latest_stamp, _saved_rows, _oi_by_stamp, _stamp_on_or_before, _prior_business_day
     ta = _compute_ta(symbol) or {}
     try:
         from ..services.market import get_spot_snapshot
@@ -320,11 +321,30 @@ def _market_overview_row(symbol):
     except Exception:
         spot_snapshot = {}
     spot = _number(spot_snapshot.get("price"), _number(ta.get("price")))
-    exps = _future_exps(symbol) or []
-    expiry, dte = _pick_exp(exps, 0, 5, 0) if exps else (None, 0)
+    # Match Saved GEX Analysis: use its latest exact chain snapshot and its
+    # prior-business-day OI comparison, rather than an independently chosen
+    # cached expiry/row set.
+    stamp = _latest_stamp(symbol)
+    all_rows = _saved_rows(symbol, stamp, "all") if stamp else []
+    expiries = sorted({str(row.get("expiration") or "")[:10] for row in all_rows if str(row.get("expiration") or "")[:10] >= date.today().isoformat()})
+    expiry = expiries[0] if expiries else None
     if not expiry or not spot:
         raise ValueError("Saved option-chain data or live spot is unavailable")
-    rows = _oi_rows(symbol, expiry) or []
+    dte = max(0, (datetime.strptime(expiry, "%Y-%m-%d").date() - date.today()).days)
+    previous_stamp = _stamp_on_or_before(symbol, _prior_business_day())
+    previous_oi = _oi_by_stamp(symbol, previous_stamp, expiry)
+    rows = []
+    for raw in _saved_rows(symbol, stamp, expiry):
+        kind = str(raw.get("type") or "").lower()
+        side = "call" if kind.startswith("c") else "put" if kind.startswith("p") else kind
+        strike = _number(raw.get("strike"))
+        current_oi = int(_number(raw.get("oi"), 0) or 0)
+        prior_oi = int(previous_oi.get((side[:1], strike), 0) or 0) if strike is not None else 0
+        item = dict(raw)
+        item["type"] = side
+        item["oi_change"] = current_oi - prior_oi
+        item["prev_oi"] = prior_oi
+        rows.append(item)
     iv_atm = _number(ta.get("iv_est"), 20.0)
     gex = _compute_gex(rows, spot, max(1, dte or 1), iv_atm) if rows else {}
     wall_strength = _score_gex_walls(rows, spot, gex, side=5) if rows else {}
