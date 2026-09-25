@@ -1083,37 +1083,46 @@ function renderOIChart(id, symbol, expiry, calls, puts, showOI, showVol, strikes
 
 let _oiTrendRenderToken = 0;
 
+function _normaliseOiBuildupMatrix(matrix) {
+  const byStrike = new Map();
+  for (const row of (matrix || [])) {
+    const strike = Number(row.strike);
+    if (!Number.isFinite(strike)) continue;
+    const values = Array.isArray(row.values) ? row.values.map(v => v == null ? 0 : Number(v) || 0) : [];
+    const saved = byStrike.get(strike);
+    if (saved) {
+      const length = Math.max(saved.values.length, values.length);
+      for (let i = 0; i < length; i++) saved.values[i] = (saved.values[i] || 0) + (values[i] || 0);
+    } else {
+      byStrike.set(strike, {strike, values});
+    }
+  }
+  return [...byStrike.values()].map(row => ({
+    ...row,
+    change: (row.values[row.values.length - 1] || 0) - (row.values[0] || 0)
+  })).sort((a, b) => a.strike - b.strike);
+}
+
 function _renderOiBuildupTable(holder, d, side) {
   const sections = [];
-  if ((side === 'both' || side === 'call') && d.call_matrix && d.call_matrix.length) {
-    sections.push({title: 'Call OI', color: '#3b82f6', matrix: d.call_matrix});
-  }
-  if ((side === 'both' || side === 'put') && d.put_matrix && d.put_matrix.length) {
-    sections.push({title: 'Put OI', color: '#ef4444', matrix: d.put_matrix});
-  }
-  if (!sections.length) {
+  if (side === 'both' || side === 'call') sections.push({title:'Call OI', color:'#3b82f6', matrix:_normaliseOiBuildupMatrix(d.call_matrix)});
+  if (side === 'both' || side === 'put') sections.push({title:'Put OI', color:'#ef4444', matrix:_normaliseOiBuildupMatrix(d.put_matrix)});
+  if (!sections.some(sec => sec.matrix.length)) {
     holder.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:8px 0">No per-strike buildup data to show for this side.</div>';
     return;
   }
-
   let html = '';
   for (const sec of sections) {
-    html += `<div style="font-size:11px;font-weight:800;color:${sec.color};margin:10px 0 4px">${sec.title} -- strikes ranked by |change| over the window</div>
-      <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:8px">
-        <thead><tr><th style="text-align:left;padding:4px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Date</th>`;
-    for (const row of sec.matrix) {
-      html += `<th style="text-align:right;padding:4px 8px;color:var(--muted);border-bottom:1px solid var(--border)">${row.strike}${row.change>=0?' (+':' ('}${row.change})</th>`;
-    }
-    html += `</tr></thead><tbody>`;
+    if (!sec.matrix.length) continue;
+    html += '<div style="font-size:11px;font-weight:800;color:'+sec.color+';margin:10px 0 4px">'+sec.title+' — strikes in ascending order; duplicate strikes combined</div><table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:8px"><thead><tr><th style="text-align:left;padding:4px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Date</th>';
+    for (const row of sec.matrix) html += '<th style="text-align:right;padding:4px 8px;color:var(--muted);border-bottom:1px solid var(--border)">'+row.strike+' ('+(row.change >= 0 ? '+' : '')+row.change+')</th>';
+    html += '</tr></thead><tbody>';
     for (let i = 0; i < d.dates.length; i++) {
-      html += `<tr><td style="padding:3px 8px;color:var(--muted)">${d.dates[i]}</td>`;
-      for (const row of sec.matrix) {
-        const v = row.values[i];
-        html += `<td style="padding:3px 8px;text-align:right">${v == null ? '—' : v.toLocaleString()}</td>`;
-      }
-      html += `</tr>`;
+      html += '<tr><td style="padding:3px 8px;color:var(--muted)">'+d.dates[i]+'</td>';
+      for (const row of sec.matrix) html += '<td style="padding:3px 8px;text-align:right">'+Number(row.values[i] || 0).toLocaleString()+'</td>';
+      html += '</tr>';
     }
-    html += `</tbody></table>`;
+    html += '</tbody></table>';
   }
   holder.innerHTML = html;
 }
@@ -1124,76 +1133,53 @@ async function _loadOiBuildupTrend() {
   const dashSym = (document.getElementById('symbol-input')?.value || currentSymbol || 'SPY').trim().toUpperCase() || 'SPY';
   if (!currentExpiration) return;
   const token = ++_oiTrendRenderToken;
-  const days = document.getElementById('oi-trend-days')?.value || 10;
+  const days = document.getElementById('oi-trend-days')?.value || 5;
   const side = document.querySelector('input[name="oi-trend-side"]:checked')?.value || 'both';
-
   try { if (window.Plotly) Plotly.purge(holder); } catch(_e) {}
-  holder.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px">Loading OI buildup trend…</div>';
-
-  const d = await api(`/api/oi_buildup_trend?symbol=${encodeURIComponent(dashSym)}&expiration=${encodeURIComponent(currentExpiration)}&days=${encodeURIComponent(days)}`).catch(e => ({ok:false, error: e.message||String(e)}));
-  if (token !== _oiTrendRenderToken) return; // a newer request superseded this one
+  holder.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px">Loading signed OI-change bubbles…</div>';
+  const d = await api('/api/oi_buildup_trend?symbol='+encodeURIComponent(dashSym)+'&expiration='+encodeURIComponent(currentExpiration)+'&days='+encodeURIComponent(days)).catch(e => ({ok:false,error:e.message||String(e)}));
+  if (token !== _oiTrendRenderToken) return;
   const tableHolder = document.getElementById('oiBuildupTrendTable');
   if (!d || !d.ok) {
-    let msg = d && d.error ? d.error : 'No buildup data available';
-    if (d && d.debug) {
-      msg += `<br/><small style="color:var(--muted);font-size:10px">Other expirations found for ${_btEsc(d.debug.sent_symbol)}: ${(d.debug.other_expirations_available_for_this_symbol||[]).join(', ') || 'none'}</small>`;
-    }
-    holder.innerHTML = `<div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--muted);font-size:12px;text-align:center;padding:10px">${msg}</div>`;
+    const msg = (d && d.error) || 'No buildup data available';
+    holder.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#ef4444;font-size:11px;padding:10px;text-align:center">'+msg+'</div>';
     if (tableHolder) tableHolder.innerHTML = '';
     return;
   }
-
-  // Render the table FIRST, independent of whether the chart below
-  // succeeds -- this is plain HTML with no charting-library dependency,
-  // so it's the reliable fallback if Plotly rendering has issues again.
   if (tableHolder) _renderOiBuildupTable(tableHolder, d, side);
-
-  const traces = [];
-  if (side === 'both' || side === 'call') {
-    traces.push({x: d.dates, y: d.total_call_oi.map(Number), type: 'scatter', mode: 'lines', name: 'Total Call OI',
-      line: {color: 'rgba(59,130,246,0.45)', width: 1.5, dash: 'dot'}});
-    if (d.top_call_buildup) {
-      traces.push({x: d.dates, y: d.top_call_buildup.oi_series.map(v => v==null ? null : Number(v)), type: 'scatter', mode: 'lines+markers',
-        connectgaps: true,
-        name: `Call ${d.top_call_buildup.strike} (top buildup: ${d.top_call_buildup.buildup >= 0 ? '+' : ''}${d.top_call_buildup.buildup})`,
-        line: {color: '#3b82f6', width: 3}});
+  const points = [];
+  let maxAbs = 1;
+  const dates = d.dates || [];
+  const addSide = (kind, matrix) => {
+    if (side !== 'both' && side !== kind) return;
+    for (const row of _normaliseOiBuildupMatrix(matrix)) {
+      for (let i = 1; i < Math.min(dates.length, row.values.length); i++) {
+        const previous = Number(row.values[i - 1] || 0), current = Number(row.values[i] || 0), change = current - previous;
+        maxAbs = Math.max(maxAbs, Math.abs(change));
+        points.push({kind, strike:row.strike, from:dates[i - 1], date:dates[i], previous, current, change});
+      }
     }
-  }
-  if (side === 'both' || side === 'put') {
-    traces.push({x: d.dates, y: d.total_put_oi.map(Number), type: 'scatter', mode: 'lines', name: 'Total Put OI',
-      line: {color: 'rgba(239,68,68,0.45)', width: 1.5, dash: 'dot'}});
-    if (d.top_put_buildup) {
-      traces.push({x: d.dates, y: d.top_put_buildup.oi_series.map(v => v==null ? null : Number(v)), type: 'scatter', mode: 'lines+markers',
-        connectgaps: true,
-        name: `Put ${d.top_put_buildup.strike} (top buildup: ${d.top_put_buildup.buildup >= 0 ? '+' : ''}${d.top_put_buildup.buildup})`,
-        line: {color: '#ef4444', width: 3}});
-    }
-  }
-
-  if (!traces.length) {
-    holder.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px">No traces to plot for this side/day combination.</div>';
-    return;
-  }
-
-  holder.innerHTML = '';
-  const chartDiv = document.createElement('div');
-  chartDiv.style.cssText = 'width:100%;height:100%';
-  holder.appendChild(chartDiv);
-  Plotly.newPlot(chartDiv, traces, {
-    ...PL,
-    title: `${d.symbol} ${d.expiration} -- OI buildup over ${d.dates.length} days`,
-    legend: {orientation: 'h', y: -0.15},
-    autosize: true,
-  }, PC).then(() => {
-    // Common Plotly gotcha: if the container's real size wasn't
-    // settled at newPlot time (flex/grid layout, tab just became
-    // visible, etc.), the SVG can render at 0x0 and never self-
-    // correct. Forcing a resize on the next frame fixes that without
-    // needing the user to resize their browser window.
-    requestAnimationFrame(() => { try { Plotly.Plots.resize(chartDiv); } catch(_e) {} });
-  }).catch(err => {
-    holder.innerHTML = `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#ef4444;font-size:11px;padding:10px;text-align:center">Plotly render failed: ${(err && err.message) || err}</div>`;
-  });
+  };
+  addSide('call', d.call_matrix);
+  addSide('put', d.put_matrix);
+  if (!window.Plotly) { holder.innerHTML='<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#ef4444">Plotly is unavailable.</div>'; return; }
+  if (!points.length) { holder.innerHTML='<div style="height:100%;display:flex;align-items:center;justify-content:center;color:var(--muted)">No consecutive OI snapshots are available.</div>'; return; }
+  const makeTrace = kind => {
+    const rows = points.filter(p => p.kind === kind);
+    return {type:'scatter',mode:'markers',name:kind === 'call' ? 'Calls' : 'Puts',
+      x:rows.map(p => p.date), y:rows.map(p => kind === 'call' ? p.strike : -p.strike),
+      customdata:rows.map(p => [p.kind,p.strike,p.from,p.date,p.change,p.previous,p.current]),
+      marker:{symbol:'circle',color:rows.map(p => p.change >= 0 ? '#3b82f6' : '#ef4444'),size:rows.map(p => Math.max(7,Math.sqrt(Math.abs(p.change)/maxAbs)*32)),opacity:.9,line:{color:'#dbeafe',width:.4}},
+      hovertemplate:'%{customdata[0]} · Strike %{customdata[1]}<br>%{customdata[2]} → %{customdata[3]}<br>ΔOI: %{customdata[4]:,.0f}<br>Prior OI: %{customdata[5]:,.0f}<br>Current OI: %{customdata[6]:,.0f}<extra></extra>'};
+  };
+  const strikes = [...new Set(points.map(p => p.strike))].sort((a,b) => a-b);
+  const sampled = strikes.length > 14 ? strikes.filter((_,i) => i % Math.ceil(strikes.length/14) === 0) : strikes;
+  Plotly.newPlot(holder, [makeTrace('call'), makeTrace('put')], {
+    ...PL, title:(d.symbol || dashSym)+' '+(d.expiration || currentExpiration)+' — day-to-day signed OI change',
+    xaxis:{title:'Snapshot date',type:'category',gridcolor:'#263243'},
+    yaxis:{title:'Strike — calls above centre / puts below',tickvals:sampled.concat(sampled.map(v => -v)),ticktext:sampled.map(v => 'Call '+v).concat(sampled.map(v => 'Put '+v)),gridcolor:'#263243',zeroline:true,zerolinecolor:'#aab6c6',zerolinewidth:2},
+    legend:{orientation:'h',y:-.2},hovermode:'closest',margin:{l:95,r:24,t:48,b:55}
+  }, PC);
 }
 
 let _oiChangeRenderToken = 0;
