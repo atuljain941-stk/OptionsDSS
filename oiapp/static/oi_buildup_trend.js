@@ -50,7 +50,7 @@
       points.slice().sort(function(a,b){return Math.abs(b.change)-Math.abs(a.change);}).map(function(p){var c=p.change>=0?"#3b82f6":"#ef4444";return '<tr><td>'+p.from+' → '+p.date+'</td><td>'+p.side+'</td><td>'+p.strike+'</td><td style="color:'+c+'">'+(p.change>=0?"+":"")+comma(p.change)+'</td><td>'+comma(p.prior)+'</td><td>'+comma(p.current)+'</td></tr>';}).join("")+'</tbody></table>';
   }
   function load() {
-    var chart=byId("oiBuildupTrendChart"),symbol=(byId("symbol-input")||{}).value||"",expiration=(byId("expiration-select")||{}).value||"",days=Math.max(2,Math.min(30,n((byId("oi-trend-days")||{}).value)||10));
+    var chart=byId("oiBuildupTrendChart"),symbol=(byId("symbol-input")||{}).value||"",expiration=(byId("expiration-select")||{}).value||"",days=Math.max(2,Math.min(30,n((byId("oi-trend-days")||{}).value)||5));
     if (!symbol || !expiration || expiration.toLowerCase()==="all") { chart.innerHTML='<div style="height:220px;display:grid;place-items:center;color:var(--muted)">Choose one symbol and a specific expiry, then Refresh.</div>'; return; }
     chart.innerHTML='<div style="height:300px;display:grid;place-items:center;color:var(--muted)">Loading saved OI changes…</div>';
     fetch("/api/oi_buildup_trend?symbol="+encodeURIComponent(symbol)+"&expiration="+encodeURIComponent(expiration)+"&days="+days,{credentials:"same-origin",cache:"no-store"})
