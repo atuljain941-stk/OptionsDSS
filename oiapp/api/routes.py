@@ -4100,9 +4100,9 @@ def api_oi_buildup_trend():
     symbol = (request.args.get("symbol") or "").upper().strip()
     expiration = (request.args.get("expiration") or "").strip()
     try:
-        days = max(2, min(30, int(request.args.get("days") or 10)))
+        days = max(2, min(30, int(request.args.get("days") or 5)))
     except ValueError:
-        days = 10
+        days = 5
     if not symbol or not expiration:
         return jsonify({"ok": False, "error": "symbol and expiration are required"}), 400
 
@@ -4142,29 +4142,47 @@ def api_oi_buildup_trend():
             for side in ("call", "put"):
                 totals[side].append(by_side[side])
 
-        def _matrix(side, top_n=40):
-            ranked = []
+        try:
+            per_side = max(1, min(50, int(request.args.get("per_side") or 12)))
+        except (TypeError, ValueError):
+            per_side = 12
+        spot_row = con.execute(
+            """SELECT AVG(COALESCE(underlying, 0)) AS spot
+               FROM options WHERE UPPER(symbol)=? AND expiration=? AND fetch_ts=?""",
+            (symbol, expiration, snapshots[-1][1]),
+        ).fetchone()
+        spot = float((spot_row["spot"] if spot_row else 0) or 0)
+
+        def _all_rows(side):
+            rows = []
             for strike, series in matrices[side].items():
                 # Missing contracts are a real zero, not a reason to omit
                 # the strike from the signed OI-change history.
                 change = series.get(dates[-1], 0) - series.get(dates[0], 0)
-                ranked.append((strike, change, series))
-            ranked.sort(key=lambda row: abs(row[1]), reverse=True)
-            return [{"strike": strike, "change": change,
-                     "values": [series.get(day, 0) for day in dates]}
-                    for strike, change, series in ranked[:top_n]]
+                rows.append({"strike": strike, "change": change,
+                             "values": [series.get(day, 0) for day in dates]})
+            return rows
+
+        def _matrix(side):
+            rows = sorted(_all_rows(side), key=lambda row: row["strike"])
+            if not rows or not spot:
+                return rows[:(per_side * 2 + 1)]
+            atm_index = min(range(len(rows)), key=lambda i: abs(rows[i]["strike"] - spot))
+            # One nearest ATM strike plus the requested number immediately
+            # below and above it (e.g. Strikes ±12 = 25 strikes).
+            return rows[max(0, atm_index - per_side):atm_index + per_side + 1]
 
         def _top(side):
-            rows = _matrix(side, 1)
+            rows = _all_rows(side)
             if not rows:
                 return None
-            row = rows[0]
+            row = max(rows, key=lambda item: abs(item["change"]))
             return {"strike": row["strike"], "buildup": row["change"],
                     "oi_series": row["values"]}
 
         return jsonify({
             "ok": True, "symbol": symbol, "expiration": expiration,
-            "dates": dates,
+            "dates": dates, "spot": spot, "per_side": per_side,
             "total_call_oi": totals["call"], "total_put_oi": totals["put"],
             "top_call_buildup": _top("call"),
             "top_put_buildup": _top("put"),
