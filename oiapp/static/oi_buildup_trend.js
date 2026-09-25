@@ -63,6 +63,9 @@
     var button=old.cloneNode(true); old.parentNode.replaceChild(button,old);
     button.addEventListener("click",load);
     document.querySelectorAll('input[name="oi-trend-side"]').forEach(function(node){node.addEventListener("change",function(){if(cached)render(cached);});});
+    // The legacy OI viewer also paints this container on load.  Render last so this
+    // day-to-day bubble matrix is the sole owner of the panel and raw-data table.
+    window.setTimeout(load, 0);
   }
   if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",boot);else boot();
 })();
