@@ -487,7 +487,7 @@
 
       <div class="card" style="padding:10px;margin-bottom:14px">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:6px">
-          <div class="card-title" style="margin:0">OI Buildup Trend <span style="font-size:10px;color:var(--muted);font-weight:400">how OI has actually accumulated over time, not just vs yesterday -- bold line = the single strike with the largest buildup over the window</span></div>
+          <div class="card-title" style="margin:0">OI Buildup Trend <span style="font-size:10px;color:var(--muted);font-weight:400">saved day-to-day signed OI change -- calls above centre, puts below; dot size = change magnitude</span></div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <label style="font-size:11px;color:var(--muted)">Days<input type="number" id="oi-trend-days" value="10" min="2" max="60" style="width:52px;margin-left:6px"/></label>
             <label style="font-size:11px;color:var(--muted)"><input type="radio" name="oi-trend-side" value="both" checked/> Both</label>
@@ -497,7 +497,7 @@
           </div>
         </div>
         <div id="oiBuildupTrendChart" style="height:340px"></div>
-        <div id="oiBuildupTrendTable" style="margin-top:10px;overflow-x:auto"></div>
+        <details style="margin-top:10px"><summary style="cursor:pointer;color:var(--muted);font-size:11px">Show raw OI-change values</summary><div id="oiBuildupTrendTable" style="margin-top:8px;overflow-x:auto"></div></details>
       </div>
 
       <!-- OI Intelligence Panel — between charts and price -->
@@ -3949,6 +3949,6 @@
     window._mtfApplyClientFilters();
   };
 </script>
-<script src="/static/oi_change_history.js"></script>
+<script src="/static/oi_buildup_trend.js"></script>
 </body>
 </html>
