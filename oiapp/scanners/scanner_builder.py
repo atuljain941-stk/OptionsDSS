@@ -11675,6 +11675,17 @@ def api_run():
 
     _ensure_tables()
     payload = request.get_json(force=True) or {}
+    # The Scanner Builder UI's saved API timeout is also the intentional
+    # end-to-end scan budget.  Previously it only affected the browser
+    # request while this worker loop retained its unrelated 120s cap.
+    try:
+        from .watchlist_manager import _get_setting
+        scan_deadline = int(payload.get("timeout_sec") or _get_setting(
+            "scanner_api_timeout_sec", str(SCAN_DEADLINE_SECONDS)
+        ) or SCAN_DEADLINE_SECONDS)
+    except Exception:
+        scan_deadline = SCAN_DEADLINE_SECONDS
+    scan_deadline = max(10, min(600, scan_deadline))
     query_text = (payload.get("query_text") or "").strip()
     benchmark = (payload.get("benchmark") or "SPY").strip().upper() or "SPY"
     watchlist_id = payload.get("watchlist_id")
@@ -11812,7 +11823,7 @@ def api_run():
         # forcibly kill a thread) but they no longer hold this response
         # hostage.
         try:
-            for fut in as_completed(futs, timeout=SCAN_DEADLINE_SECONDS):
+            for fut in as_completed(futs, timeout=scan_deadline):
                 sym = futs[fut]
                 try:
                     res, err = fut.result()
@@ -11825,7 +11836,7 @@ def api_run():
         except _cf_TimeoutError:
             done_syms = {futs[f] for f in futs if f.done()}
             timed_out_symbols = [s for s in symbols if s not in done_syms]
-            print(f"[scanner_builder] scan hit its {SCAN_DEADLINE_SECONDS}s deadline with "
+            print(f"[scanner_builder] scan hit its {scan_deadline}s deadline with "
                   f"{len(timed_out_symbols)}/{len(symbols)} symbol(s) still not done -- "
                   f"returning partial results instead of hanging. Stuck symbols: "
                   f"{timed_out_symbols[:20]}{'...' if len(timed_out_symbols) > 20 else ''}")
@@ -11837,7 +11848,7 @@ def api_run():
             # backlog of queued symbols from this timed-out request.
             cancelled = sum(1 for fut in futs if not fut.done() and fut.cancel())
             if cancelled:
-                print(f"[scanner_builder] cancelled {cancelled} queued symbol task(s) after scan deadline")
+                print(f"[scanner_builder] cancelled {cancelled} queued symbol task(s) after {scan_deadline}s scan deadline")
     finally:
         unified_scheduler.scan_finished()
 
