@@ -138,8 +138,13 @@ def _near_buildup_batch(con, symbols, min_pct, min_oi, max_distance_pct, lookbac
             continue
         old_oi = previous.get(symbol, {}).get(expiry, {}).get("oi", {})
         for (side, strike), now in chain["oi"].items():
-            before = old_oi.get((side, strike), 0.0)
-            if now <= before:
+            # A strike absent from the prior saved chain is not evidence of
+            # buildup. Treating it as zero fabricated a +100% "change" for
+            # newly captured/partial chain rows.
+            if (side, strike) not in old_oi:
+                continue
+            before = old_oi[(side, strike)]
+            if before <= 0 or now <= before:
                 continue
             distance_pct = abs(strike - spot) / spot * 100.0
             if distance_pct > max_distance_pct:
@@ -196,7 +201,7 @@ body{max-width:1500px;margin:0 auto;padding:18px}.toolbar{display:flex;gap:10px;
 <div class="card" style="padding:14px"><div class="toolbar">
 <label>Watchlist<select id="watchlist"></select></label>
 <label>Minimum OI buildup %<input id="minPct" type="number" value="20" min="0" step="5"></label>
-<label>Minimum current OI<input id="minOi" type="number" value="0" min="0" step="1000"></label>
+<label>Minimum current OI<input id="minOi" type="number" value="1000" min="0" step="1000"></label>
 <label>Within spot %<input id="distancePct" type="number" value="2" min="0.05" step="0.25"></label>
 <label>Lookback days<input id="lookbackDays" type="number" value="5" min="1" max="30"></label>
 <button class="btn btn-primary" id="run">Run scanner</button></div>
