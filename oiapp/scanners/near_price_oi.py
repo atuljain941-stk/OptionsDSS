@@ -56,88 +56,106 @@ def _symbols(con, watchlist_id):
     return [str(row["symbol"]) for row in rows if row["symbol"]]
 
 
-def _near_buildup_for_symbol(con, symbol, min_pct, max_distance_pct, lookback_days):
-    latest = con.execute(
-        """SELECT date, MAX(fetch_ts) AS stamp
-           FROM options WHERE UPPER(symbol)=? GROUP BY date ORDER BY date DESC LIMIT 1""",
-        (symbol,),
-    ).fetchone()
-    if not latest or not latest["date"] or not latest["stamp"]:
+def _near_buildup_batch(con, symbols, min_pct, max_distance_pct, lookback_days):
+    """One batched read for a whole watchlist; no per-symbol database loop."""
+    if not symbols:
         return []
-    latest_date, latest_stamp = str(latest["date"])[:10], latest["stamp"]
-    try:
-        target = (date.fromisoformat(latest_date) - timedelta(days=lookback_days)).isoformat()
-    except ValueError:
-        return []
-    prior = con.execute(
-        """SELECT date, MAX(fetch_ts) AS stamp
-           FROM options WHERE UPPER(symbol)=? AND date<=?
-           GROUP BY date ORDER BY date DESC LIMIT 1""",
-        (symbol, target),
-    ).fetchone()
-    if not prior or not prior["stamp"] or str(prior["date"])[:10] == latest_date:
+    placeholders = ",".join("?" for _ in symbols)
+    # Gather each symbol's dated snapshot stamps once, then choose the latest
+    # and the closest saved snapshot at or before the requested lookback.
+    stamps = con.execute(
+        f"""SELECT UPPER(symbol) AS symbol, date, MAX(fetch_ts) AS stamp
+            FROM options WHERE UPPER(symbol) IN ({placeholders})
+            GROUP BY UPPER(symbol), date""",
+        symbols,
+    ).fetchall()
+    by_symbol = {}
+    for row in stamps:
+        if row["date"] and row["stamp"]:
+            by_symbol.setdefault(str(row["symbol"]), []).append((str(row["date"])[:10], row["stamp"]))
+    selected = {}
+    for symbol, rows in by_symbol.items():
+        rows.sort()
+        latest_date, latest_stamp = rows[-1]
+        try:
+            target = (date.fromisoformat(latest_date) - timedelta(days=lookback_days)).isoformat()
+        except ValueError:
+            continue
+        older = [item for item in rows if item[0] <= target]
+        if older:
+            selected[symbol] = (latest_date, latest_stamp, older[-1][0], older[-1][1])
+    if not selected:
         return []
 
-    expiries = con.execute(
-        """SELECT DISTINCT expiration FROM options
-           WHERE UPPER(symbol)=? AND fetch_ts=? AND expiration>=?
-           ORDER BY expiration""",
-        (symbol, latest_stamp, latest_date),
+    all_stamps = list({item[1] for item in selected.values()} | {item[3] for item in selected.values()})
+    stamp_placeholders = ",".join("?" for _ in all_stamps)
+    # This is the only chain-row read: retrieve both chosen snapshots for all
+    # selected symbols and discard rows that do not match that symbol's stamp.
+    rows = con.execute(
+        f"""SELECT UPPER(symbol) AS symbol, expiration, LOWER(type) AS side, strike,
+                   COALESCE(oi,0) AS oi, COALESCE(underlying,0) AS underlying, fetch_ts
+            FROM options
+            WHERE UPPER(symbol) IN ({placeholders}) AND fetch_ts IN ({stamp_placeholders})""",
+        [*symbols, *all_stamps],
     ).fetchall()
-    if not expiries:
-        return []
-    expiry = str(expiries[0]["expiration"])[:10]
-    spot_row = con.execute(
-        """SELECT AVG(COALESCE(underlying,0)) AS spot FROM options
-           WHERE UPPER(symbol)=? AND expiration=? AND fetch_ts=?""",
-        (symbol, expiry, latest_stamp),
-    ).fetchone()
-    spot = _number(spot_row["spot"] if spot_row else 0)
-    if spot <= 0:
-        return []
 
-    current = con.execute(
-        """SELECT LOWER(type) AS side, strike, SUM(COALESCE(oi,0)) AS oi
-           FROM options WHERE UPPER(symbol)=? AND expiration=? AND fetch_ts=?
-           GROUP BY LOWER(type), strike""",
-        (symbol, expiry, latest_stamp),
-    ).fetchall()
-    previous = {
-        (str(row["side"]), _number(row["strike"])): _number(row["oi"])
-        for row in con.execute(
-            """SELECT LOWER(type) AS side, strike, SUM(COALESCE(oi,0)) AS oi
-               FROM options WHERE UPPER(symbol)=? AND expiration=? AND fetch_ts=?
-               GROUP BY LOWER(type), strike""",
-            (symbol, expiry, prior["stamp"]),
-        ).fetchall()
-    }
+    current, previous = {}, {}
+    for row in rows:
+        symbol = str(row["symbol"])
+        choice = selected.get(symbol)
+        if not choice:
+            continue
+        latest_date, latest_stamp, prior_date, prior_stamp = choice
+        stamp = row["fetch_ts"]
+        if stamp not in (latest_stamp, prior_stamp):
+            continue
+        expiry = str(row["expiration"] or "")[:10]
+        if not expiry:
+            continue
+        target_map = current if stamp == latest_stamp else previous
+        bucket = target_map.setdefault(symbol, {}).setdefault(expiry, {"spot": [], "oi": {}})
+        if stamp == latest_stamp and _number(row["underlying"]) > 0:
+            bucket["spot"].append(_number(row["underlying"]))
+        side = str(row["side"] or "")
+        strike = _number(row["strike"])
+        if side in ("call", "put") and strike > 0:
+            key = (side, strike)
+            bucket["oi"][key] = bucket["oi"].get(key, 0.0) + _number(row["oi"])
+
     results = []
-    for row in current:
-        side = str(row["side"] or "").lower()
-        if side not in ("call", "put"):
+    for symbol, (latest_date, _latest_stamp, prior_date, _prior_stamp) in selected.items():
+        chains = current.get(symbol, {})
+        # Same near-term-expiry focus as the OI/GEX views; avoid mixing
+        # incompatible expiries at a strike.
+        valid_expiries = sorted(expiry for expiry in chains if expiry >= latest_date)
+        if not valid_expiries:
             continue
-        strike, current_oi = _number(row["strike"]), _number(row["oi"])
-        before = previous.get((side, strike), 0.0)
-        if strike <= 0 or current_oi <= before:
+        expiry = valid_expiries[0]
+        chain = chains[expiry]
+        spot_values = chain["spot"]
+        spot = sum(spot_values) / len(spot_values) if spot_values else 0.0
+        if spot <= 0:
             continue
-        distance_pct = abs(strike - spot) / spot * 100.0
-        if distance_pct > max_distance_pct:
-            continue
-        change = current_oi - before
-        # A newly listed strike with zero prior OI is a valid buildup; report
-        # it as 100% so it can pass a percentage-based scanner threshold.
-        change_pct = 100.0 if before <= 0 else change / before * 100.0
-        if change_pct < min_pct:
-            continue
-        results.append({
-            "symbol": symbol, "side": side, "expiry": expiry, "spot": round(spot, 2),
-            "strike": strike, "distance_pct": round(distance_pct, 2),
-            "oi": int(current_oi), "prior_oi": int(before), "change": int(change),
-            "change_pct": round(change_pct, 2), "latest_date": latest_date,
-            "prior_date": str(prior["date"])[:10],
-        })
+        old_oi = previous.get(symbol, {}).get(expiry, {}).get("oi", {})
+        for (side, strike), now in chain["oi"].items():
+            before = old_oi.get((side, strike), 0.0)
+            if now <= before:
+                continue
+            distance_pct = abs(strike - spot) / spot * 100.0
+            if distance_pct > max_distance_pct:
+                continue
+            change = now - before
+            change_pct = 100.0 if before <= 0 else change / before * 100.0
+            if change_pct < min_pct:
+                continue
+            results.append({
+                "symbol": symbol, "side": side, "expiry": expiry, "spot": round(spot, 2),
+                "strike": strike, "distance_pct": round(distance_pct, 2),
+                "oi": int(now), "prior_oi": int(before), "change": int(change),
+                "change_pct": round(change_pct, 2), "latest_date": latest_date,
+                "prior_date": prior_date,
+            })
     return results
-
 
 @near_price_oi_bp.route("/")
 def page():
@@ -160,12 +178,7 @@ def api_run():
         return jsonify({"ok": False, "error": "Invalid scanner controls."}), 400
     with _connect() as con:
         symbols = _symbols(con, watchlist_id)
-        rows = []
-        for symbol in symbols:
-            try:
-                rows.extend(_near_buildup_for_symbol(con, symbol, min_pct, distance_pct, lookback_days))
-            except Exception:
-                continue
+        rows = _near_buildup_batch(con, symbols, min_pct, distance_pct, lookback_days)
     rows.sort(key=lambda row: (row["distance_pct"], -row["change_pct"], -row["change"]))
     return jsonify({"ok": True, "count": len(rows), "symbols_scanned": len(symbols),
                     "results": rows, "settings": {"min_pct": min_pct,
