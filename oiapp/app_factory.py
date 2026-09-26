@@ -280,6 +280,12 @@ def create_app():
     except Exception as e:
         print(f"[app] WARN: scanner_builder failed: {e}")
     try:
+        from .scanners.near_price_oi import near_price_oi_bp
+        app.register_blueprint(near_price_oi_bp)
+        print("[app] Near-price OI buildup scanner registered at /near-price-oi")
+    except Exception as e:
+        print(f"[app] WARN: near_price_oi failed: {e}")
+    try:
         from .scanners.backtest import backtest_bp
         app.register_blueprint(backtest_bp)
         print("[app] Backtest API registered at /backtest")
