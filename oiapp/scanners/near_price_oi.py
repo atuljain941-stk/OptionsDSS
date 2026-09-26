@@ -56,7 +56,7 @@ def _symbols(con, watchlist_id):
     return [str(row["symbol"]) for row in rows if row["symbol"]]
 
 
-def _near_buildup_batch(con, symbols, min_pct, max_distance_pct, lookback_days):
+def _near_buildup_batch(con, symbols, min_pct, min_oi, max_distance_pct, lookback_days):
     """One batched read for a whole watchlist; no per-symbol database loop."""
     if not symbols:
         return []
@@ -146,7 +146,7 @@ def _near_buildup_batch(con, symbols, min_pct, max_distance_pct, lookback_days):
                 continue
             change = now - before
             change_pct = 100.0 if before <= 0 else change / before * 100.0
-            if change_pct < min_pct:
+            if change_pct < min_pct or now < min_oi:
                 continue
             results.append({
                 "symbol": symbol, "side": side, "expiry": expiry, "spot": round(spot, 2),
@@ -172,16 +172,17 @@ def api_run():
     try:
         watchlist_id = int(request.args.get("watchlist_id") or 0) or None
         min_pct = max(0.0, min(10000.0, float(request.args.get("min_pct") or 20)))
+        min_oi = max(0.0, min(1000000000.0, float(request.args.get("min_oi") or 0)))
         distance_pct = max(0.05, min(25.0, float(request.args.get("distance_pct") or 2)))
         lookback_days = max(1, min(30, int(request.args.get("lookback_days") or 5)))
     except ValueError:
         return jsonify({"ok": False, "error": "Invalid scanner controls."}), 400
     with _connect() as con:
         symbols = _symbols(con, watchlist_id)
-        rows = _near_buildup_batch(con, symbols, min_pct, distance_pct, lookback_days)
+        rows = _near_buildup_batch(con, symbols, min_pct, min_oi, distance_pct, lookback_days)
     rows.sort(key=lambda row: (row["distance_pct"], -row["change_pct"], -row["change"]))
     return jsonify({"ok": True, "count": len(rows), "symbols_scanned": len(symbols),
-                    "results": rows, "settings": {"min_pct": min_pct,
+                    "results": rows, "settings": {"min_pct": min_pct, "min_oi": min_oi,
                     "distance_pct": distance_pct, "lookback_days": lookback_days}})
 
 
@@ -195,13 +196,17 @@ body{max-width:1500px;margin:0 auto;padding:18px}.toolbar{display:flex;gap:10px;
 <div class="card" style="padding:14px"><div class="toolbar">
 <label>Watchlist<select id="watchlist"></select></label>
 <label>Minimum OI buildup %<input id="minPct" type="number" value="20" min="0" step="5"></label>
+<label>Minimum current OI<input id="minOi" type="number" value="0" min="0" step="1000"></label>
 <label>Within spot %<input id="distancePct" type="number" value="2" min="0.05" step="0.25"></label>
 <label>Lookback days<input id="lookbackDays" type="number" value="5" min="1" max="30"></label>
 <button class="btn btn-primary" id="run">Run scanner</button></div>
 <div id="status" class="muted">Load a watchlist and run the scanner.</div></div>
-<div class="card" style="padding:14px;margin-top:14px;overflow:auto"><table><thead><tr><th>Symbol</th><th>Side</th><th>Expiry</th><th>Spot</th><th>Strike</th><th>Distance</th><th>OI Δ</th><th>OI Δ%</th><th>Prior OI</th><th>Current OI</th><th>Window</th></tr></thead><tbody id="rows"><tr><td colspan="11" class="muted">No scan run yet.</td></tr></tbody></table></div>
+<div class="card" style="padding:14px;margin-top:14px;overflow:auto"><div class="toolbar" style="margin-top:0"><label>Show side<select id="sideFilter"><option value="both">Both calls and puts</option><option value="call">Calls only</option><option value="put">Puts only</option></select></label></div><table><thead><tr><th data-sort="symbol">Symbol ↕</th><th data-sort="side">Side ↕</th><th data-sort="expiry">Expiry ↕</th><th>Spot</th><th>Strike</th><th>Distance</th><th>OI Δ</th><th>OI Δ%</th><th>Prior OI</th><th>Current OI</th><th>Window</th></tr></thead><tbody id="rows"><tr><td colspan="11" class="muted">No scan run yet.</td></tr></tbody></table></div>
 <script>
 const $=id=>document.getElementById(id), n=v=>Number(v||0).toLocaleString();
+let scanRows=[],sortKey='symbol',sortAsc=true;
+function renderRows(){const side=$('sideFilter').value;const rows=scanRows.filter(r=>side==='both'||r.side===side).sort((a,b)=>{let av=a[sortKey],bv=b[sortKey];if(sortKey==='symbol'||sortKey==='side'||sortKey==='expiry'){av=String(av);bv=String(bv);return (sortAsc?1:-1)*av.localeCompare(bv)}return (sortAsc?1:-1)*(Number(av)-Number(bv))});$('rows').innerHTML=rows.length?rows.map(r=>'<tr><td>'+r.symbol+'</td><td class="'+r.side+'">'+r.side.toUpperCase()+'</td><td>'+r.expiry+'</td><td>'+r.spot.toFixed(2)+'</td><td>'+r.strike.toFixed(2)+'</td><td>'+r.distance_pct.toFixed(2)+'%</td><td class="positive">+'+n(r.change)+'</td><td class="positive">+'+r.change_pct.toFixed(1)+'%</td><td>'+n(r.prior_oi)+'</td><td>'+n(r.oi)+'</td><td>'+r.prior_date+' → '+r.latest_date+'</td></tr>').join(''):'<tr><td colspan="11" class="muted">No matching '+(side==='both'?'call or put':side)+' buildup to display.</td></tr>'}
 async function loadWatchlists(){const d=await fetch('/near-price-oi/api/watchlists').then(r=>r.json());$('watchlist').innerHTML=(d.watchlists||[]).map(x=>'<option value="'+x.id+'" '+(x.is_default?'selected':'')+'>'+x.name+' ('+x.symbols+')</option>').join('')||'<option value="">All available symbols</option>'}
-$('run').onclick=async()=>{const q=new URLSearchParams({watchlist_id:$('watchlist').value,min_pct:$('minPct').value,distance_pct:$('distancePct').value,lookback_days:$('lookbackDays').value});$('status').textContent='Scanning saved OI…';const d=await fetch('/near-price-oi/api/run?'+q).then(r=>r.json());if(!d.ok){$('status').textContent=d.error||'Scanner failed.';return}$('status').textContent=d.count+' candidates from '+d.symbols_scanned+' symbols. Minimum +'+d.settings.min_pct+'% OI build within '+d.settings.distance_pct+'% of saved spot.';$('rows').innerHTML=d.results.length?d.results.map(r=>'<tr><td>'+r.symbol+'</td><td class="'+r.side+'">'+r.side.toUpperCase()+'</td><td>'+r.expiry+'</td><td>'+r.spot.toFixed(2)+'</td><td>'+r.strike.toFixed(2)+'</td><td>'+r.distance_pct.toFixed(2)+'%</td><td class="positive">+'+n(r.change)+'</td><td class="positive">+'+r.change_pct.toFixed(1)+'%</td><td>'+n(r.prior_oi)+'</td><td>'+n(r.oi)+'</td><td>'+r.prior_date+' → '+r.latest_date+'</td></tr>').join(''):'<tr><td colspan="11" class="muted">No call or put buildup met these proximity and percentage thresholds.</td></tr>'};loadWatchlists();
+$('run').onclick=async()=>{const q=new URLSearchParams({watchlist_id:$('watchlist').value,min_pct:$('minPct').value,min_oi:$('minOi').value,distance_pct:$('distancePct').value,lookback_days:$('lookbackDays').value});$('status').textContent='Scanning saved OI…';const d=await fetch('/near-price-oi/api/run?'+q).then(r=>r.json());if(!d.ok){$('status').textContent=d.error||'Scanner failed.';return}scanRows=d.results||[];$('status').textContent=d.count+' candidates from '+d.symbols_scanned+' symbols. Minimum +'+d.settings.min_pct+'% OI build, current OI ≥ '+n(d.settings.min_oi)+', within '+d.settings.distance_pct+'% of saved spot.';renderRows()};
+$('sideFilter').onchange=renderRows;document.querySelectorAll('th[data-sort]').forEach(th=>th.onclick=()=>{const key=th.dataset.sort;sortAsc=key===sortKey?!sortAsc:true;sortKey=key;renderRows()});loadWatchlists();
 </script></body></html>"""
