@@ -506,13 +506,17 @@ def gex_market_overview():
     return render_template_string(_MARKET_OVERVIEW_TEMPLATE)
 
 
-_MARKET_OVERVIEW_TEMPLATE = """<!doctype html>
-<title>GEX Market Overview</title>
-<style>
-body{background:#0b1120;color:#e5e7eb;font:14px system-ui;margin:24px}.top{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.controls{display:flex;gap:6px}.controls button{background:#1f2937}.controls button.active{background:#2563eb}.grid{display:grid;grid-template-columns:repeat(3,minmax(320px,1fr));gap:16px;margin-top:18px}.card{background:#111827;border:1px solid #263349;border-radius:10px;padding:16px}.good{color:#60a5fa}.bad{color:#f87171}.muted{color:#9ca3af}.metric{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid #1f2937}button{background:#2563eb;color:white;border:0;border-radius:6px;padding:9px 14px;cursor:pointer}.gamma{width:100%;height:260px;margin-top:14px;background:#0b1018;border-radius:7px}.axis{stroke:#334155;stroke-width:1}.spot{stroke:#60a5fa;stroke-width:2;stroke-dasharray:4 3}.label{fill:#94a3b8;font-size:10px}.chart-title{fill:#e5e7eb;font-size:12px;font-weight:600}.flow{margin-top:12px;padding:10px;border-left:3px solid #a78bfa;background:#121827;border-radius:5px}.flow p{margin:6px 0}
-</style>
-<div class=top><h2>GEX Market Overview</h2><button id=refresh>Refresh live view</button><a id=apiDebug target=_blank href="/gex/market-overview?format=json" class=muted>Open API debug</a><label class=muted>Auto refresh <select id=interval><option value=0>Off</option><option value=60>1 minute</option><option value=300>5 minutes</option><option value=900>15 minutes</option></select></label><div class=controls><button data-mode=net class=active>Net gamma</button><button data-mode=absolute>Absolute gamma</button><button data-mode=split>Put / call gamma</button></div><span class=muted id=status>Live 0DTE GEX + tomorrow-expiry flow</span></div><p id=diagnostic class=muted>Diagnostics v20260930.4: page loaded; waiting for browser script.</p><div id=grid class=grid><p class=muted>Loading GEX cards…</p></div>
-<script>
+@gex_pine_bp.route("/market-overview.js")
+def gex_market_overview_script():
+    """Same-origin renderer; avoids inline-script CSP restrictions."""
+    return Response(
+        _MARKET_OVERVIEW_SCRIPT,
+        mimetype="application/javascript",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+_MARKET_OVERVIEW_SCRIPT = r"""
 var overviewRows=[],mode='net',grid=document.getElementById('grid'),statusEl=document.getElementById('status'),diagnosticEl=document.getElementById('diagnostic'),refreshButton=document.getElementById('refresh'),intervalSelect=document.getElementById('interval');
 function diagnostic(message){if(diagnosticEl)diagnosticEl.textContent='Diagnostics v20260930.4: '+message}
 window.addEventListener('error',function(e){diagnostic('Browser error — '+(e.message||'unknown error'))});
@@ -523,5 +527,14 @@ function levels(items,side){return(items||[]).map(function(x){return '$'+n(x.str
 function tomorrow(x){var f=x.tomorrow_flow||{};if(!f.available)return '<div class=flow><b>Tomorrow view</b><p class=muted>'+((f.error)||'Tomorrow expiry unavailable.')+'</p></div>';return '<div class=flow><b>Tomorrow view — '+f.expiry+' (today\'s volume)</b><p>'+f.commentary+'</p><p class=muted>Top calls: '+levels(f.top_calls,'call')+'<br>Top puts: '+levels(f.top_puts,'put')+'<br>Tomorrow-expiry P/C volume: '+n(f.put_call_volume_ratio)+'</p></div>'}
 function card(x){var l=x.live_volume||{},s=x.saved_volume||{},g=x.gamma_totals||{},dc=(l.call_volume||0)-(s.call_volume||0),dp=(l.put_volume||0)-(s.put_volume||0),klass=(x.regime||'').toLowerCase().includes('positive')?'good':'bad';return '<section class=card><h2>'+x.symbol+' <small class=muted>'+x.expiry+' • '+x.dte+' DTE</small></h2><p class=muted>Chain: '+x.chain_source+'</p>'+row('Regime',x.regime,klass)+row('Live spot',n(x.spot))+row('Price location',x.location)+row('Net GEX',n(x.net_gex))+row('Gamma flip',n(x.gamma_flip))+row('Balance pin',n(x.pin))+row('Max pain',n(x.max_pain))+row('Put / call wall',n(x.put_wall)+' / '+n(x.call_wall))+row('Live call / put volume',n(l.call_volume)+' / '+n(l.put_volume))+row('Live put/call volume',n(x.live_pcv))+row('Chart call / put gamma',n(g.call)+' / '+n(g.put))+row('Volume vs saved','C '+(dc>=0?'+':'')+n(dc)+' • P '+(dp>=0?'+':'')+n(dp))+'<p><b>Read:</b> '+x.trade_read+'</p>'+tomorrow(x)+gammaChart(x)+'</section>'}
 function draw(){grid.innerHTML=overviewRows.map(card).join('')||'<p>No GEX data is available.</p>'}document.querySelectorAll('[data-mode]').forEach(function(b){b.onclick=function(){mode=b.dataset.mode;document.querySelectorAll('[data-mode]').forEach(function(x){x.classList.toggle('active',x===b)});draw()}});async function load(){statusEl.textContent='Loading live 0DTE GEX and tomorrow-expiry volume…';diagnostic('requesting /gex/market-overview?format=json');try{var r=await fetch('/gex/market-overview?format=json',{cache:'no-store'}),raw=await r.text();if(!r.ok)throw new Error('HTTP '+r.status+': '+raw.slice(0,180));var d=JSON.parse(raw);overviewRows=d.results||[];draw();var apiErrors=(d.errors||[]).map(function(e){return e.symbol+': '+e.error}).join(' | ');statusEl.textContent='Updated '+d.updated+(apiErrors?' • '+apiErrors:'');diagnostic('API responded: '+overviewRows.length+' card(s)'+(apiErrors?'; errors: '+apiErrors:'; no API errors.'))}catch(e){statusEl.textContent='Could not load overview: '+e.message;diagnostic('API request failed — '+e.message)}}var refreshTimer=null;function setRefreshInterval(){if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}var seconds=Number(intervalSelect.value||0);if(seconds)refreshTimer=setInterval(load,seconds*1000)}intervalSelect.onchange=setRefreshInterval;window.addEventListener('pagehide',function(){if(refreshTimer)clearInterval(refreshTimer)});refreshButton.onclick=load;load();
-</script>"""
+"""
+
+
+_MARKET_OVERVIEW_TEMPLATE = """<!doctype html>
+<title>GEX Market Overview</title>
+<style>
+body{background:#0b1120;color:#e5e7eb;font:14px system-ui;margin:24px}.top{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.controls{display:flex;gap:6px}.controls button{background:#1f2937}.controls button.active{background:#2563eb}.grid{display:grid;grid-template-columns:repeat(3,minmax(320px,1fr));gap:16px;margin-top:18px}.card{background:#111827;border:1px solid #263349;border-radius:10px;padding:16px}.good{color:#60a5fa}.bad{color:#f87171}.muted{color:#9ca3af}.metric{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid #1f2937}button{background:#2563eb;color:white;border:0;border-radius:6px;padding:9px 14px;cursor:pointer}.gamma{width:100%;height:260px;margin-top:14px;background:#0b1018;border-radius:7px}.axis{stroke:#334155;stroke-width:1}.spot{stroke:#60a5fa;stroke-width:2;stroke-dasharray:4 3}.label{fill:#94a3b8;font-size:10px}.chart-title{fill:#e5e7eb;font-size:12px;font-weight:600}.flow{margin-top:12px;padding:10px;border-left:3px solid #a78bfa;background:#121827;border-radius:5px}.flow p{margin:6px 0}
+</style>
+<div class=top><h2>GEX Market Overview</h2><button id=refresh>Refresh live view</button><a id=apiDebug target=_blank href="/gex/market-overview?format=json" class=muted>Open API debug</a><label class=muted>Auto refresh <select id=interval><option value=0>Off</option><option value=60>1 minute</option><option value=300>5 minutes</option><option value=900>15 minutes</option></select></label><div class=controls><button data-mode=net class=active>Net gamma</button><button data-mode=absolute>Absolute gamma</button><button data-mode=split>Put / call gamma</button></div><span class=muted id=status>Live 0DTE GEX + tomorrow-expiry flow</span></div><p id=diagnostic class=muted>Diagnostics v20260930.4: page loaded; waiting for browser script.</p><div id=grid class=grid><p class=muted>Loading GEX cards…</p></div>
+<script src="/gex/market-overview.js?v=20260930.5"></script>"""
 
