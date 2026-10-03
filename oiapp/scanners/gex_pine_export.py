@@ -390,6 +390,84 @@ def _volume_flow_summary(symbol, expiry, spot, now_et):
     }
 
 
+def _norm_cdf(value):
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def _bs_option_value(spot, strike, years, iv_pct, side):
+    """Simple European option estimate used only for the Theta Clock model."""
+    if not spot or not strike or years <= 0 or iv_pct <= 0:
+        return 0.0
+    vol = iv_pct / 100.0
+    root_t = math.sqrt(years)
+    d1 = (math.log(spot / strike) + 0.5 * vol * vol * years) / max(vol * root_t, 1e-12)
+    d2 = d1 - vol * root_t
+    if side == "call":
+        return max(0.0, spot * _norm_cdf(d1) - strike * _norm_cdf(d2))
+    return max(0.0, strike * _norm_cdf(-d2) - spot * _norm_cdf(-d1))
+
+
+def _theta_clock(rows, spot, dte, now_et, net_gex, pin, put_wall, call_wall):
+    """0DTE time-risk context. It models remaining time value; it is not a dealer inventory feed."""
+    if dte != 0:
+        return {"available": False, "note": "Theta Clock is shown only for the current 0DTE expiry."}
+
+    session_open = 9 * 60 + 30
+    session_close = 16 * 60
+    clock_minutes = now_et.hour * 60 + now_et.minute
+    remaining = max(0, min(390, session_close - max(session_open, clock_minutes)))
+    elapsed = max(0, min(390, clock_minutes - session_open))
+    if remaining <= 0:
+        return {"available": False, "note": "Regular session is closed; no 0DTE time remains."}
+
+    strikes = sorted({_number(row.get("strike")) for row in rows if _number(row.get("strike")) is not None})
+    if not strikes:
+        return {"available": False, "note": "No listed strikes are available for the Theta Clock."}
+    atm = min(strikes, key=lambda strike: abs(strike - spot))
+    atm_rows = [row for row in rows if _number(row.get("strike")) == atm and row.get("type") in {"call", "put"}]
+    ivs = []
+    for row in atm_rows:
+        value = _number(row.get("iv"))
+        if value and value > 0:
+            ivs.append(value * 100.0 if value <= 3 else value)
+    iv_pct = sum(ivs) / len(ivs) if ivs else 20.0
+    years_left = remaining / (252.0 * 390.0)
+    full_session_years = 1.0 / 252.0
+    call_iv = next((_number(row.get("iv")) for row in atm_rows if row.get("type") == "call"), None)
+    put_iv = next((_number(row.get("iv")) for row in atm_rows if row.get("type") == "put"), None)
+    call_iv = (call_iv * 100.0 if call_iv and call_iv <= 3 else call_iv) or iv_pct
+    put_iv = (put_iv * 100.0 if put_iv and put_iv <= 3 else put_iv) or iv_pct
+    live_straddle_model = _bs_option_value(spot, atm, years_left, call_iv, "call") + _bs_option_value(spot, atm, years_left, put_iv, "put")
+    open_straddle_model = _bs_option_value(spot, atm, full_session_years, call_iv, "call") + _bs_option_value(spot, atm, full_session_years, put_iv, "put")
+    daily_em = spot * (iv_pct / 100.0) / math.sqrt(252.0)
+    remaining_em = spot * (iv_pct / 100.0) * math.sqrt(years_left)
+    positive_gamma = (net_gex or 0) > 0
+    inside_walls = bool(put_wall and call_wall and put_wall <= spot <= call_wall)
+    if positive_gamma and inside_walls:
+        posture = "Range/pin tendency: long premium needs a confirmed break and acceptance beyond a wall; time decay is working against a stalled option buyer."
+    elif not positive_gamma:
+        posture = "Expansion risk: negative gamma can amplify a move; use the remaining expected move and wall break/hold as the directional risk map."
+    else:
+        posture = "Mixed structure: use wall acceptance and live volume before choosing long or short premium."
+    def distance(level):
+        if level is None:
+            return None
+        dollars = level - spot
+        return {"dollars": round(dollars, 2), "remaining_em": round(dollars / max(remaining_em, 0.01), 2)}
+    return {
+        "available": True, "minutes_remaining": remaining, "minutes_elapsed": elapsed,
+        "atm_strike": atm, "atm_iv_pct": round(iv_pct, 2),
+        "daily_expected_move": round(daily_em, 2), "remaining_expected_move": round(remaining_em, 2),
+        "half_shelves": {"lower": round(spot - 0.5 * daily_em, 2), "upper": round(spot + 0.5 * daily_em, 2)},
+        "model_atm_straddle": round(live_straddle_model, 2),
+        "model_open_straddle": round(open_straddle_model, 2),
+        "model_time_value_spent": round(max(0.0, open_straddle_model - live_straddle_model), 2),
+        "pin_distance": distance(pin), "put_wall_distance": distance(put_wall), "call_wall_distance": distance(call_wall),
+        "posture": posture,
+        "note": "ATM straddle and decay are Black-Scholes time-value estimates using current IV, not historical traded premiums or confirmed dealer hedges.",
+    }
+
+
 def _market_overview_row(symbol):
     """Saved GEX/OI plus request-time 0DTE chain and tomorrow-expiry volume."""
     from .spy_strategies import _compute_ta, _compute_gex, _score_gex_walls, _five_factor_score, _bs_gamma
@@ -487,6 +565,7 @@ def _market_overview_row(symbol):
         "gamma_by_strike": gamma_by_strike, "gamma_totals": gamma_totals,
         "live_volume": live, "saved_volume": saved, "live_pcv": live_pcv,
         "tomorrow_flow": tomorrow_flow,
+        "theta_clock": _theta_clock(rows, spot, dte, now_et, _number(gex.get("total_gex"), 0), _number(gex.get("pin_strike")), put_wall, call_wall),
         "trade_read": _overview_trade_read(regime, spot, put_wall, call_wall, live_pcv),
     }
 
@@ -525,7 +604,8 @@ diagnostic('browser script started; requesting API…');var n=function(v){return
 function gammaChart(x){var data=x.gamma_by_strike||[];if(!data.length)return '<p class=muted>No gamma data for this expiry.</p>';var firstStrike=data[0].strike,lastStrike=data[data.length-1].strike,spotPct=Math.max(2,Math.min(98,(x.spot-firstStrike)/(lastStrike-firstStrike||1)*100));var values=[];data.forEach(function(d){if(mode==='net')values.push(d.call-d.put);else if(mode==='absolute')values.push(d.call+d.put);else{values.push(d.call);values.push(-d.put)}});var scale=Math.max.apply(null,values.map(Math.abs))||1,split=mode!=='absolute',zero=split?50:92,html='<div class="gamma"><b class="gamma-title">'+({net:'Net gamma exposure',absolute:'Absolute gamma exposure',split:'Call vs put gamma exposure'}[mode])+'</b>';if(split)html+='<i class="gamma-zero" style="top:50%"></i>';data.forEach(function(d,i){var step=100/data.length,left=i*step+step*.14,width=Math.max(.55,step*(mode==='split'?.31:.68));function bar(value,color,shift){var height=Math.max(value?1:0,Math.abs(value)/scale*44),top=value>=0?zero-height:zero;return '<span class="gamma-bar" title="'+x.symbol+' $'+d.strike+' gamma: '+n(value)+'" style="left:'+(left+(shift||0))+'%;width:'+width+'%;top:'+top+'%;height:'+height+'%;background:'+color+'"></span>'}if(mode==='net'){var net=d.call-d.put;html+=bar(net,net>=0?'#5790e8':'#f0646b',0)}else if(mode==='absolute'){html+=bar(d.call+d.put,'#5790e8',0)}else{html+=bar(d.call,'#5790e8',0)+bar(-d.put,'#f0646b',width+step*.08)}});html+='<i class="gamma-spotline" style="left:'+spotPct+'%"></i><small class="gamma-label left">'+n(firstStrike)+'</small><small class="gamma-label right">'+n(lastStrike)+'</small><small class="gamma-label spot" style="left:'+spotPct+'%">Spot '+n(x.spot)+'</small></div>';return html}
 function levels(items,side){return(items||[]).map(function(x){return '$'+n(x.strike)+' ('+n(x[side+'_volume'])+')'}).join(', ')||'—'}
 function tomorrow(x){var f=x.tomorrow_flow||{};if(!f.available)return '<div class=flow><b>Tomorrow view</b><p class=muted>'+((f.error)||'Tomorrow expiry unavailable.')+'</p></div>';return '<div class=flow><b>Tomorrow view — '+f.expiry+' (today\'s volume)</b><p>'+f.commentary+'</p><p class=muted>Top calls: '+levels(f.top_calls,'call')+'<br>Top puts: '+levels(f.top_puts,'put')+'<br>Tomorrow-expiry P/C volume: '+n(f.put_call_volume_ratio)+'</p></div>'}
-function card(x){var l=x.live_volume||{},s=x.saved_volume||{},g=x.gamma_totals||{},dc=(l.call_volume||0)-(s.call_volume||0),dp=(l.put_volume||0)-(s.put_volume||0),klass=(x.regime||'').toLowerCase().includes('positive')?'good':'bad';return '<section class=card><h2>'+x.symbol+' <small class=muted>'+x.expiry+' • '+x.dte+' DTE</small></h2><p class=muted>Chain: '+x.chain_source+'</p>'+row('Regime',x.regime,klass)+row('Live spot',n(x.spot))+row('Price location',x.location)+row('Net GEX',n(x.net_gex))+row('Gamma flip',n(x.gamma_flip))+row('Balance pin',n(x.pin))+row('Max pain',n(x.max_pain))+row('Put / call wall',n(x.put_wall)+' / '+n(x.call_wall))+row('Live call / put volume',n(l.call_volume)+' / '+n(l.put_volume))+row('Live put/call volume',n(x.live_pcv))+row('Chart call / put gamma',n(g.call)+' / '+n(g.put))+row('Volume vs saved','C '+(dc>=0?'+':'')+n(dc)+' • P '+(dp>=0?'+':'')+n(dp))+'<p><b>Read:</b> '+x.trade_read+'</p>'+tomorrow(x)+gammaChart(x)+'</section>'}
+function thetaClock(x){var t=x.theta_clock||{};if(!t.available)return '<div class=clock><b>0DTE Theta Clock</b><p class=muted>'+((t.note)||'Unavailable.')+'</p></div>';function d(v){return v==null?'—':(v.dollars>=0?'+':'')+n(v.dollars)+' ('+n(v.remaining_em)+'× remaining EM)'}return '<div class=clock><b>0DTE Theta Clock — '+n(t.minutes_remaining)+' min remaining</b>'+row('ATM / ATM IV',n(t.atm_strike)+' / '+n(t.atm_iv_pct)+'%')+row('Daily / remaining EM',n(t.daily_expected_move)+' / '+n(t.remaining_expected_move))+row('Half-EM shelves',n(t.half_shelves.lower)+' / '+n(t.half_shelves.upper))+row('ATM straddle model now',n(t.model_atm_straddle))+row('Model time value spent',n(t.model_time_value_spent))+row('Pin distance',d(t.pin_distance))+row('Put / call wall distance',d(t.put_wall_distance)+' / '+d(t.call_wall_distance))+'<p><b>Posture:</b> '+t.posture+'</p><p class=muted>'+t.note+'</p></div>'}
+function card(x){var l=x.live_volume||{},s=x.saved_volume||{},g=x.gamma_totals||{},dc=(l.call_volume||0)-(s.call_volume||0),dp=(l.put_volume||0)-(s.put_volume||0),klass=(x.regime||'').toLowerCase().includes('positive')?'good':'bad';return '<section class=card><h2>'+x.symbol+' <small class=muted>'+x.expiry+' • '+x.dte+' DTE</small></h2><p class=muted>Chain: '+x.chain_source+'</p>'+row('Regime',x.regime,klass)+row('Live spot',n(x.spot))+row('Price location',x.location)+row('Net GEX',n(x.net_gex))+row('Gamma flip',n(x.gamma_flip))+row('Balance pin',n(x.pin))+row('Max pain',n(x.max_pain))+row('Put / call wall',n(x.put_wall)+' / '+n(x.call_wall))+row('Live call / put volume',n(l.call_volume)+' / '+n(l.put_volume))+row('Live put/call volume',n(x.live_pcv))+row('Chart call / put gamma',n(g.call)+' / '+n(g.put))+row('Volume vs saved','C '+(dc>=0?'+':'')+n(dc)+' • P '+(dp>=0?'+':'')+n(dp))+'<p><b>Read:</b> '+x.trade_read+'</p>'+thetaClock(x)+tomorrow(x)+gammaChart(x)+'</section>'}
 function draw(){grid.innerHTML=overviewRows.map(card).join('')||'<p>No GEX data is available.</p>'}document.querySelectorAll('[data-mode]').forEach(function(b){b.onclick=function(){mode=b.dataset.mode;document.querySelectorAll('[data-mode]').forEach(function(x){x.classList.toggle('active',x===b)});draw()}});async function load(){statusEl.textContent='Loading live 0DTE GEX and tomorrow-expiry volume…';diagnostic('requesting /gex/market-overview?format=json');try{var r=await fetch('/gex/market-overview?format=json',{cache:'no-store'}),raw=await r.text();if(!r.ok)throw new Error('HTTP '+r.status+': '+raw.slice(0,180));var d=JSON.parse(raw);overviewRows=d.results||[];draw();var apiErrors=(d.errors||[]).map(function(e){return e.symbol+': '+e.error}).join(' | ');statusEl.textContent='Updated '+d.updated+(apiErrors?' • '+apiErrors:'');diagnostic('API responded: '+overviewRows.length+' card(s)'+(apiErrors?'; errors: '+apiErrors:'; no API errors.'))}catch(e){statusEl.textContent='Could not load overview: '+e.message;diagnostic('API request failed — '+e.message)}}var refreshTimer=null;function setRefreshInterval(){if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}var seconds=Number(intervalSelect.value||0);if(seconds)refreshTimer=setInterval(load,seconds*1000)}intervalSelect.onchange=setRefreshInterval;window.addEventListener('pagehide',function(){if(refreshTimer)clearInterval(refreshTimer)});refreshButton.onclick=load;load();
 """
 
@@ -533,7 +613,7 @@ function draw(){grid.innerHTML=overviewRows.map(card).join('')||'<p>No GEX data 
 _MARKET_OVERVIEW_TEMPLATE = """<!doctype html>
 <title>GEX Market Overview</title>
 <style>
-body{background:#0b1120;color:#e5e7eb;font:14px system-ui;margin:24px}.top{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.controls{display:flex;gap:6px}.controls button{background:#1f2937}.controls button.active{background:#2563eb}.grid{display:grid;grid-template-columns:repeat(3,minmax(320px,1fr));gap:16px;margin-top:18px}.card{background:#111827;border:1px solid #263349;border-radius:10px;padding:16px}.good{color:#60a5fa}.bad{color:#f87171}.muted{color:#9ca3af}.metric{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid #1f2937}button{background:#2563eb;color:white;border:0;border-radius:6px;padding:9px 14px;cursor:pointer}.gamma{position:relative;width:100%;height:260px;margin-top:14px;background:#0b1018;border-radius:7px;overflow:hidden}.gamma-bar{position:absolute;min-height:1px;border-radius:2px 2px 0 0}.gamma-zero{position:absolute;left:4%;right:4%;height:1px;background:#334155}.gamma-spotline{position:absolute;top:24px;bottom:22px;width:2px;background:repeating-linear-gradient(to bottom,#60a5fa 0,#60a5fa 5px,transparent 5px,transparent 9px)}.gamma-title{position:absolute;top:7px;left:12px;font-size:12px}.gamma-label{position:absolute;bottom:7px;color:#94a3b8}.gamma-label.left{left:12px}.gamma-label.right{right:12px}.gamma-label.spot{top:28px;right:12px;bottom:auto;color:#60a5fa}.axis{stroke:#334155;stroke-width:1}.spot{stroke:#60a5fa;stroke-width:2;stroke-dasharray:4 3}.label{fill:#94a3b8;font-size:10px}.chart-title{fill:#e5e7eb;font-size:12px;font-weight:600}.flow{margin-top:12px;padding:10px;border-left:3px solid #a78bfa;background:#121827;border-radius:5px}.flow p{margin:6px 0}
+body{background:#0b1120;color:#e5e7eb;font:14px system-ui;margin:24px}.top{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.controls{display:flex;gap:6px}.controls button{background:#1f2937}.controls button.active{background:#2563eb}.grid{display:grid;grid-template-columns:repeat(3,minmax(320px,1fr));gap:16px;margin-top:18px}.card{background:#111827;border:1px solid #263349;border-radius:10px;padding:16px}.good{color:#60a5fa}.bad{color:#f87171}.muted{color:#9ca3af}.metric{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid #1f2937}button{background:#2563eb;color:white;border:0;border-radius:6px;padding:9px 14px;cursor:pointer}.gamma{position:relative;width:100%;height:260px;margin-top:14px;background:#0b1018;border-radius:7px;overflow:hidden}.gamma-bar{position:absolute;min-height:1px;border-radius:2px 2px 0 0}.gamma-zero{position:absolute;left:4%;right:4%;height:1px;background:#334155}.gamma-spotline{position:absolute;top:24px;bottom:22px;width:2px;background:repeating-linear-gradient(to bottom,#60a5fa 0,#60a5fa 5px,transparent 5px,transparent 9px)}.gamma-title{position:absolute;top:7px;left:12px;font-size:12px}.gamma-label{position:absolute;bottom:7px;color:#94a3b8}.gamma-label.left{left:12px}.gamma-label.right{right:12px}.gamma-label.spot{top:28px;right:12px;bottom:auto;color:#60a5fa}.axis{stroke:#334155;stroke-width:1}.spot{stroke:#60a5fa;stroke-width:2;stroke-dasharray:4 3}.label{fill:#94a3b8;font-size:10px}.chart-title{fill:#e5e7eb;font-size:12px;font-weight:600}.clock{margin-top:12px;padding:10px;border-left:3px solid #60a5fa;background:#101a2b;border-radius:5px}.clock p{margin:6px 0}.flow{margin-top:12px;padding:10px;border-left:3px solid #a78bfa;background:#121827;border-radius:5px}.flow p{margin:6px 0}
 </style>
 <div class=top><h2>GEX Market Overview</h2><button id=refresh>Refresh live view</button><a id=apiDebug target=_blank href="/gex/market-overview?format=json" class=muted>Open API debug</a><label class=muted>Auto refresh <select id=interval><option value=0>Off</option><option value=60>1 minute</option><option value=300>5 minutes</option><option value=900>15 minutes</option></select></label><div class=controls><button data-mode=net class=active>Net gamma</button><button data-mode=absolute>Absolute gamma</button><button data-mode=split>Put / call gamma</button></div><span class=muted id=status>Live 0DTE GEX + tomorrow-expiry flow</span></div><p id=diagnostic class=muted>Diagnostics v20260930.4: page loaded; waiting for browser script.</p><div id=grid class=grid><p class=muted>Loading GEX cards…</p></div>
 <script src="/gex/market-overview.js?v=20260930.5"></script>"""
