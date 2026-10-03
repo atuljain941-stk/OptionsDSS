@@ -1,24 +1,18 @@
 # oiapp/scanners/opportunity_scanner.py  v5
 """
-Opportunity Scanner — DB-first, parallel, no blocking network calls in the hot path.
+Opportunity Scanner — on-demand 15–45 DTE defined-risk credit scan.
 
-Speed strategy:
-  - Earnings: NOT called during scan. Shown as a column using yfinance calendar
-    lazily cached in background. Scanner never blocks on earnings.
-  - TA: yfinance history(period="3mo") — one call per symbol, parallelized.
-  - Chain: yfinance option_chain — one call per symbol, parallelized.
-  - DB: OI walls queried for context only (non-blocking).
-  - ThreadPoolExecutor(max_workers=15) — all symbols run concurrently.
+It uses only the newest valid saved option-chain snapshot, cached earnings,
+and saved daily price history. A result is emitted only when earnings,
+liquidity, real bid/ask prices, implied volatility, expected-move room,
+and defined-risk reward/risk gates all pass.
 
 Two regimes:
-  TRENDING     — ADX≥20, EMA alignment, MACD confirms
-  MEAN_REVERSION — ADX<30, RSI14-EMA90 diff ±15, BB%B extreme
+  TRENDING      — directional bull-put or bear-call credit spread
+  MEAN_REVERSION — range-only iron condor or confirmed reversal vertical
 """
 import sqlite3, math, time, concurrent.futures
-from pathlib import Path
 from datetime import date, datetime
-
-from ._spot_cache import get_spot
 
 from ..config import DB_PATH as _OIAPP_DB_PATH  # centralized DB location
 DB_PATH = _OIAPP_DB_PATH
@@ -60,43 +54,48 @@ def _safe(v, dec=2):
 
 # ── Earnings — lazy, non-blocking, cached ─────────────────────────────────
 def _get_earn_days(symbol):
-    """Returns (days_to_earnings, date_str) or (999, None). Never blocks scan."""
-    cached = _earn_cache.get(symbol)
-    if cached and _ts() < cached[1]: return cached[0]
+    """Read the cached earnings calendar only. Unknown earnings is unsafe for premium selling."""
     try:
-        import yfinance as yf
-        cal = yf.Ticker(symbol).calendar
-        nd = None
-        if isinstance(cal, dict):
-            nd = cal.get("Earnings Date") or cal.get("earningsDate")
-        elif cal is not None:
-            try: nd = cal.loc["Earnings Date"] if "Earnings Date" in cal.index else None
-            except: pass
-        if nd is None:
-            result = (999, None)
-        else:
-            if hasattr(nd, "__iter__") and not isinstance(nd, str): nd = list(nd)[0]
-            dt_str = str(nd)[:10]
-            dt = datetime.strptime(dt_str, "%Y-%m-%d").date()
-            days = max(0, (dt - date.today()).days)
-            result = (days, dt_str)
-    except:
-        result = (999, None)
-    _earn_cache[symbol] = (result, _ts() + _EARN_TTL)
-    return result
+        con = _conn()
+        try:
+            row = con.execute(
+                "SELECT next_earn_date FROM earnings_calendar WHERE symbol=?",
+                (symbol.upper().strip(),),
+            ).fetchone()
+        finally:
+            con.close()
+        if not row or not row["next_earn_date"]:
+            return None, None
+        earn_date = datetime.strptime(str(row["next_earn_date"])[:10], "%Y-%m-%d").date()
+        return max(0, (earn_date - date.today()).days), earn_date.isoformat()
+    except Exception:
+        return None, None
 
 
-# ── Technical Analysis (ADX + all indicators) ─────────────────────────────
+# ── Technical Analysis# ── Technical Analysis (ADX + all indicators) ─────────────────────────────
 def _compute_ta(symbol):
     cached = _ta_cache.get(symbol)
     if cached and _ts() < cached[1]: return cached[0]
     try:
-        import yfinance as yf
-        df = yf.Ticker(symbol).history(period="3mo")  # 3mo = faster than 6mo
-        if df.empty or len(df) < 30:
+        con = _conn()
+        try:
+            rows = con.execute(
+                """SELECT date, open, high, low, close, volume
+                   FROM price_cache
+                   WHERE symbol=? AND close IS NOT NULL AND close>0
+                   ORDER BY date DESC LIMIT 120""",
+                (symbol.upper().strip(),),
+            ).fetchall()
+        finally:
+            con.close()
+        if len(rows) < 90:
             _ta_cache[symbol] = (None, _ts() + _TA_TTL); return None
-        C=df["Close"].tolist(); H=df["High"].tolist()
-        L=df["Low"].tolist();   V=df["Volume"].tolist(); n=len(C)-1
+        rows = list(reversed(rows))
+        C=[float(row["close"]) for row in rows]
+        H=[float(row["high"] or row["close"]) for row in rows]
+        L=[float(row["low"] or row["close"]) for row in rows]
+        V=[float(row["volume"] or 0) for row in rows]
+        n=len(C)-1
 
         def ema(a,p):
             k=2/(p+1); o=list(a)
@@ -360,46 +359,128 @@ def _classify(ta):
 
 
 # ── Live chain ────────────────────────────────────────────────────────────
-def _fetch_chain(symbol, spot, max_dte=60, min_dte=21):
-    key=f"c:{symbol}:{min_dte}:{max_dte}"
-    cached=_chain_cache.get(key)
-    if cached and _ts()<cached[1]: return cached[0]
+def _fetch_chain(symbol, spot, max_dte=45, min_dte=15):
+    """Use the newest saved option snapshot only; never synthesize a chain or quote."""
     try:
-        import yfinance as yf
-        tk=yf.Ticker(symbol)
-        opts=list(tk.options or [])
-        if not opts: return None,None,{}
-        today_dt=date.today()
-        cands=[]
-        for e in opts:
-            try:
-                dt=(datetime.strptime(e,"%Y-%m-%d").date()-today_dt).days
-                if min_dte<=dt<=max_dte: cands.append((e,dt))
-            except: pass
-        if not cands: return None,None,{}
-        # Prefer sweet spot: theta accelerating, gamma manageable
-        # Fallback progressively wider until we find something
-        for lo,hi in [(max(min_dte,28),45),(max(min_dte,21),50),(min_dte,max_dte)]:
-            sweet=[(e,d) for e,d in cands if lo<=d<=hi]
-            if sweet: break
-        expiry,dte=sweet[0] if sweet else cands[0]
-        chain=tk.option_chain(expiry)
-        result={}
-        for side,df in [("call",chain.calls),("put",chain.puts)]:
-            for _,row in df.iterrows():
-                s=_safe(row.get("strike"))
-                if s is None or abs(s-spot)/spot>0.15: continue
-                bid=_safe(row.get("bid")); ask=_safe(row.get("ask"))
-                last=_safe(row.get("lastPrice"))
-                if bid and ask and bid>0 and ask>0: mid=round((bid+ask)/2,2)
-                elif last and last>0:               mid=last
-                else:                               continue
-                e2={"bid":bid,"ask":ask,"mid":mid,"iv":_safe(row.get("impliedVolatility")),"strike":s}
-                result[(side,int(s))]=e2; result[(side,s)]=e2
-        val=(expiry,dte,result)
-        _chain_cache[key]=(val,_ts()+_CHAIN_TTL); return val
-    except Exception as e:
-        print(f"[chain] {symbol}: {e}"); return None,None,{}
+        con = _conn()
+        try:
+            rows = con.execute(
+                """SELECT expiration, MAX(date) AS snapshot_date
+                   FROM options
+                   WHERE symbol=? AND expiration>=?
+                   GROUP BY expiration""",
+                (symbol.upper().strip(), date.today().isoformat()),
+            ).fetchall()
+            candidates = []
+            for row in rows:
+                try:
+                    expiry = str(row["expiration"])
+                    dte = (datetime.strptime(expiry, "%Y-%m-%d").date() - date.today()).days
+                except Exception:
+                    continue
+                if min_dte <= dte <= max_dte and row["snapshot_date"]:
+                    try:
+                        age_days = (date.today() - datetime.strptime(str(row["snapshot_date"])[:10], "%Y-%m-%d").date()).days
+                    except Exception:
+                        age_days = 99
+                    if age_days <= 4:
+                        candidates.append((abs(dte - 35), dte, expiry, str(row["snapshot_date"])))
+            if not candidates:
+                return None, None, {}
+            _, dte, expiry, snapshot_date = min(candidates)
+            chain_rows = con.execute(
+                """SELECT type, strike, price, oi, volume, bid, ask, last, iv, underlying
+                   FROM options
+                   WHERE symbol=? AND expiration=? AND date=?""",
+                (symbol.upper().strip(), expiry, snapshot_date),
+            ).fetchall()
+        finally:
+            con.close()
+        result = {}
+        for row in chain_rows:
+            side = "call" if str(row["type"]).upper().startswith("C") else "put"
+            strike = _safe(row["strike"])
+            if strike is None or abs(strike - spot) / max(spot, 0.01) > 0.20:
+                continue
+            bid, ask = _safe(row["bid"]), _safe(row["ask"])
+            mid = round((bid + ask) / 2.0, 2) if bid and ask and bid > 0 and ask > 0 else None
+            entry = {
+                "bid": bid, "ask": ask, "mid": mid, "last": _safe(row["last"]),
+                "price": _safe(row["price"]), "iv": _safe(row["iv"], 6),
+                "oi": int(row["oi"] or 0), "volume": int(row["volume"] or 0),
+                "strike": strike, "snapshot_date": snapshot_date,
+                "underlying": _safe(row["underlying"]),
+            }
+            result[(side, int(strike))] = entry
+            result[(side, float(strike))] = entry
+        return expiry, dte, result
+    except Exception as exc:
+        print(f"[saved chain] {symbol}: {exc}")
+        return None, None, {}
+
+
+def _chain_leg(chain, side, strike):
+    for key in ((side, int(strike)), (side, float(strike))):
+        row = chain.get(key)
+        if row:
+            return row
+    return None
+
+
+def _leg_quality(chain, side, strike, min_oi=50, min_volume=5, max_spread_pct=15.0):
+    row = _chain_leg(chain, side, strike)
+    if not row:
+        return False, "missing saved leg"
+    bid, ask = row.get("bid"), row.get("ask")
+    if bid is None or ask is None or bid <= 0 or ask <= 0:
+        return False, "missing executable bid/ask"
+    mid = (bid + ask) / 2.0
+    spread_pct = ((ask - bid) / mid * 100.0) if mid > 0 else 999.0
+    if spread_pct > max_spread_pct:
+        return False, "wide bid/ask"
+    if int(row.get("oi") or 0) < min_oi:
+        return False, "low OI"
+    if int(row.get("volume") or 0) < min_volume:
+        return False, "low option volume"
+    if not row.get("iv") or row["iv"] <= 0:
+        return False, "missing implied volatility"
+    return True, ""
+
+
+def _norm_cdf(value):
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def _stored_delta(spot, strike, dte, iv, is_call):
+    iv = float(iv or 0)
+    if iv > 3:
+        iv /= 100.0
+    if spot <= 0 or strike <= 0 or iv <= 0 or dte <= 0:
+        return None
+    t = dte / 365.0
+    d1 = (math.log(spot / strike) + 0.5 * iv * iv * t) / (iv * math.sqrt(t))
+    delta = _norm_cdf(d1)
+    return delta if is_call else delta - 1.0
+
+
+def _chain_expected_move(chain, spot, dte):
+    entries = []
+    seen = set()
+    for (side, strike), row in chain.items():
+        key = (side, float(strike))
+        if key in seen:
+            continue
+        seen.add(key)
+        iv = row.get("iv")
+        if iv and iv > 0:
+            entries.append((abs(float(strike) - spot), float(iv)))
+    if not entries:
+        return None
+    entries.sort(key=lambda item: item[0])
+    iv = sum(value for _, value in entries[:4]) / min(4, len(entries))
+    if iv > 3:
+        iv /= 100.0
+    return round(spot * iv * math.sqrt(max(dte, 1) / 365.0), 2)
 
 
 def _mid(chain,side,strike):
@@ -671,130 +752,88 @@ def _continuation_note(ta, regime):
         else:          return f"Weak continuation ({pct}%) — trend losing momentum"
 
 
-def _make_spread(symbol,expiry,dte,side,sell_s,buy_s,chain,spot,ta,regime,quality,reasons,earn_days,earn_date):
-    width=abs(sell_s-buy_s)
-    # Hard minimum: never show $1 wide spreads — impractical fills
-    if width < 2.0: return None
-    
-    sm=_mid(chain,side,sell_s)
-    if sm is None: return None  # must have real sell price
-    
-    bm=_mid(chain,side,buy_s)
-    # Buy leg (protection): if no market price, use a floor estimate
-    # OTM protection leg is often illiquid but still tradeable
-    if bm is None:
-        # Estimate: ~5-10% of sell price for far OTM protection
-        bm_est = round(sm * 0.08, 2)
-        if bm_est < 0.01: return None
-        bm = bm_est
-        buy_leg_estimated = True
-    else:
-        buy_leg_estimated = False
-    
-    net=round(sm-bm,2)
-    if net <= 0: return None
-    if net < 0.15: return None                    # min $0.15 credit
-    if width < 2.0: return None                   # min $2 wide
+def _make_spread(symbol, expiry, dte, side, sell_s, buy_s, chain, spot, ta, regime,
+                 quality, reasons, earn_days, earn_date, expected_move=None):
+    """Return an executable, defined-risk saved-chain credit spread or None."""
+    width = abs(sell_s - buy_s)
+    if width < 2.0:
+        return None
+    sell_ok, _ = _leg_quality(chain, side, sell_s)
+    buy_ok, _ = _leg_quality(chain, side, buy_s)
+    if not sell_ok or not buy_ok:
+        return None
+    se = _chain_leg(chain, side, sell_s) or {}
+    be = _chain_leg(chain, side, buy_s) or {}
+    sm, bm = _mid(chain, side, sell_s), _mid(chain, side, buy_s)
+    if sm is None or bm is None:
+        return None
+    net = round(sm - bm, 2)
+    if net < 0.15 or net >= width:
+        return None
+    rr = round(net / (width - net), 2)
+    if rr < 0.60:  # user-approved hard floor; 1.0 remains the preferred target.
+        return None
 
-    rr = round(net/(width-net),2) if width>net else 0
+    is_call = side == "call"
+    sell_delta = _stored_delta(spot, sell_s, dte, se.get("iv"), is_call)
+    if sell_delta is None or not (0.10 <= abs(sell_delta) <= 0.30):
+        return None
+    if expected_move is None or abs(spot - sell_s) < 0.75 * expected_move:
+        return None
 
-    # Dynamic R:R gate: must meet break-even for the actual PoP
-    # break-even R:R = (1-PoP)/PoP
-    # e.g. at 5% OTM (PoP≈74%): need R:R > 0.35:1
-    pct_otm_gate = abs(spot-sell_s)/spot*100
-    pop_gate     = _pop(pct_otm_gate) / 100
-    min_rr       = round((1-pop_gate)/pop_gate, 2)  # break-even R:R for this PoP
-    if rr < min_rr: return None
-
-    # EV (informational — already guaranteed > 0 by dynamic gate above)
-    pop_dec = pop_gate
-    ev = round(net*pop_dec - (width-net)*(1-pop_dec), 3)
-
-    pct_otm_v = abs(spot-sell_s)/spot*100
-    pop=_pop(pct_otm_v)
-    pop_dec = pop/100
-    ev = round(net*pop_dec - (width-net)*(1-pop_dec), 3)
-    pct=round(abs(spot-sell_s)/spot*100,1)
-    bias="Bullish" if side=="put" else "Bearish"
-    name="Bull Put Spread" if side=="put" else "Bear Call Spread"
-    legs=(f"Sell ${sell_s}P / Buy ${buy_s}P" if side=="put"
-          else f"Sell ${sell_s}C / Buy ${buy_s}C")
-    icon={"TRENDING":"📈","MEAN_REVERSION":"🔄"}[regime]
-    sig="; ".join(reasons[:2])
-
-    # Earnings warning
-    earn_warn=""
-    if earn_days<dte:
-        earn_warn=f" ⚠ EARN {earn_date} in {earn_days}d (before expiry)"
-    elif earn_days<14:
-        earn_warn=f" ℹ EARN {earn_date} in {earn_days}d"
-
-    se=chain.get((side,int(sell_s))) or {}
-    be=chain.get((side,int(buy_s)))  or {}
+    pct = round(abs(spot - sell_s) / spot * 100, 1)
+    # This is a model estimate from delta; it is not a historical win probability.
+    pop_model = round(min(90, max(50, (1.0 - abs(sell_delta)) * 100)))
+    ev_model = round(net * (pop_model / 100.0) - (width - net) * (1.0 - pop_model / 100.0), 3)
+    bias = "Bullish" if side == "put" else "Bearish"
+    name = "Bull Put Spread" if side == "put" else "Bear Call Spread"
+    legs = (f"Sell ${sell_s}P / Buy ${buy_s}P" if side == "put"
+            else f"Sell ${sell_s}C / Buy ${buy_s}C")
+    icon = {"TRENDING": "📈", "MEAN_REVERSION": "🔄"}.get(regime, "•")
+    score, grade, score_reasons = _win_probability(
+        ta, regime, quality, rr, pop_model, dte, pct, earn_days
+    )
+    snapshot = se.get("snapshot_date") or be.get("snapshot_date")
     return {
-        "symbol":symbol,"expiry":expiry,"dte":dte,
-        "strategy":name,"bias":bias,"regime":regime,
-        "regime_label":regime.replace("_"," "),"quality":quality,
-        "legs":legs,"sell_strike":sell_s,"buy_strike":buy_s,"spread_width":width,
-        "sell_bid":se.get("bid"),"sell_ask":se.get("ask"),"sell_mid":sm,
-        "buy_bid":be.get("bid"),"buy_ask":be.get("ask"),"buy_mid":bm,
-        "net_credit":net,"max_gain_dol":round(net*100,2),"max_loss_dol":round((width-net)*100,2),
-        "rr":f"{rr:.2f}:1","rr_val":rr,"pop":pop,"pct_otm":pct,"spot":round(spot,2),
-        "adx":ta["adx"],"iv_rank":ta["iv_rank"],"rsi":ta["rsi"],
-        "rsi_diff":ta["rsi_diff"],"bb_pct":ta["bb_pct"],"macd":ta["macd"],
-        "trend":ta["trend"],"momentum":ta["momentum"],"vol_surge":ta["vol_surge"],
-        "pdi":ta["pdi"],"ndi":ta["ndi"],"pdi_delta":ta.get("pdi_delta",0),"ndi_delta":ta.get("ndi_delta",0),
-        "earn_days":earn_days,"earn_date":earn_date or "—","earn_warn":earn_warn,
-        "continuation_pct":_continuation_pct(ta, regime),
-        "continuation_note":_continuation_note(ta, regime),
-        "price_source":"live" if not buy_leg_estimated else "sell:live buy:est",
-        "ev": ev,"reasons":reasons,
-        "rationale":f"{icon} {regime.replace('_',' ')} [{quality}] {bias} | {sig} | ${sell_s} {pct}%OTM | IVR:{ta['iv_rank']} DTE:{dte}{earn_warn}",
-        "manage":f"Close at 50% credit (~${round(net*0.5,2)}). Stop if spot {'below' if side=='put' else 'above'} ${buy_s}.",
+        "symbol": symbol, "expiry": expiry, "dte": dte,
+        "strategy": name, "bias": bias, "regime": regime,
+        "regime_label": regime.replace("_", " "), "quality": grade,
+        "legs": legs, "sell_strike": sell_s, "buy_strike": buy_s, "spread_width": width,
+        "sell_bid": se.get("bid"), "sell_ask": se.get("ask"), "sell_mid": sm,
+        "buy_bid": be.get("bid"), "buy_ask": be.get("ask"), "buy_mid": bm,
+        "net_credit": net, "max_gain_dol": round(net * 100, 2),
+        "max_loss_dol": round((width - net) * 100, 2),
+        "rr": f"{rr:.2f}:1", "rr_val": rr, "pop": pop_model,
+        "pop_label": "Delta model, unvalidated", "pct_otm": pct, "spot": round(spot, 2),
+        "short_delta": round(sell_delta, 3), "expected_move": expected_move,
+        "snapshot_date": snapshot, "option_data_source": "saved chain",
+        "adx": ta["adx"], "iv_rank": ta["iv_rank"], "rsi": ta["rsi"],
+        "rsi_diff": ta["rsi_diff"], "bb_pct": ta["bb_pct"], "macd": ta["macd"],
+        "trend": ta["trend"], "momentum": ta["momentum"], "vol_surge": ta["vol_surge"],
+        "pdi": ta["pdi"], "ndi": ta["ndi"], "pdi_delta": ta.get("pdi_delta", 0),
+        "ndi_delta": ta.get("ndi_delta", 0), "earn_days": earn_days,
+        "earn_date": earn_date or "—", "earn_warn": "",
+        "continuation_pct": _continuation_pct(ta, regime),
+        "continuation_note": _continuation_note(ta, regime),
+        "price_source": "saved data", "ev": ev_model, "reasons": reasons,
+        "win_prob": score, "win_grade": grade, "win_reasons": score_reasons[:6],
+        "signal_detail": _build_signal_detail(ta, regime, score_reasons),
+        "rationale": (
+            f"${icon} ${regime.replace('_', ' ')} [${grade}] ${bias} | "
+            f"${'; '.join(reasons[:2])} | $${sell_s} ${pct}% OTM | "
+            f"Δ ${sell_delta:.2f} | EM $${expected_move:.2f} | saved ${snapshot}"
+        ),
+        "manage": (
+            f"Close at 50% credit (~$${round(net * 0.5, 2)}). "
+            f"Exit if price closes through $${sell_s}; do not hold through earnings."
+        ),
     }
-    # Add OI wall breach context to score
-    wall_breach_bonus = 0
-    wall_breach_note = ""
-    try:
-        from ..services.oi_wall_service import oi_wall_context
-        ctx = oi_wall_context(symbol, spot)
-        if ctx:
-            bias_oi = ctx.get("bias","NEUTRAL")
-            breach_ctx = ctx.get("breach_context","")
-            # If OI wall aligns with trade direction → bonus
-            if side=="put" and "BULLISH" in bias_oi:
-                wall_breach_bonus = 8; wall_breach_note = f"OI wall: {breach_ctx[:60]}"
-            elif side=="call" and "BEARISH" in bias_oi:
-                wall_breach_bonus = 8; wall_breach_note = f"OI wall: {breach_ctx[:60]}"
-            # If a support wall was BREACHED for a bull put → big penalty
-            if side=="put" and ctx.get("nearest_support",{}).get("breach_status")=="BREACHED":
-                wall_breach_bonus = -20; wall_breach_note = f"⚠ Support wall BREACHED — sellers unwinding"
-            elif side=="call" and ctx.get("nearest_resistance",{}).get("breach_status")=="BREACHED":
-                wall_breach_bonus = -20; wall_breach_note = f"⚠ Resistance wall BREACHED — short covering"
-    except: pass
-
-    # Compute win probability score AFTER spread is built (needs rr_val, pop)
-    _wp = _win_probability(ta, regime, quality, rr, pop, dte, pct, earn_days)
-    final_score = max(5, min(96, _wp[0] + wall_breach_bonus))
-    # Re-grade after wall adjustment
-    if   final_score >= 75: final_grade = "A"
-    elif final_score >= 58: final_grade = "B"
-    elif final_score >= 42: final_grade = "C"
-    else:                   final_grade = "D"
-    win_reasons = _wp[2]
-    if wall_breach_note: win_reasons = [wall_breach_note] + win_reasons
-    spread["win_prob"]   = final_score
-    spread["win_grade"]  = final_grade
-    spread["win_reasons"]= win_reasons[:6]
-    spread["quality"]    = final_grade
-    spread["signal_detail"] = _build_signal_detail(ta, regime, win_reasons)
-    return spread
 
 
-# ── Per-symbol (one thread unit) ──────────────────────────────────────────
+# ── Per-symbol# ── Per-symbol (one thread unit) ──────────────────────────────────────────
 def _find_condor(put_strikes, call_strikes, wings, chain, spot,
                   symbol, expiry, dte, ta, regime, quality, reasons,
-                  earn_days, earn_date):
+                  earn_days, earn_date, expected_move=None):
     """
     Build an Iron Condor from actual chain strikes.
     Sell OTM put + buy further OTM put (put spread)
@@ -810,6 +849,12 @@ def _find_condor(put_strikes, call_strikes, wings, chain, spot,
     for sell_s in put_strikes:
         pct = abs(sell_s-spot)/spot
         if pct < min_pct or pct > max_pct: continue
+        sell_ok, _ = _leg_quality(chain, "put", sell_s)
+        sell_leg = _chain_leg(chain, "put", sell_s) or {}
+        sell_delta = _stored_delta(spot, sell_s, dte, sell_leg.get("iv"), False)
+        if (not sell_ok or sell_delta is None or not (0.10 <= abs(sell_delta) <= 0.30)
+                or expected_move is None or abs(spot - sell_s) < 0.75 * expected_move):
+            continue
         sm = _mid(chain,"put",sell_s)
         if not sm or sm < 0.10: continue
         for wing in wings:
@@ -822,15 +867,16 @@ def _find_condor(put_strikes, call_strikes, wings, chain, spot,
                     if best_buy is None or abs(s2-target_buy)<abs(best_buy-target_buy):
                         best_buy=s2
             if not best_buy: continue
+            buy_ok, _ = _leg_quality(chain, "put", best_buy)
             bm = _mid(chain,"put",best_buy)
-            if not bm: continue
+            if not buy_ok or not bm: continue
             width=abs(sell_s-best_buy)
             if width<2.0: continue
             net=round(sm-bm,2)
             if net<=0: continue
             rr=round(net/(width-net),2) if width>net else 0
             pop_dec=_pop(abs(spot-sell_s)/spot*100)/100
-            min_rr=round((1-pop_dec)/pop_dec,2)
+            min_rr=max(0.60, round((1-pop_dec)/pop_dec,2))
             if rr>=min_rr:
                 best_put=(sell_s,best_buy,net,sm,bm,width)
                 break
@@ -840,6 +886,12 @@ def _find_condor(put_strikes, call_strikes, wings, chain, spot,
     for sell_s in call_strikes:
         pct = abs(sell_s-spot)/spot
         if pct < min_pct or pct > max_pct: continue
+        sell_ok, _ = _leg_quality(chain, "call", sell_s)
+        sell_leg = _chain_leg(chain, "call", sell_s) or {}
+        sell_delta = _stored_delta(spot, sell_s, dte, sell_leg.get("iv"), True)
+        if (not sell_ok or sell_delta is None or not (0.10 <= abs(sell_delta) <= 0.30)
+                or expected_move is None or abs(spot - sell_s) < 0.75 * expected_move):
+            continue
         sm = _mid(chain,"call",sell_s)
         if not sm or sm < 0.10: continue
         for wing in wings:
@@ -852,8 +904,9 @@ def _find_condor(put_strikes, call_strikes, wings, chain, spot,
                     if best_buy is None or abs(s2-target_buy)<abs(best_buy-target_buy):
                         best_buy=s2
             if not best_buy: continue
+            buy_ok, _ = _leg_quality(chain, "call", best_buy)
             bm = _mid(chain,"call",best_buy)
-            if not bm: continue
+            if not buy_ok or not bm: continue
             width=abs(sell_s-best_buy)
             if width<2.0: continue
             net=round(sm-bm,2)
@@ -927,7 +980,8 @@ def _find_condor(put_strikes, call_strikes, wings, chain, spot,
         "trend":ta["trend"],"momentum":ta["momentum"],"vol_surge":ta["vol_surge"],
         "pdi":ta["pdi"],"ndi":ta["ndi"],"pdi_delta":ta.get("pdi_delta",0),"ndi_delta":ta.get("ndi_delta",0),
         "earn_days":earn_days,"earn_date":earn_date or "—","earn_warn":"",
-        "price_source":"live","reasons":ic_reasons,
+        "price_source":"saved data","option_data_source":"saved chain","expected_move":expected_move,
+        "pop_label":"OTM model, unvalidated","reasons":ic_reasons,
         "rationale":rationale,
         "manage":(
             f"Close at 50% max profit (~${round(max_profit*0.5,0)}). "
@@ -942,21 +996,31 @@ def _find_condor(put_strikes, call_strikes, wings, chain, spot,
 
 
 def _scan_one(symbol, min_dte, max_dte, wings):
+    """Strict, on-demand 15–45 DTE credit scan using saved market data only."""
     try:
-        spot=get_spot(symbol)
-        if not spot or spot<=0: return [],None
+        ta = _compute_ta(symbol)
+        if not ta:
+            return [], None
+        spot = ta["price"]
+        if not spot or spot <= 0:
+            return [], None
 
-        ta=_compute_ta(symbol)
-        if not ta: return [],None
+        regime, quality, reasons, sub_type = _classify(ta)
+        if not regime:
+            return [], None
 
-        regime,quality,reasons,sub_type=_classify(ta)
-        if not regime: return [],None
+        expiry, dte, chain = _fetch_chain(symbol, spot, max_dte, min_dte)
+        if not expiry or not chain:
+            return [], None
 
-        expiry,dte,chain=_fetch_chain(symbol,spot,max_dte,min_dte)
-        if not expiry or not chain: return [],None
+        # Unknown or in-window earnings makes a premium-selling candidate ineligible.
+        earn_days, earn_date = _get_earn_days(symbol)
+        if earn_days is None or earn_days <= dte:
+            return [], None
 
-        # Earnings — non-blocking cached lookup (may return 999,None if not cached yet)
-        earn_days,earn_date=_get_earn_days(symbol)
+        expected_move = _chain_expected_move(chain, spot, dte)
+        if not expected_move or expected_move <= 0:
+            return [], None
 
         results=[]
         
@@ -966,39 +1030,45 @@ def _scan_one(symbol, min_dte, max_dte, wings):
         call_strikes = sorted({k[1] for k in chain if k[0]=="call" and k[1]>spot})
 
         def _find_spread(side, strikes_otm, preferred_wings):
-            """
-            Find best spread from actual chain strikes.
-            Tries each sell strike at 3-12% OTM, pairs with buy leg
-            at the nearest available strike that gives preferred width.
-            Returns first spread that passes 1:1 gate.
-            """
-            min_pct = 0.01; max_pct = 0.10  # 1-10% OTM — allow near-ATM for higher credit
-            for sell_s in strikes_otm:
-                pct_otm = abs(sell_s - spot) / spot
-                if pct_otm < min_pct or pct_otm > max_pct: continue
-                sell_mid = _mid(chain, side, sell_s)
-                if not sell_mid or sell_mid < 0.05: continue  # no real price
-
+            """Build only liquid, saved-chain 10–30 delta defined-risk credit spreads."""
+            is_call = side == "call"
+            ordered = sorted(
+                strikes_otm,
+                key=lambda strike: abs(abs(_stored_delta(
+                    spot, strike, dte, (_chain_leg(chain, side, strike) or {}).get("iv"), is_call
+                ) or 99) - 0.20),
+            )
+            for sell_s in ordered:
+                sell_leg = _chain_leg(chain, side, sell_s) or {}
+                sell_delta = _stored_delta(spot, sell_s, dte, sell_leg.get("iv"), is_call)
+                sell_ok, _ = _leg_quality(chain, side, sell_s)
+                if not sell_ok or sell_delta is None or not (0.10 <= abs(sell_delta) <= 0.30):
+                    continue
+                if abs(spot - sell_s) < 0.75 * expected_move:
+                    continue
                 for wing in preferred_wings:
-                    if wing < 2.0: continue  # never $1 wide
-                    # Find buy leg: closest actual strike to sell_s ± wing
-                    target_buy = sell_s - wing if side=="put" else sell_s + wing
-                    # Look for nearest available strike within ±15% of target
-                    best_buy = None
-                    for s2 in strikes_otm:
-                        if side=="put"  and s2 >= sell_s: continue
-                        if side=="call" and s2 <= sell_s: continue
-                        if abs(s2 - target_buy) <= wing * 0.6:  # within 60% of wing
-                            if best_buy is None or abs(s2-target_buy) < abs(best_buy-target_buy):
-                                best_buy = s2
-                    if best_buy is None: continue
-                    actual_width = abs(sell_s - best_buy)
-                    if actual_width < 2.0: continue  # min $2 wide
-                    
-                    sp = _make_spread(symbol,expiry,dte,side,sell_s,best_buy,
-                                      chain,spot,ta,regime,quality,reasons,earn_days,earn_date)
-                    if sp: return sp
+                    if wing < 2.0:
+                        continue
+                    target_buy = sell_s - wing if side == "put" else sell_s + wing
+                    candidates = [
+                        strike for strike in strikes_otm
+                        if ((side == "put" and strike < sell_s) or (side == "call" and strike > sell_s))
+                        and abs(strike - target_buy) <= wing * 0.6
+                    ]
+                    if not candidates:
+                        continue
+                    best_buy = min(candidates, key=lambda strike: abs(strike - target_buy))
+                    buy_ok, _ = _leg_quality(chain, side, best_buy)
+                    if not buy_ok or abs(sell_s - best_buy) < 2.0:
+                        continue
+                    spread = _make_spread(
+                        symbol, expiry, dte, side, sell_s, best_buy, chain, spot, ta,
+                        regime, quality, reasons, earn_days, earn_date, expected_move=expected_move,
+                    )
+                    if spread:
+                        return spread
             return None
+
 
         want_bull = False; want_bear = False; want_condor = False
 
@@ -1031,7 +1101,7 @@ def _scan_one(symbol, min_dte, max_dte, wings):
         if want_condor:
             ic = _find_condor(put_strikes, call_strikes, wings, chain, spot,
                                symbol, expiry, dte, ta, regime, quality, reasons,
-                               earn_days, earn_date)
+                               earn_days, earn_date, expected_move=expected_move)
             if ic: results.append(ic)
 
         # Dedup
@@ -1046,7 +1116,7 @@ def _scan_one(symbol, min_dte, max_dte, wings):
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
-def run_opportunity_scanner(min_dte=21, max_dte=60, preferred_wing=5.0, max_workers=15, sector_filter=None):
+def run_opportunity_scanner(min_dte=15, max_dte=45, preferred_wing=5.0, max_workers=15, sector_filter=None):
     symbols=_all_symbols()
     if sector_filter:
         try:
