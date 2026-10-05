@@ -5,7 +5,7 @@ SPY Daily & Weekly Strategy Engine
 - RSI-14, EMA-90(RSI), ATR, BB%B, OI walls
 - Generates 0-2 DTE daily + 5-10 DTE weekly strategies with PoP
 """
-import sqlite3, math, json, os
+import sqlite3, math, json, os, time
 from pathlib import Path
 from datetime import date, timedelta, datetime
 from flask import Blueprint, jsonify, request, current_app
@@ -112,6 +112,63 @@ def _live_chain_rows(symbol, expiry):
         return rows, None if rows else "Live chain returned no listed strikes."
     except Exception as exc:
         return [], "Live option chain unavailable: " + str(exc)[:120]
+
+
+# A page-to-page comparison must not recompute a nominally live option chain from
+# two separate provider requests.  Most free feeds update OI asynchronously, so
+# a very short shared snapshot is both more honest and more comparable.
+_GEX_INPUT_CACHE = {}
+_GEX_INPUT_CACHE_TTL_SECONDS = 45
+
+
+def _canonical_gex_input(symbol, expiry, fallback_spot, fallback_iv=20.0):
+    """One live-chain/spot snapshot shared by Overview and Daily Plan.
+
+    It is intentionally ephemeral (45 seconds) and is never used for stored
+    history.  The returned signature lets the UI/API prove which inputs produced
+    a displayed GEX number.
+    """
+    symbol = str(symbol or "").upper()
+    expiry = str(expiry or "")[:10]
+    key = (symbol, expiry)
+    now = time.time()
+    cached = _GEX_INPUT_CACHE.get(key)
+    if cached and now - cached.get("fetched_epoch", 0) <= _GEX_INPUT_CACHE_TTL_SECONDS:
+        out = dict(cached)
+        out["cache_age_seconds"] = round(now - cached["fetched_epoch"], 1)
+        out["cached"] = True
+        return out
+
+    spot_snapshot = {}
+    try:
+        from ..services.market import get_spot_snapshot
+        spot_snapshot = get_spot_snapshot(symbol) or {}
+    except Exception:
+        pass
+    spot = _finite_number(spot_snapshot.get("price"), _finite_number(fallback_spot))
+    live_rows, live_error = _live_chain_rows(symbol, expiry)
+    saved_rows = _oi_rows(symbol, expiry)
+    rows = live_rows or saved_rows
+    source = "live option chain" if live_rows else "saved option snapshot"
+    rows = [dict(row) for row in (rows or [])]
+    calls_oi = sum(int(_finite_number(row.get("oi"), 0) or 0) for row in rows if str(row.get("type") or "").lower().startswith("c"))
+    puts_oi = sum(int(_finite_number(row.get("oi"), 0) or 0) for row in rows if str(row.get("type") or "").lower().startswith("p"))
+    iv_atm = _chain_atm_iv(rows, spot, fallback_iv)
+    signature = {
+        "symbol": symbol, "expiry": expiry, "source": source,
+        "contracts": len(rows), "call_oi": calls_oi, "put_oi": puts_oi,
+        "spot": round(spot, 4) if spot is not None else None,
+        "iv_atm": round(iv_atm, 4),
+    }
+    out = {
+        "rows": rows, "source": source, "live_error": live_error,
+        "spot": spot, "spot_snapshot": spot_snapshot, "iv_atm": iv_atm,
+        "signature": signature, "fetched_epoch": now,
+        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "cache_age_seconds": 0.0, "cached": False,
+    }
+    _GEX_INPUT_CACHE[key] = out
+    return dict(out)
 
 
 def _json_safe(value):
@@ -2401,6 +2458,8 @@ def _compute_gex(rows, spot, T_days, iv_atm):
     """
     gex_by_strike = {}
     gross_gex = 0.0
+    call_gex = 0.0
+    put_gex = 0.0
 
     for r in rows:
         K = float(r["strike"])
@@ -2417,10 +2476,20 @@ def _compute_gex(rows, spot, T_days, iv_atm):
 
         signed_gex = gex if r["type"] == "call" else -gex
         gex_by_strike[K] += signed_gex
+        if r["type"] == "call":
+            call_gex += gex
+        else:
+            put_gex += gex
         gross_gex += abs(signed_gex)
 
     total_gex = sum(gex_by_strike.values())
     gex_ratio = (total_gex / gross_gex) if gross_gex else 0.0
+    # Concentration is intentionally distinct from the call-vs-put imbalance.
+    # It answers "how much of gross GEX is localized at the three largest
+    # signed strike buckets?", which is useful for pin/wall quality and does
+    # not masquerade as a probability of a regime.
+    top_three_abs_gex = sum(sorted((abs(value) for value in gex_by_strike.values()), reverse=True)[:3])
+    top_three_concentration_pct = (top_three_abs_gex / gross_gex * 100.0) if gross_gex else 0.0
 
     # Gamma flip: underlying price where total signed GEX changes sign.
     # We solve this on a price grid and linearly interpolate the first zero crossing.
@@ -2469,7 +2538,15 @@ def _compute_gex(rows, spot, T_days, iv_atm):
         "pin_strike": pin_strike,
         "max_pain": round(max_pain, 2) if max_pain is not None else None,
         "regime": "NEGATIVE_GAMMA" if total_gex < 0 else "POSITIVE_GAMMA",
-        "regime_strength": round(abs(gex_ratio) * 100, 1),
+        # This is a call-versus-put imbalance, not a probability or confidence.
+        "net_gex_share_pct": round(abs(gex_ratio) * 100, 1),
+        "call_gex": round(call_gex, 2),
+        "put_gex": round(put_gex, 2),
+        "top_three_concentration_pct": round(top_three_concentration_pct, 1),
+        # Existing UI field: display concentration, not an overstated
+        # "regime strength".  The directional score below still uses net share.
+        "regime_strength": round(top_three_concentration_pct, 1),
+        "regime_strength_label": "Top-3 strike GEX concentration",
     }
 
 
@@ -4230,17 +4307,19 @@ def api_daily_plan():
         exp, dte = _pick_exp(exps, 0, 5, 0)
     if not exp: return jsonify({"error":"No expiry found"}), 404
 
-    # Use the same transient 0DTE chain as GEX Market Overview.  The saved
-    # chain remains the explicit fallback and continues to power historical
-    # snapshots/OI-change analysis.
-    saved_rows = _oi_rows(sym, exp)
-    live_rows, live_error = _live_chain_rows(sym, exp)
-    rows = live_rows or saved_rows
-    chain_source = "live option chain" if live_rows else "saved option snapshot"
-    chain_note = live_error if not live_rows else None
+    # Use the canonical transient input shared with GEX Market Overview.
+    # The 45-second cache prevents separate provider reads from disagreeing
+    # during a page-to-page comparison.
+    canonical_input = _canonical_gex_input(sym, exp, spot, iv_atm)
+    spot = _finite_number(canonical_input.get("spot"), spot)
+    ta["price"] = round(spot, 2)
+    rows = canonical_input.get("rows") or []
+    chain_source = canonical_input.get("source")
+    chain_note = canonical_input.get("live_error") if chain_source != "live option chain" else None
     if not rows:
-        return jsonify({"error": f"No option rows for {sym} {exp}", "chain_error": live_error}), 404
-    iv_atm = _chain_atm_iv(rows, spot, iv_atm)
+        return jsonify({"error": f"No option rows for {sym} {exp}", "chain_error": chain_note}), 404
+    iv_atm = _finite_number(canonical_input.get("iv_atm"), iv_atm) or iv_atm
+    saved_rows = _oi_rows(sym, exp)
 
     # OI-change is always based on the saved snapshot; live provider OI does
     # not establish intraday opening-vs-closing change.
@@ -4302,7 +4381,7 @@ def api_daily_plan():
         gex_info["total_gex"], pcr, skew_rr, spot,
         gex_info["pin_strike"], gex_info["gamma_flip"], rows,
         gex_ratio=gex_info.get("gex_ratio"), max_pain=gex_info.get("max_pain"),
-        dte=dte, vix_level=(vix_ctx or {}).get("level"), gex_strength_pct=gex_info.get("regime_strength"))
+        dte=dte, vix_level=(vix_ctx or {}).get("level"), gex_strength_pct=gex_info.get("net_gex_share_pct"))
 
     plan = _build_trade_plan(spot, gex_info, walls, ta, score, sigma_1d)
 
@@ -4346,10 +4425,14 @@ def api_daily_plan():
         "expiry_list": exps[:8],
         "chain_source": chain_source,
         "chain_note": chain_note,
-        "chain_asof": (spot_snapshot or {}).get("timestamp") if live_rows else "latest saved option snapshot",
+        "chain_asof": canonical_input.get("fetched_at"),
+        "gex_input": canonical_input.get("signature"),
+        "gex_input_cache_age_seconds": canonical_input.get("cache_age_seconds"),
         "iv_atm": round(iv_atm,2), "pcr": pcr,
         "skew_rr": skew_rr, "sigma_1d": sigma_1d,
         "gex_strength": gex_info.get("regime_strength"),
+        "gex_strength_label": gex_info.get("regime_strength_label"),
+        "net_gex_share_pct": gex_info.get("net_gex_share_pct"),
         "max_pain": gex_info.get("max_pain"),
         "oi_change_filter": oi_change_filter,
         "sigma_range": {"low": round(spot-sigma_1d,2), "high": round(spot+sigma_1d,2)},
