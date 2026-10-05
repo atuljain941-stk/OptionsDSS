@@ -509,7 +509,8 @@ def _market_overview_row(symbol):
     """Saved GEX/OI plus request-time 0DTE chain and tomorrow-expiry volume."""
     from .spy_strategies import (
         _compute_ta, _compute_gex, _score_gex_walls, _five_factor_score,
-        _bs_gamma, _chain_atm_iv, _compute_skew_rr, _vix_context,
+        _bs_gamma, _compute_skew_rr, _vix_context, _canonical_gex_input,
+        _future_exps,
     )
     from .gex_analysis import _latest_stamp, _saved_rows, _oi_by_stamp, _stamp_on_or_before, _prior_business_day
     try:
@@ -532,21 +533,24 @@ def _market_overview_row(symbol):
     saved_expiries = sorted({str(row.get("expiration") or "")[:10] for row in saved_all if str(row.get("expiration") or "")[:10]})
     live_expiries = _live_expiries(symbol)
     today = now_et.date()
-    # Intraday view: today's 0DTE must win. The saved chain is used only when
-    # it contains that expiry; otherwise live OI/IV/volume is the accurate source.
-    expiry = _first_expiry_on_or_after(live_expiries, today) or _first_expiry_on_or_after(saved_expiries, today)
+    # Use the same expiry universe and canonical 0DTE input as the Day Plan.
+    available_expiries = sorted(set(live_expiries + _future_exps(symbol) + saved_expiries))
+    expiry = _first_expiry_on_or_after(available_expiries, today)
     if not expiry:
         raise ValueError("No current or future option expiry is available")
     dte = max(0, (datetime.strptime(expiry, "%Y-%m-%d").date() - today).days)
-    live_rows, live_error = _live_chain_rows(symbol, expiry)
-    saved_rows = _saved_rows(symbol, stamp, expiry) if stamp else []
-    rows = live_rows or saved_rows
-    source = "live 0DTE chain" if live_rows and dte == 0 else ("live nearest-expiry chain" if live_rows else "saved snapshot fallback")
+    canonical_input = _canonical_gex_input(symbol, expiry, spot, _number(ta.get("iv_est"), 20.0))
+    spot = _number(canonical_input.get("spot"), spot)
+    rows = canonical_input.get("rows") or []
+    source = canonical_input.get("source") or "saved option snapshot"
+    live_rows = rows if source == "live option chain" else []
+    live_error = canonical_input.get("live_error")
+    iv_atm = _number(canonical_input.get("iv_atm"), _number(ta.get("iv_est"), 20.0))
     if not rows:
         raise ValueError(live_error or "No option rows for selected expiry")
 
-    previous_stamp = _stamp_on_or_before(symbol, _prior_business_day())
-    previous_oi = _oi_by_stamp(symbol, previous_stamp, expiry)
+    # Normalize only; current GEX must not depend on a page-specific OI-change
+    # enrichment.  OI-change remains a saved-snapshot diagnostic.
     normalized = []
     for raw in rows:
         side = str(raw.get("type") or "").lower()
@@ -556,12 +560,8 @@ def _market_overview_row(symbol):
             continue
         item = dict(raw)
         item["type"] = side
-        item["oi_change"] = int(_number(item.get("oi"), 0) or 0) - int(previous_oi.get((side[:1], strike), 0) or 0)
         normalized.append(item)
     rows = normalized
-    # Derive the ATM IV from this same chain.  Do not mix a realized-vol
-    # technical estimate with the contract IV used by the Daily Plan.
-    iv_atm = _chain_atm_iv(rows, spot, _number(ta.get("iv_est"), 20.0))
     gex = _compute_gex(rows, spot, max(1, dte), iv_atm) if rows else {}
     wall_strength = _score_gex_walls(rows, spot, gex, side=5) if rows else {}
     calls_oi = sum(int(row.get("oi") or 0) for row in rows if row["type"] == "call")
@@ -574,7 +574,7 @@ def _market_overview_row(symbol):
         gex.get("pin_strike", spot), gex.get("gamma_flip", spot), rows,
         gex_ratio=gex.get("gex_ratio"), max_pain=gex.get("max_pain"),
         dte=dte, vix_level=(vix_ctx or {}).get("level"),
-        gex_strength_pct=gex.get("regime_strength"),
+        gex_strength_pct=gex.get("net_gex_share_pct"),
     )
     top_puts, top_calls = wall_strength.get("top_put_walls") or [], wall_strength.get("top_call_walls") or []
     put_wall = _number(top_puts[0].get("strike")) if top_puts else None
@@ -606,12 +606,19 @@ def _market_overview_row(symbol):
     tomorrow_expiry = _first_expiry_on_or_after(live_expiries, today + timedelta(days=1))
     tomorrow_flow = _volume_flow_summary(symbol, tomorrow_expiry, spot, now_et) if tomorrow_expiry else {"available": False, "error": "No tomorrow expiry is listed."}
     return {
-        "symbol": symbol, "expiry": expiry, "dte": dte, "chain_source": source, "spot": spot,
-        "chain_asof": spot_snapshot.get("timestamp") if live_rows else (stamp or "latest saved option snapshot"),
+        "symbol": symbol, "expiry": expiry, "dte": dte,
+        "chain_source": source, "spot": spot,
+        "chain_asof": canonical_input.get("fetched_at"),
+        "gex_input": canonical_input.get("signature"),
+        "gex_input_cache_age_seconds": canonical_input.get("cache_age_seconds"),
         "iv_atm": round(iv_atm, 2), "pcr": oi_pcr, "skew_rr": skew_rr,
         "spot_source": spot_snapshot.get("source") or "technical fallback",
         "regime": regime, "score": score, "confidence": confidence,
-        "net_gex": _number(gex.get("total_gex"), 0), "gamma_flip": _number(gex.get("gamma_flip")),
+        "net_gex": _number(gex.get("total_gex"), 0),
+        "gex_strength": _number(gex.get("regime_strength"), 0),
+        "gex_strength_label": gex.get("regime_strength_label"),
+        "net_gex_share_pct": _number(gex.get("net_gex_share_pct"), 0),
+        "gamma_flip": _number(gex.get("gamma_flip")),
         "pin": _number(gex.get("pin_strike")), "max_pain": _number(gex.get("max_pain")), "put_wall": put_wall, "call_wall": call_wall,
         "location": _overview_location(spot, _number(gex.get("gamma_flip")), put_wall, call_wall),
         "gamma_by_strike": gamma_by_strike, "gamma_totals": gamma_totals,
