@@ -60,6 +60,60 @@ def _finite_number(value, default=None):
     return f if math.isfinite(f) else default
 
 
+def _row_iv_pct(row, fallback_iv):
+    """Return a normalized contract IV in percent, or a defensible fallback."""
+    value = _finite_number((row or {}).get("iv"))
+    if value is not None and value > 0:
+        return value * 100.0 if value <= 3.0 else value
+    return _finite_number(fallback_iv, 15.0) or 15.0
+
+
+def _chain_atm_iv(rows, spot, fallback_iv=15.0):
+    """OI-weighted IV around the nearest listed strike, normalized to percent."""
+    spot = _finite_number(spot)
+    if spot is None:
+        return _finite_number(fallback_iv, 15.0) or 15.0
+    strikes = sorted({_finite_number((row or {}).get("strike")) for row in (rows or [])
+                      if _finite_number((row or {}).get("strike")) is not None})
+    if not strikes:
+        return _finite_number(fallback_iv, 15.0) or 15.0
+    atm = min(strikes, key=lambda strike: abs(strike - spot))
+    weighted, weight = 0.0, 0
+    for row in rows or []:
+        if _finite_number(row.get("strike")) != atm:
+            continue
+        iv = _finite_number(row.get("iv"))
+        if iv is None or iv <= 0:
+            continue
+        iv = iv * 100.0 if iv <= 3.0 else iv
+        oi = max(1, int(_finite_number(row.get("oi"), 0) or 0))
+        weighted += iv * oi
+        weight += oi
+    return round(weighted / weight, 4) if weight else (_finite_number(fallback_iv, 15.0) or 15.0)
+
+
+def _live_chain_rows(symbol, expiry):
+    """Normalized transient chain shared by GEX Overview and Day Plan."""
+    try:
+        chain = yf.Ticker(symbol).option_chain(expiry)
+        rows = []
+        for kind, frame in (("call", chain.calls), ("put", chain.puts)):
+            for _, option in frame.iterrows():
+                strike = _finite_number(option.get("strike"))
+                if strike is None:
+                    continue
+                rows.append({
+                    "type": kind, "strike": strike,
+                    "oi": int(_finite_number(option.get("openInterest"), 0) or 0),
+                    "volume": int(_finite_number(option.get("volume"), 0) or 0),
+                    "iv": _finite_number(option.get("impliedVolatility")),
+                    "gamma": None,
+                })
+        return rows, None if rows else "Live chain returned no listed strikes."
+    except Exception as exc:
+        return [], "Live option chain unavailable: " + str(exc)[:120]
+
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
@@ -2325,13 +2379,7 @@ def _gex_at_price(rows, price, T_days, iv_atm):
     total = 0.0
     for r in rows:
         K = float(r["strike"])
-        dist_pct = (K - price) / price * 100 if price else 0.0
-        if r["type"] == "put" and K < price:
-            strike_iv = iv_atm * (1 + abs(dist_pct) * 0.025)
-        elif r["type"] == "call" and K > price:
-            strike_iv = iv_atm * (1 - abs(dist_pct) * 0.005)
-        else:
-            strike_iv = iv_atm * (1 + abs(dist_pct) * 0.01)
+        strike_iv = _row_iv_pct(r, iv_atm)
         gamma = _bs_gamma(price, K, T_days, strike_iv)
         oi = int(r["oi"] or 0)
         gex = gamma * oi * 100 * price * price * 0.01
@@ -2356,15 +2404,9 @@ def _compute_gex(rows, spot, T_days, iv_atm):
 
     for r in rows:
         K = float(r["strike"])
-        # Use ATM IV as proxy (in a real system you'd use per-strike IV from the chain)
-        # Adjust slightly: OTM puts have higher IV (skew), OTM calls lower
-        dist_pct = (K - spot) / spot * 100 if spot else 0.0
-        if r["type"] == "put" and K < spot:
-            strike_iv = iv_atm * (1 + abs(dist_pct) * 0.025)
-        elif r["type"] == "call" and K > spot:
-            strike_iv = iv_atm * (1 - abs(dist_pct) * 0.005)
-        else:
-            strike_iv = iv_atm * (1 + abs(dist_pct) * 0.01)
+        # Use contract IV when the chain supplies it; only fall back to the
+        # ATM/skew proxy for saved rows that have no IV field.
+        strike_iv = _row_iv_pct(r, iv_atm)
 
         gamma = _bs_gamma(spot, K, T_days, strike_iv)
         oi = int(r["oi"] or 0)
@@ -4165,13 +4207,17 @@ def api_daily_plan():
     if spot is None:
         return jsonify({"error": f"Unable to determine live spot for {sym}"}), 400
     ta["price"] = round(spot, 2)
-    iv_atm = _finite_number(ta.get("iv", 15.0), 15.0) or 15.0
+    # Match the Overview fallback; live-chain ATM IV replaces this below when available.
+    iv_atm = _finite_number(ta.get("iv_est", 20.0), 20.0) or 20.0
 
-    # Expiry list
-    exps = _future_exps(sym)
-    if not exps:
-        try: exps = list(yf.Ticker(sym).options[:6])
-        except: pass
+    # Canonical current-chain contract: merge saved expiries with the provider's
+    # listed expiries so an available 0DTE is never silently replaced by a
+    # later saved expiry (for example 6DTE).
+    try:
+        live_exps = [str(value)[:10] for value in (yf.Ticker(sym).options or [])]
+    except Exception:
+        live_exps = []
+    exps = sorted(set(_future_exps(sym) + live_exps))
 
     # Use selected expiry or auto-pick a near-term GEX expiry.
     if sel_expiry and sel_expiry in exps:
@@ -4184,16 +4230,22 @@ def api_daily_plan():
         exp, dte = _pick_exp(exps, 0, 5, 0)
     if not exp: return jsonify({"error":"No expiry found"}), 404
 
-    rows = _oi_rows(sym, exp)
+    # Use the same transient 0DTE chain as GEX Market Overview.  The saved
+    # chain remains the explicit fallback and continues to power historical
+    # snapshots/OI-change analysis.
+    saved_rows = _oi_rows(sym, exp)
+    live_rows, live_error = _live_chain_rows(sym, exp)
+    rows = live_rows or saved_rows
+    chain_source = "live option chain" if live_rows else "saved option snapshot"
+    chain_note = live_error if not live_rows else None
     if not rows:
-        try:
-            from ..services.market import fetch_store_for
-            fetch_store_for(sym, expirations=[exp])
-            rows = _oi_rows(sym, exp)
-        except: pass
+        return jsonify({"error": f"No option rows for {sym} {exp}", "chain_error": live_error}), 404
+    iv_atm = _chain_atm_iv(rows, spot, iv_atm)
 
-    # GEX
-    oi_change_filter = _oi_change_filter_context(sym, rows, expiry=exp, source="gex_plan", min_change_pct=oi_sig_pct)
+    # OI-change is always based on the saved snapshot; live provider OI does
+    # not establish intraday opening-vs-closing change.
+    oi_change_rows = saved_rows or rows
+    oi_change_filter = _oi_change_filter_context(sym, oi_change_rows, expiry=exp, source="saved_oi_snapshot", min_change_pct=oi_sig_pct)
     T_days = max(1, dte)
     gex_info = _compute_gex(rows, spot, T_days, iv_atm)
     gex_info = dict(gex_info or {})
@@ -4201,11 +4253,10 @@ def api_daily_plan():
     gex_info["pin_strike"] = _finite_number(gex_info.get("pin_strike")) or spot
     gex_info["max_pain"] = _finite_number(gex_info.get("max_pain")) or gex_info["pin_strike"]
 
-    # PCR (multi-expiry)
-    all_rows = []
-    for e in exps[:5]: all_rows.extend(_oi_rows(sym, e))
-    total_calls = sum(int(r["oi"] or 0) for r in all_rows if r["type"]=="call")
-    total_puts  = sum(int(r["oi"] or 0) for r in all_rows if r["type"]=="put")
+    # PCR is intentionally for this same expiry/chain, matching the Overview
+    # and avoiding a mixed 0DTE-GEX versus multi-expiry-PCR regime label.
+    total_calls = sum(int(r.get("oi") or 0) for r in rows if r.get("type") == "call")
+    total_puts = sum(int(r.get("oi") or 0) for r in rows if r.get("type") == "put")
     pcr = round(total_puts / max(1, total_calls), 3)
 
     skew_rr  = _compute_skew_rr(rows, spot, T_days, iv_atm)
@@ -4293,6 +4344,9 @@ def api_daily_plan():
         "spot_change_pct": (spot_snapshot or {}).get("change_pct"),
         "expiry": exp, "dte": dte,
         "expiry_list": exps[:8],
+        "chain_source": chain_source,
+        "chain_note": chain_note,
+        "chain_asof": (spot_snapshot or {}).get("timestamp") if live_rows else "latest saved option snapshot",
         "iv_atm": round(iv_atm,2), "pcr": pcr,
         "skew_rr": skew_rr, "sigma_1d": sigma_1d,
         "gex_strength": gex_info.get("regime_strength"),
