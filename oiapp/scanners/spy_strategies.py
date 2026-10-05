@@ -148,9 +148,28 @@ def _canonical_gex_input(symbol, expiry, fallback_spot, fallback_iv=20.0):
     spot = _finite_number(spot_snapshot.get("price"), _finite_number(fallback_spot))
     live_rows, live_error = _live_chain_rows(symbol, expiry)
     saved_rows = _oi_rows(symbol, expiry)
-    rows = live_rows or saved_rows
-    source = "live option chain" if live_rows else "saved option snapshot"
-    rows = [dict(row) for row in (rows or [])]
+    # OI is a structural, usually overnight field.  Base GEX on the saved
+    # snapshot and merge current IV/volume only; provider "live OI" may be
+    # stale or internally inconsistent during the session.
+    live_by_contract = {
+        (str(row.get("type") or "").lower(), _finite_number(row.get("strike"))): row
+        for row in live_rows
+        if _finite_number(row.get("strike")) is not None
+    }
+    if saved_rows:
+        rows = []
+        for saved in saved_rows:
+            row = dict(saved)
+            live = live_by_contract.get((str(row.get("type") or "").lower(), _finite_number(row.get("strike"))), {})
+            if live:
+                row["volume"] = live.get("volume", row.get("volume"))
+                row["iv"] = live.get("iv")
+                row["gamma"] = live.get("gamma")
+            rows.append(row)
+        source = "saved OI + live IV/volume" if live_rows else "saved option snapshot"
+    else:
+        rows = [dict(row) for row in live_rows]
+        source = "live option-chain fallback"
     calls_oi = sum(int(_finite_number(row.get("oi"), 0) or 0) for row in rows if str(row.get("type") or "").lower().startswith("c"))
     puts_oi = sum(int(_finite_number(row.get("oi"), 0) or 0) for row in rows if str(row.get("type") or "").lower().startswith("p"))
     iv_atm = _chain_atm_iv(rows, spot, fallback_iv)
@@ -162,6 +181,7 @@ def _canonical_gex_input(symbol, expiry, fallback_spot, fallback_iv=20.0):
     }
     out = {
         "rows": rows, "source": source, "live_error": live_error,
+        "live_available": bool(live_rows),
         "spot": spot, "spot_snapshot": spot_snapshot, "iv_atm": iv_atm,
         "signature": signature, "fetched_epoch": now,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
@@ -4315,7 +4335,7 @@ def api_daily_plan():
     ta["price"] = round(spot, 2)
     rows = canonical_input.get("rows") or []
     chain_source = canonical_input.get("source")
-    chain_note = canonical_input.get("live_error") if chain_source != "live option chain" else None
+    chain_note = canonical_input.get("live_error") if not canonical_input.get("live_available") else None
     if not rows:
         return jsonify({"error": f"No option rows for {sym} {exp}", "chain_error": chain_note}), 404
     iv_atm = _finite_number(canonical_input.get("iv_atm"), iv_atm) or iv_atm
