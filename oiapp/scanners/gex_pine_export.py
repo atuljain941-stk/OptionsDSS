@@ -543,7 +543,7 @@ def _market_overview_row(symbol):
     spot = _number(canonical_input.get("spot"), spot)
     rows = canonical_input.get("rows") or []
     source = canonical_input.get("source") or "saved option snapshot"
-    live_rows = rows if source == "live option chain" else []
+    live_rows = rows if canonical_input.get("live_available") else []
     live_error = canonical_input.get("live_error")
     iv_atm = _number(canonical_input.get("iv_atm"), _number(ta.get("iv_est"), 20.0))
     if not rows:
