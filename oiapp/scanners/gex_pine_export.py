@@ -509,7 +509,8 @@ def _market_overview_row(symbol):
     """Saved GEX/OI plus request-time 0DTE chain and tomorrow-expiry volume."""
     from .spy_strategies import (
         _compute_ta, _compute_gex, _score_gex_walls, _five_factor_score,
-        _bs_gamma, _chain_atm_iv, _compute_skew_rr, _vix_context,
+        _bs_gamma, _compute_skew_rr, _vix_context, _canonical_gex_input,
+        _future_exps,
     )
     from .gex_analysis import _latest_stamp, _saved_rows, _oi_by_stamp, _stamp_on_or_before, _prior_business_day
     try:
@@ -532,21 +533,24 @@ def _market_overview_row(symbol):
     saved_expiries = sorted({str(row.get("expiration") or "")[:10] for row in saved_all if str(row.get("expiration") or "")[:10]})
     live_expiries = _live_expiries(symbol)
     today = now_et.date()
-    # Intraday view: today's 0DTE must win. The saved chain is used only when
-    # it contains that expiry; otherwise live OI/IV/volume is the accurate source.
-    expiry = _first_expiry_on_or_after(live_expiries, today) or _first_expiry_on_or_after(saved_expiries, today)
+    # Use the same expiry universe and canonical 0DTE input as the Day Plan.
+    available_expiries = sorted(set(live_expiries + _future_exps(symbol) + saved_expiries))
+    expiry = _first_expiry_on_or_after(available_expiries, today)
     if not expiry:
         raise ValueError("No current or future option expiry is available")
     dte = max(0, (datetime.strptime(expiry, "%Y-%m-%d").date() - today).days)
-    live_rows, live_error = _live_chain_rows(symbol, expiry)
-    saved_rows = _saved_rows(symbol, stamp, expiry) if stamp else []
-    rows = live_rows or saved_rows
-    source = "live 0DTE chain" if live_rows and dte == 0 else ("live nearest-expiry chain" if live_rows else "saved snapshot fallback")
+    canonical_input = _canonical_gex_input(symbol, expiry, spot, _number(ta.get("iv_est"), 20.0))
+    spot = _number(canonical_input.get("spot"), spot)
+    rows = canonical_input.get("rows") or []
+    source = canonical_input.get("source") or "saved option snapshot"
+    live_rows = rows if canonical_input.get("live_available") else []
+    live_error = canonical_input.get("live_error")
+    iv_atm = _number(canonical_input.get("iv_atm"), _number(ta.get("iv_est"), 20.0))
     if not rows:
         raise ValueError(live_error or "No option rows for selected expiry")
 
-    previous_stamp = _stamp_on_or_before(symbol, _prior_business_day())
-    previous_oi = _oi_by_stamp(symbol, previous_stamp, expiry)
+    # Normalize only; current GEX must not depend on a page-specific OI-change
+    # enrichment.  OI-change remains a saved-snapshot diagnostic.
     normalized = []
     for raw in rows:
         side = str(raw.get("type") or "").lower()
@@ -556,12 +560,8 @@ def _market_overview_row(symbol):
             continue
         item = dict(raw)
         item["type"] = side
-        item["oi_change"] = int(_number(item.get("oi"), 0) or 0) - int(previous_oi.get((side[:1], strike), 0) or 0)
         normalized.append(item)
     rows = normalized
-    # Derive the ATM IV from this same chain.  Do not mix a realized-vol
-    # technical estimate with the contract IV used by the Daily Plan.
-    iv_atm = _chain_atm_iv(rows, spot, _number(ta.get("iv_est"), 20.0))
     gex = _compute_gex(rows, spot, max(1, dte), iv_atm) if rows else {}
     wall_strength = _score_gex_walls(rows, spot, gex, side=5) if rows else {}
     calls_oi = sum(int(row.get("oi") or 0) for row in rows if row["type"] == "call")
@@ -574,7 +574,7 @@ def _market_overview_row(symbol):
         gex.get("pin_strike", spot), gex.get("gamma_flip", spot), rows,
         gex_ratio=gex.get("gex_ratio"), max_pain=gex.get("max_pain"),
         dte=dte, vix_level=(vix_ctx or {}).get("level"),
-        gex_strength_pct=gex.get("regime_strength"),
+        gex_strength_pct=gex.get("net_gex_share_pct"),
     )
     top_puts, top_calls = wall_strength.get("top_put_walls") or [], wall_strength.get("top_call_walls") or []
     put_wall = _number(top_puts[0].get("strike")) if top_puts else None
@@ -606,12 +606,19 @@ def _market_overview_row(symbol):
     tomorrow_expiry = _first_expiry_on_or_after(live_expiries, today + timedelta(days=1))
     tomorrow_flow = _volume_flow_summary(symbol, tomorrow_expiry, spot, now_et) if tomorrow_expiry else {"available": False, "error": "No tomorrow expiry is listed."}
     return {
-        "symbol": symbol, "expiry": expiry, "dte": dte, "chain_source": source, "spot": spot,
-        "chain_asof": spot_snapshot.get("timestamp") if live_rows else (stamp or "latest saved option snapshot"),
+        "symbol": symbol, "expiry": expiry, "dte": dte,
+        "chain_source": source, "spot": spot,
+        "chain_asof": canonical_input.get("fetched_at"),
+        "gex_input": canonical_input.get("signature"),
+        "gex_input_cache_age_seconds": canonical_input.get("cache_age_seconds"),
         "iv_atm": round(iv_atm, 2), "pcr": oi_pcr, "skew_rr": skew_rr,
         "spot_source": spot_snapshot.get("source") or "technical fallback",
         "regime": regime, "score": score, "confidence": confidence,
-        "net_gex": _number(gex.get("total_gex"), 0), "gamma_flip": _number(gex.get("gamma_flip")),
+        "net_gex": _number(gex.get("total_gex"), 0),
+        "gex_strength": _number(gex.get("regime_strength"), 0),
+        "gex_strength_label": gex.get("regime_strength_label"),
+        "net_gex_share_pct": _number(gex.get("net_gex_share_pct"), 0),
+        "gamma_flip": _number(gex.get("gamma_flip")),
         "pin": _number(gex.get("pin_strike")), "max_pain": _number(gex.get("max_pain")), "put_wall": put_wall, "call_wall": call_wall,
         "location": _overview_location(spot, _number(gex.get("gamma_flip")), put_wall, call_wall),
         "gamma_by_strike": gamma_by_strike, "gamma_totals": gamma_totals,
@@ -649,7 +656,7 @@ def gex_market_overview_script():
 
 _MARKET_OVERVIEW_SCRIPT = r"""
 var overviewRows=[],mode='net',grid=document.getElementById('grid'),statusEl=document.getElementById('status'),diagnosticEl=document.getElementById('diagnostic'),refreshButton=document.getElementById('refresh'),intervalSelect=document.getElementById('interval');
-function diagnostic(message){if(diagnosticEl)diagnosticEl.textContent='Diagnostics v20260930.4: '+message}
+function diagnostic(message){if(diagnosticEl)diagnosticEl.textContent='Diagnostics v20261009.1: '+message}
 window.addEventListener('error',function(e){diagnostic('Browser error — '+(e.message||'unknown error'))});
 window.addEventListener('unhandledrejection',function(e){diagnostic('Unhandled request error — '+String(e.reason||'unknown error'))});
 diagnostic('browser script started; requesting API…');var n=function(v){return v==null?'—':typeof v==='number'?v.toLocaleString(undefined,{maximumFractionDigits:2}):v};function row(k,v,c){return '<div class="metric '+(c||'')+'"><span>'+k+'</span><b>'+v+'</b></div>'}
@@ -657,7 +664,7 @@ function gammaChart(x){var data=x.gamma_by_strike||[];if(!data.length)return '<p
 function levels(items,side){return(items||[]).map(function(x){return '$'+n(x.strike)+' ('+n(x[side+'_volume'])+')'}).join(', ')||'—'}
 function tomorrow(x){var f=x.tomorrow_flow||{};if(!f.available)return '<div class=flow><b>Tomorrow view</b><p class=muted>'+((f.error)||'Tomorrow expiry unavailable.')+'</p></div>';return '<div class=flow><b>Tomorrow view — '+f.expiry+' (today\'s volume)</b><p>'+f.commentary+'</p><p class=muted>Top calls: '+levels(f.top_calls,'call')+'<br>Top puts: '+levels(f.top_puts,'put')+'<br>Tomorrow-expiry P/C volume: '+n(f.put_call_volume_ratio)+'</p></div>'}
 function thetaClock(x){var t=x.theta_clock||{};if(!t.available)return '<div class=clock><b>0DTE Theta Clock</b><p class=muted>'+((t.note)||'Unavailable.')+'</p></div>';function d(v){return v==null?'—':(v.dollars>=0?'+':'')+n(v.dollars)+' ('+n(v.remaining_em)+'× remaining EM)'}var c=t.trade_commentary||{};var commentary=c.label?'<div class=trade-commentary><b>Trade commentary — '+c.label+'</b><p><b>Strategy:</b> '+c.strategy+'</p><p><b>Trigger:</b> '+c.trigger+'</p><p><b>Invalidation:</b> '+c.invalidation+'</p><p class=muted>'+c.risk+'</p></div>':'';return '<div class=clock><b>0DTE Theta Clock — '+n(t.minutes_remaining)+' min remaining</b>'+row('ATM / ATM IV',n(t.atm_strike)+' / '+n(t.atm_iv_pct)+'%')+row('Daily / remaining EM',n(t.daily_expected_move)+' / '+n(t.remaining_expected_move))+row('Half-EM shelves',n(t.half_shelves.lower)+' / '+n(t.half_shelves.upper))+row('ATM straddle model now',n(t.model_atm_straddle))+row('Model time value spent',n(t.model_time_value_spent))+row('Pin distance',d(t.pin_distance))+row('Put / call wall distance',d(t.put_wall_distance)+' / '+d(t.call_wall_distance))+'<p><b>Posture:</b> '+t.posture+'</p>'+commentary+'<p class=muted>'+t.note+'</p></div>'}
-function card(x){var l=x.live_volume||{},s=x.saved_volume||{},g=x.gamma_totals||{},dc=(l.call_volume||0)-(s.call_volume||0),dp=(l.put_volume||0)-(s.put_volume||0),klass=(x.regime||'').toLowerCase().includes('positive')?'good':'bad';return '<section class=card><h2>'+x.symbol+' <small class=muted>'+x.expiry+' • '+x.dte+' DTE</small></h2><p class=muted>Chain: '+x.chain_source+'</p>'+row('Regime',x.regime,klass)+row('Live spot',n(x.spot))+row('Price location',x.location)+row('Net GEX',n(x.net_gex))+row('Gamma flip',n(x.gamma_flip))+row('Balance pin',n(x.pin))+row('Max pain',n(x.max_pain))+row('Put / call wall',n(x.put_wall)+' / '+n(x.call_wall))+row('Live call / put volume',n(l.call_volume)+' / '+n(l.put_volume))+row('Live put/call volume',n(x.live_pcv))+row('Chart call / put gamma',n(g.call)+' / '+n(g.put))+row('Volume vs saved','C '+(dc>=0?'+':'')+n(dc)+' • P '+(dp>=0?'+':'')+n(dp))+'<p><b>Read:</b> '+x.trade_read+'</p>'+thetaClock(x)+tomorrow(x)+gammaChart(x)+'</section>'}
+function card(x){var l=x.live_volume||{},s=x.saved_volume||{},g=x.gamma_totals||{},dc=(l.call_volume||0)-(s.call_volume||0),dp=(l.put_volume||0)-(s.put_volume||0),klass=(x.regime||'').toLowerCase().includes('positive')?'good':'bad';return '<section class=card><h2>'+x.symbol+' <small class=muted>'+x.expiry+' • '+x.dte+' DTE</small></h2><p class=muted>Chain: '+x.chain_source+'</p>'+row('Regime',x.regime,klass)+row('Live spot',n(x.spot))+row('Price location',x.location)+row('Net GEX',n(x.net_gex)+' ('+n(x.net_gex_share_pct)+'% of gross)')+row('Gamma flip',n(x.gamma_flip))+row('Balance pin',n(x.pin))+row('Max pain',n(x.max_pain))+row('Put / call wall',n(x.put_wall)+' / '+n(x.call_wall))+row('Live call / put volume',n(l.call_volume)+' / '+n(l.put_volume))+row('Live put/call volume',n(x.live_pcv))+row('Chart call / put gamma',n(g.call)+' / '+n(g.put))+row('Volume vs saved','C '+(dc>=0?'+':'')+n(dc)+' • P '+(dp>=0?'+':'')+n(dp))+'<p><b>Read:</b> '+x.trade_read+'</p>'+thetaClock(x)+tomorrow(x)+gammaChart(x)+'</section>'}
 function draw(){grid.innerHTML=overviewRows.map(card).join('')||'<p>No GEX data is available.</p>'}document.querySelectorAll('[data-mode]').forEach(function(b){b.onclick=function(){mode=b.dataset.mode;document.querySelectorAll('[data-mode]').forEach(function(x){x.classList.toggle('active',x===b)});draw()}});async function load(){statusEl.textContent='Loading live 0DTE GEX and tomorrow-expiry volume…';diagnostic('requesting /gex/market-overview?format=json');try{var r=await fetch('/gex/market-overview?format=json',{cache:'no-store'}),raw=await r.text();if(!r.ok)throw new Error('HTTP '+r.status+': '+raw.slice(0,180));var d=JSON.parse(raw);overviewRows=d.results||[];draw();var apiErrors=(d.errors||[]).map(function(e){return e.symbol+': '+e.error}).join(' | ');statusEl.textContent='Updated '+d.updated+(apiErrors?' • '+apiErrors:'');diagnostic('API responded: '+overviewRows.length+' card(s)'+(apiErrors?'; errors: '+apiErrors:'; no API errors.'))}catch(e){statusEl.textContent='Could not load overview: '+e.message;diagnostic('API request failed — '+e.message)}}var refreshTimer=null;function setRefreshInterval(){if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}var seconds=Number(intervalSelect.value||0);if(seconds)refreshTimer=setInterval(load,seconds*1000)}intervalSelect.onchange=setRefreshInterval;window.addEventListener('pagehide',function(){if(refreshTimer)clearInterval(refreshTimer)});refreshButton.onclick=load;load();
 """
 
