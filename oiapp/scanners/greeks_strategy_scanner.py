@@ -608,7 +608,21 @@ def _trade_context(symbol: str, spot: float, universe: Dict[str, Any]) -> Dict[s
     sma20 = round(sum(closes[-20:]) / 20, 2) if len(closes) >= 20 else None
     sma50 = round(sum(closes[-50:]) / 50, 2) if len(closes) >= 50 else None
     momentum_5d = round((closes[-1] / closes[-6] - 1) * 100, 2) if len(closes) >= 6 and closes[-6] else None
-    if sma20 and sma50 and spot >= sma20 >= sma50:
+    # Reuse the app's richer technical engine where it is available: ADX,
+    # DI, RSI/EMA, MACD, Bollinger position and volume surge.  It fetches
+    # once per symbol through its own cache; the simple stored-price view
+    # below remains a safe fallback for offline/missing-data environments.
+    technical: Dict[str, Any] = {}
+    classified = None
+    try:
+        from .opportunity_scanner import _compute_ta, _classify
+        technical = _compute_ta(symbol) or {}
+        classified = _classify(technical) if technical else None
+    except Exception:
+        technical, classified = {}, None
+    if classified:
+        regime = str(classified[0]).replace("_", " ").lower()
+    elif sma20 and sma50 and spot >= sma20 >= sma50:
         regime = "bullish trend"
     elif sma20 and sma50 and spot <= sma20 <= sma50:
         regime = "bearish trend"
@@ -630,6 +644,7 @@ def _trade_context(symbol: str, spot: float, universe: Dict[str, Any]) -> Dict[s
         "regime": regime, "sma20": sma20, "sma50": sma50, "momentum_5d_pct": momentum_5d,
         "total_oi": total_oi, "call_oi": call_oi, "put_oi": put_oi, "put_call_oi_ratio": pcr,
         "call_wall": call_wall, "put_wall": put_wall, "quality_score": min(100, quality),
+        "technical": {k: technical.get(k) for k in ("trend", "adx", "rsi", "macd", "bb_pct", "iv_rank", "vol_surge") if technical.get(k) is not None},
         "summary": summary,
     }
 
@@ -641,14 +656,15 @@ def _candidate_score(res: Dict[str, Any], context: Dict[str, Any]) -> tuple[floa
     quality = float(context.get("quality_score") or 0)
     strategy = str(res.get("strategy") or "")
     regime = context.get("regime", "")
+    trend = (context.get("technical") or {}).get("trend", "")
     fit = 0.0
-    if regime == "range / mixed" and strategy in ("Short Strangle", "Iron Fly", "Short Straddle"):
+    if regime in ("range / mixed", "mean reversion") and strategy in ("Short Strangle", "Iron Fly", "Short Straddle"):
         fit = 8.0
-    elif regime == "bullish trend" and ("Jade Lizard" in strategy or "Broken-Wing" in strategy):
+    elif trend in ("UPTREND", "MILD UP") and ("Jade Lizard" in strategy or "Broken-Wing" in strategy):
         fit = 8.0
-    elif regime == "bearish trend" and strategy in ("Short Strangle", "Iron Fly"):
+    elif trend in ("DOWNTREND", "MILD DOWN") and strategy in ("Short Strangle", "Iron Fly"):
         fit = 3.0
-    elif "trend" in regime and strategy == "Short Straddle":
+    elif regime == "trending" and strategy == "Short Straddle":
         fit = -8.0
     score = round(min(100.0, pop * 45 + rr * 12 + quality * 0.35 + fit), 1)
     reason = f"POP {pop * 100:.0f}% • RR {rr:.2f} • {context.get('regime')} • OI quality {quality:.0f}/100"
