@@ -566,6 +566,118 @@ def _resolve_symbols(watchlist_id: Optional[str], symbols: Optional[List[str]]) 
     return _watchlist_symbols()
 
 
+
+def _available_expiries(symbols: List[str], min_dte: int, max_dte: int) -> List[str]:
+    """Return stored expiries in a bounded DTE window for the requested
+    universe.  The scan still verifies each symbol/expiry has a usable chain;
+    this merely avoids calling the builders for impossible dates."""
+    if min_dte < 1 or max_dte < min_dte:
+        return []
+    conn = sqlite3.connect(_OIAPP_DB_PATH)
+    c = conn.cursor()
+    if symbols:
+        placeholders = ",".join("?" for _ in symbols)
+        c.execute(f"SELECT DISTINCT expiration FROM {TABLE} WHERE symbol IN ({placeholders}) AND expiration>=date('now') ORDER BY expiration", symbols)
+    else:
+        c.execute(f"SELECT DISTINCT expiration FROM {TABLE} WHERE expiration>=date('now') ORDER BY expiration")
+    expiries = [r[0] for r in c.fetchall() if r[0]]
+    conn.close()
+    return [exp for exp in expiries if min_dte <= _dte(exp) <= max_dte]
+
+
+def _trade_context(symbol: str, spot: float, universe: Dict[str, Any]) -> Dict[str, Any]:
+    """Small, explainable context layer used to rank (not pretend to predict)
+    candidates: current-expiry OI positioning plus daily price action."""
+    calls, puts = universe.get("calls", {}), universe.get("puts", {})
+    call_oi = sum((row.get("oi") or 0) for row in calls.values())
+    put_oi = sum((row.get("oi") or 0) for row in puts.values())
+    total_oi = call_oi + put_oi
+    call_wall = max(calls, key=lambda k: calls[k].get("oi") or 0) if calls else None
+    put_wall = max(puts, key=lambda k: puts[k].get("oi") or 0) if puts else None
+    pcr = round(put_oi / call_oi, 2) if call_oi else None
+
+    closes: List[float] = []
+    try:
+        conn = sqlite3.connect(_OIAPP_DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT close FROM price_cache WHERE symbol=? AND close IS NOT NULL ORDER BY date DESC LIMIT 60", (symbol,))
+        closes = [float(r[0]) for r in c.fetchall()][::-1]
+        conn.close()
+    except Exception:
+        closes = []
+    sma20 = round(sum(closes[-20:]) / 20, 2) if len(closes) >= 20 else None
+    sma50 = round(sum(closes[-50:]) / 50, 2) if len(closes) >= 50 else None
+    momentum_5d = round((closes[-1] / closes[-6] - 1) * 100, 2) if len(closes) >= 6 and closes[-6] else None
+    if sma20 and sma50 and spot >= sma20 >= sma50:
+        regime = "bullish trend"
+    elif sma20 and sma50 and spot <= sma20 <= sma50:
+        regime = "bearish trend"
+    elif sma20 and sma50:
+        regime = "range / mixed"
+    else:
+        regime = "insufficient price history"
+
+    quality = 35
+    if total_oi >= 10000: quality += 25
+    elif total_oi >= 3000: quality += 18
+    elif total_oi >= 1000: quality += 10
+    if len(closes) >= 50: quality += 20
+    if call_wall is not None and put_wall is not None: quality += 10
+    if pcr is not None: quality += 10
+    summary = f"{regime}; OI {total_oi:,}"
+    if pcr is not None: summary += f"; PCR {pcr:.2f}"
+    return {
+        "regime": regime, "sma20": sma20, "sma50": sma50, "momentum_5d_pct": momentum_5d,
+        "total_oi": total_oi, "call_oi": call_oi, "put_oi": put_oi, "put_call_oi_ratio": pcr,
+        "call_wall": call_wall, "put_wall": put_wall, "quality_score": min(100, quality),
+        "summary": summary,
+    }
+
+
+def _candidate_score(res: Dict[str, Any], context: Dict[str, Any]) -> tuple[float, str]:
+    """Transparent ranking score; it is deliberately not a win probability."""
+    pop = float(res.get("pop") or 0)
+    rr = min(float(res.get("rr") or 0), 3.0)
+    quality = float(context.get("quality_score") or 0)
+    strategy = str(res.get("strategy") or "")
+    regime = context.get("regime", "")
+    fit = 0.0
+    if regime == "range / mixed" and strategy in ("Short Strangle", "Iron Fly", "Short Straddle"):
+        fit = 8.0
+    elif regime == "bullish trend" and ("Jade Lizard" in strategy or "Broken-Wing" in strategy):
+        fit = 8.0
+    elif regime == "bearish trend" and strategy in ("Short Strangle", "Iron Fly"):
+        fit = 3.0
+    elif "trend" in regime and strategy == "Short Straddle":
+        fit = -8.0
+    score = round(min(100.0, pop * 45 + rr * 12 + quality * 0.35 + fit), 1)
+    reason = f"POP {pop * 100:.0f}% • RR {rr:.2f} • {context.get('regime')} • OI quality {quality:.0f}/100"
+    return score, reason
+
+
+def scan_auto_expiries(strategies: List[str], min_dte: int = 15, max_dte: int = 45,
+                       min_rr: float = DEFAULT_MIN_RR, min_pop: float = DEFAULT_MIN_POP,
+                       symbols: Optional[List[str]] = None, min_oi: int = 50,
+                       max_spread_pct: float = 15.0, watchlist_id: Optional[str] = None,
+                       earnings_gate: str = "exclude") -> List[Dict[str, Any]]:
+    """Evaluate every *available* stored expiry in the requested 15–45 DTE
+    window and rank the viable structures.  The ranking is a candidate
+    quality score, not a forecast or a probability of winning."""
+    resolved_symbols = _resolve_symbols(watchlist_id, symbols)
+    results: List[Dict[str, Any]] = []
+    for expiry in _available_expiries(resolved_symbols, min_dte, max_dte):
+        results.extend(scan_strategies(
+            expiry, strategies, min_rr=min_rr, min_pop=min_pop, symbols=resolved_symbols,
+            min_oi=min_oi, max_spread_pct=max_spread_pct, earnings_gate=earnings_gate,
+        ))
+    for res in results:
+        score, reason = _candidate_score(res, res.get("context") or {})
+        res["recommendation_score"] = score
+        res["recommendation_basis"] = reason
+        res["auto_expiry"] = True
+    results.sort(key=lambda r: (r.get("recommendation_score") or 0, r.get("pop") or 0, r.get("rr") or 0), reverse=True)
+    return results
+
 def _historical_earnings_moves(symbol: str, last_earn_date: Optional[str], n_quarters: int = 4) -> Dict[str, Any]:
     """Average |% move| around past earnings dates, from price_cache.
 
@@ -715,6 +827,7 @@ def scan_strategies(expiry: str, strategies: List[str], min_rr: float = DEFAULT_
             if not universe["calls"] and not universe["puts"]:
                 continue
 
+            context = _trade_context(sym, spot, universe)
             earn = get_earnings_info(sym) or {}
             earn_date = earn.get("earn_date")
             earn_days = earn.get("earn_days")
@@ -736,6 +849,10 @@ def scan_strategies(expiry: str, strategies: List[str], min_rr: float = DEFAULT_
                 res["earn_date"] = earn_date
                 res["earn_days"] = earn_days
                 res["spans_earnings"] = spans_earnings
+                res["context"] = context
+                score, reason = _candidate_score(res, context)
+                res["recommendation_score"] = score
+                res["recommendation_basis"] = reason
                 if res.get("rr") is not None and res["rr"] < min_rr:
                     continue
                 if res.get("pop") is not None and res["pop"] < min_pop:
@@ -837,12 +954,46 @@ def api_scan():
     min_oi = int(request.args.get("min_oi", 50))
     max_spread_pct = float(request.args.get("max_spread_pct", 15.0))
     watchlist_id = request.args.get("watchlist_id") or None
+    symbol = (request.args.get("symbol") or "").strip().upper() or None
+    if symbol and watchlist_id:
+        return jsonify({"ok": False, "error": "Choose either a single symbol or a watchlist, not both."}), 400
     earnings_gate = request.args.get("earnings_gate", "any")
     try:
         results = scan_strategies(expiry, strategies, min_rr=min_rr, min_pop=min_pop,
-                                   min_oi=min_oi, max_spread_pct=max_spread_pct, watchlist_id=watchlist_id,
+                                   symbols=[symbol] if symbol else None, min_oi=min_oi,
+                                   max_spread_pct=max_spread_pct, watchlist_id=watchlist_id,
                                    earnings_gate=earnings_gate)
         return jsonify({"ok": True, "results": results, "count": len(results)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+
+@greeks_strategy_bp.route("/api/auto_scan")
+def api_auto_scan():
+    strategies = (request.args.get("strategies") or "strangle,straddle,iron_fly,jade_lizard,broken_wing_fly").split(",")
+    min_dte = int(request.args.get("min_dte", 15))
+    max_dte = int(request.args.get("max_dte", 45))
+    min_rr = float(request.args.get("min_rr", DEFAULT_MIN_RR))
+    min_pop = float(request.args.get("min_pop", DEFAULT_MIN_POP))
+    min_oi = int(request.args.get("min_oi", 50))
+    max_spread_pct = float(request.args.get("max_spread_pct", 15.0))
+    watchlist_id = request.args.get("watchlist_id") or None
+    symbol = (request.args.get("symbol") or "").strip().upper() or None
+    earnings_gate = request.args.get("earnings_gate", "exclude")
+    if symbol and watchlist_id:
+        return jsonify({"ok": False, "error": "Choose either a single symbol or a watchlist, not both."}), 400
+    if min_dte < 1 or max_dte < min_dte or max_dte > 180:
+        return jsonify({"ok": False, "error": "Use a valid DTE range (1–180 days)."}), 400
+    try:
+        results = scan_auto_expiries(
+            strategies, min_dte=min_dte, max_dte=max_dte, min_rr=min_rr, min_pop=min_pop,
+            symbols=[symbol] if symbol else None, min_oi=min_oi, max_spread_pct=max_spread_pct,
+            watchlist_id=watchlist_id, earnings_gate=earnings_gate,
+        )
+        return jsonify({"ok": True, "results": results, "count": len(results),
+                        "analysis_window": {"min_dte": min_dte, "max_dte": max_dte}})
     except Exception as e:
         import traceback
         traceback.print_exc()
