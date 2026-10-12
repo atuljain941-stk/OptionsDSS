@@ -52,10 +52,21 @@
 
   <div class="card" id="standard-controls">
     <div class="toolbar" style="margin-bottom:10px">
-      <span class="muted" style="font-size:12px">Watchlist</span>
-      <select id="watchlist-select" style="width:200px"><option value="">All symbols with options data</option></select>
-      <span class="muted" style="font-size:12px">Expiry</span>
-      <select id="expiry-select" style="width:170px"></select>
+      <span class="muted" style="font-size:12px">Scope</span>
+      <input id="symbol-input" type="text" maxlength="12" placeholder="Symbol, e.g. AAPL" style="width:130px" title="Optional: enter one symbol OR choose a watchlist."/>
+      <span class="muted" style="font-size:12px">or Watchlist</span>
+      <select id="watchlist-select" style="width:190px"><option value="">All symbols with options data</option></select>
+      <span class="muted" style="font-size:12px">Expiry mode</span>
+      <select id="expiry-mode-select" style="width:190px" onchange="toggleExpiryMode()">
+        <option value="auto" selected>Auto-rank all 15–45 DTE</option>
+        <option value="manual">One selected expiry</option>
+      </select>
+      <span class="muted expiry-manual-control" style="font-size:12px;display:none">Expiry</span>
+      <select id="expiry-select" class="expiry-manual-control" style="width:170px;display:none"></select>
+      <span class="muted expiry-auto-control" style="font-size:12px">DTE</span>
+      <input id="min-dte-input" class="expiry-auto-control" type="number" min="1" max="180" value="15" style="width:54px"/>
+      <span class="muted expiry-auto-control" style="font-size:12px">to</span>
+      <input id="max-dte-input" class="expiry-auto-control" type="number" min="1" max="180" value="45" style="width:54px"/>
       <span class="muted" style="font-size:12px">Strategies</span>
       <label class="strat-check"><input type="checkbox" value="strangle" checked/> Strangle</label>
       <label class="strat-check"><input type="checkbox" value="straddle" checked/> Straddle</label>
@@ -259,30 +270,45 @@ async function loadWatchlists() {
   } catch (e) { /* non-fatal -- dropdowns just stay at "All symbols" */ }
 }
 
+function toggleExpiryMode() {
+  const auto = document.getElementById("expiry-mode-select").value === "auto";
+  document.querySelectorAll(".expiry-auto-control").forEach(el => el.style.display = auto ? "" : "none");
+  document.querySelectorAll(".expiry-manual-control").forEach(el => el.style.display = auto ? "none" : "");
+}
+
 async function runScan() {
+  const mode = document.getElementById("expiry-mode-select").value;
   const expiry = document.getElementById("expiry-select").value;
+  const symbol = document.getElementById("symbol-input").value.trim().toUpperCase();
   const status = document.getElementById("scan-status");
-  if (!expiry) { status.textContent = "Pick an expiry first"; return; }
+  if (mode === "manual" && !expiry) { status.textContent = "Pick an expiry first"; return; }
   const strategies = Array.from(document.querySelectorAll("#standard-controls .strat-check input:checked")).map(i => i.value);
   const minRr = document.getElementById("min-rr-input").value || 0.7;
-  const minPopPct = document.getElementById("min-pop-input").value || 0;
-  const minPop = minPopPct / 100;  // input is a percentage (0-100); API expects a 0-1 fraction, same scale POP itself is returned in
+  const minPop = (document.getElementById("min-pop-input").value || 0) / 100;
   const minOi = document.getElementById("min-oi-input").value || 50;
   const maxSpread = document.getElementById("max-spread-input").value || 15;
   const watchlistId = document.getElementById("watchlist-select").value;
   const earningsGate = document.getElementById("earnings-gate-select").value;
-  status.innerHTML = '<span class="spinner"></span> Scanning...';
-  document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> Scanning watchlist...</div>';
+  const minDte = document.getElementById("min-dte-input").value || 15;
+  const maxDte = document.getElementById("max-dte-input").value || 45;
+  if (symbol && watchlistId) { status.innerHTML = '<span class="status-err">Choose either a symbol or a watchlist.</span>'; return; }
+  if (mode === "auto" && Number(minDte) > Number(maxDte)) { status.innerHTML = '<span class="status-err">Minimum DTE cannot exceed maximum DTE.</span>'; return; }
+  status.innerHTML = '<span class="spinner"></span> ' + (mode === "auto" ? "Evaluating each expiry..." : "Scanning...");
+  document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> ' + (mode === "auto" ? "Computing candidates across available expiries..." : "Scanning selected expiry...") + '</div>';
   try {
-    let url = `/greeks-strategy-scanner/api/scan?expiry=${encodeURIComponent(expiry)}&strategies=${strategies.join(",")}&min_rr=${minRr}&min_pop=${minPop}&min_oi=${minOi}&max_spread_pct=${maxSpread}&earnings_gate=${earningsGate}`;
-    if (watchlistId) url += `&watchlist_id=${encodeURIComponent(watchlistId)}`;
+    const common = "strategies=" + strategies.join(",") + "&min_rr=" + minRr + "&min_pop=" + minPop + "&min_oi=" + minOi + "&max_spread_pct=" + maxSpread + "&earnings_gate=" + earningsGate;
+    let url = mode === "auto"
+      ? "/greeks-strategy-scanner/api/auto_scan?" + common + "&min_dte=" + minDte + "&max_dte=" + maxDte
+      : "/greeks-strategy-scanner/api/scan?expiry=" + encodeURIComponent(expiry) + "&" + common;
+    if (symbol) url += "&symbol=" + encodeURIComponent(symbol);
+    else if (watchlistId) url += "&watchlist_id=" + encodeURIComponent(watchlistId);
     const resp = await fetch(url);
     const d = await resp.json();
-    if (!d.ok) { status.innerHTML = `<span class="status-err">${d.error}</span>`; return; }
-    status.textContent = `✓ ${d.count} candidate(s) found`;
+    if (!d.ok) { status.innerHTML = '<span class="status-err">' + d.error + '</span>'; return; }
+    status.textContent = "✓ " + d.count + " candidate(s) found";
     document.getElementById("results-body").innerHTML = renderTable(d.results, false);
   } catch (e) {
-    status.innerHTML = `<span class="status-err">Error: ${e.message}</span>`;
+    status.innerHTML = '<span class="status-err">Error: ' + e.message + '</span>';
   }
 }
 
@@ -359,6 +385,7 @@ async function runCalendarScan() {
 
 loadExpiries();
 loadWatchlists();
+toggleExpiryMode();
 </script>
 </body>
 </html>
