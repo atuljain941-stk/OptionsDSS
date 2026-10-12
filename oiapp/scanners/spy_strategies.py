@@ -114,6 +114,59 @@ def _live_chain_rows(symbol, expiry):
         return [], "Live option chain unavailable: " + str(exc)[:120]
 
 
+def _option_side(value):
+    value = str(value or "").strip().lower()
+    if value.startswith("c"):
+        return "call"
+    if value.startswith("p"):
+        return "put"
+    return ""
+
+
+def _latest_expiry_snapshot_rows(symbol, expiry):
+    """Read one exact saved option snapshot; never sum OI across same-day fetches."""
+    if not expiry:
+        return [], None
+    con = _conn()
+    try:
+        stamp_row = con.execute(
+            "SELECT MAX(fetch_ts) AS stamp FROM options "
+            "WHERE symbol=? AND expiration=? AND fetch_ts IS NOT NULL",
+            (str(symbol or "").upper(), str(expiry)[:10]),
+        ).fetchone()
+        stamp = (stamp_row["stamp"] if stamp_row else None)
+        if not stamp:
+            return [], None
+        raw_rows = con.execute("""
+            SELECT type, strike,
+                   MAX(oi) AS oi,
+                   MAX(volume) AS volume,
+                   MAX(iv) AS iv,
+                   MAX(gamma) AS gamma,
+                   MAX(underlying) AS underlying
+            FROM options
+            WHERE symbol=? AND expiration=? AND fetch_ts=? AND oi>0
+            GROUP BY type, strike
+        """, (str(symbol or "").upper(), str(expiry)[:10], stamp)).fetchall()
+    except sqlite3.OperationalError:
+        return [], None
+    finally:
+        con.close()
+
+    rows = []
+    for raw in raw_rows:
+        row = dict(raw)
+        side = _option_side(row.get("type"))
+        strike = _finite_number(row.get("strike"))
+        if not side or strike is None:
+            continue
+        row["type"] = side
+        row["strike"] = strike
+        row["oi"] = int(_finite_number(row.get("oi"), 0) or 0)
+        rows.append(row)
+    return rows, stamp
+
+
 # A page-to-page comparison must not recompute a nominally live option chain from
 # two separate provider requests.  Most free feeds update OI asynchronously, so
 # a very short shared snapshot is both more honest and more comparable.
@@ -147,35 +200,51 @@ def _canonical_gex_input(symbol, expiry, fallback_spot, fallback_iv=20.0):
         pass
     spot = _finite_number(spot_snapshot.get("price"), _finite_number(fallback_spot))
     live_rows, live_error = _live_chain_rows(symbol, expiry)
-    saved_rows = _oi_rows(symbol, expiry)
-    # OI is a structural, usually overnight field.  Base GEX on the saved
-    # snapshot and merge current IV/volume only; provider "live OI" may be
-    # stale or internally inconsistent during the session.
+    # GEX must use one exact collection.  Summing every row from the same
+    # calendar date repeats OI whenever a collector runs more than once.
+    saved_rows, snapshot_stamp = _latest_expiry_snapshot_rows(symbol, expiry)
+    # OI is a structural, usually overnight field.  Base GEX on this exact
+    # snapshot and merge live volume only; provider "live OI" is not trusted.
     live_by_contract = {
-        (str(row.get("type") or "").lower(), _finite_number(row.get("strike"))): row
+        (_option_side(row.get("type")), _finite_number(row.get("strike"))): row
         for row in live_rows
-        if _finite_number(row.get("strike")) is not None
+        if _option_side(row.get("type")) and _finite_number(row.get("strike")) is not None
     }
     if saved_rows:
         rows = []
         for saved in saved_rows:
             row = dict(saved)
-            live = live_by_contract.get((str(row.get("type") or "").lower(), _finite_number(row.get("strike"))), {})
+            row["type"] = _option_side(row.get("type"))
+            live = live_by_contract.get((row["type"], _finite_number(row.get("strike"))), {})
             if live:
                 row["volume"] = live.get("volume", row.get("volume"))
-                row["iv"] = live.get("iv")
-                row["gamma"] = live.get("gamma")
+                # Keep stored IV/gamma for the GEX calculation.  A live feed
+                # can still be used for volume-flow commentary, but it must
+                # not silently change the structural gamma snapshot.
+                row["live_iv"] = live.get("iv")
             rows.append(row)
-        source = "saved OI + live IV/volume" if live_rows else "saved option snapshot"
+        source = "saved OI + live volume" if live_rows else "saved option snapshot"
     else:
         rows = [dict(row) for row in live_rows]
         source = "live option-chain fallback"
     calls_oi = sum(int(_finite_number(row.get("oi"), 0) or 0) for row in rows if str(row.get("type") or "").lower().startswith("c"))
     puts_oi = sum(int(_finite_number(row.get("oi"), 0) or 0) for row in rows if str(row.get("type") or "").lower().startswith("p"))
     iv_atm = _chain_atm_iv(rows, spot, fallback_iv)
+    min_side_oi = min(calls_oi, puts_oi)
+    max_side_oi = max(calls_oi, puts_oi)
+    oi_balance_pct = round(min_side_oi / max(max_side_oi, 1) * 100.0, 2)
+    side_counts = {
+        "calls": sum(1 for row in rows if row.get("type") == "call"),
+        "puts": sum(1 for row in rows if row.get("type") == "put"),
+    }
+    # A snapshot missing one side cannot support a trustworthy net-GEX regime.
+    gex_quality = "OK" if side_counts["calls"] >= 10 and side_counts["puts"] >= 10 and oi_balance_pct >= 5.0 else "UNBALANCED_SNAPSHOT"
     signature = {
         "symbol": symbol, "expiry": expiry, "source": source,
-        "contracts": len(rows), "call_oi": calls_oi, "put_oi": puts_oi,
+        "fetch_ts": snapshot_stamp, "contracts": len(rows),
+        "call_oi": calls_oi, "put_oi": puts_oi,
+        "call_contracts": side_counts["calls"], "put_contracts": side_counts["puts"],
+        "oi_balance_pct": oi_balance_pct, "gex_quality": gex_quality,
         "spot": round(spot, 4) if spot is not None else None,
         "iv_atm": round(iv_atm, 4),
     }
@@ -2487,7 +2556,10 @@ def _compute_gex(rows, spot, T_days, iv_atm):
         # ATM/skew proxy for saved rows that have no IV field.
         strike_iv = _row_iv_pct(r, iv_atm)
 
-        gamma = _bs_gamma(spot, K, T_days, strike_iv)
+        stored_gamma = _finite_number(r.get("gamma"))
+        # Prefer the provider's saved per-contract Greek when present.  The
+        # BS estimate is a transparent fallback for chains without gamma.
+        gamma = stored_gamma if stored_gamma is not None and 0 < stored_gamma < 1 else _bs_gamma(spot, K, T_days, strike_iv)
         oi = int(r["oi"] or 0)
         gex = gamma * oi * 100 * spot * spot * 0.01  # $ per 1% move
 
@@ -2567,6 +2639,8 @@ def _compute_gex(rows, spot, T_days, iv_atm):
         # "regime strength".  The directional score below still uses net share.
         "regime_strength": round(top_three_concentration_pct, 1),
         "regime_strength_label": "Top-3 strike GEX concentration",
+        "call_gex_share_pct": round(call_gex / gross_gex * 100.0, 1) if gross_gex else 0.0,
+        "put_gex_share_pct": round(put_gex / gross_gex * 100.0, 1) if gross_gex else 0.0,
     }
 
 
@@ -4402,6 +4476,15 @@ def api_daily_plan():
         gex_info["pin_strike"], gex_info["gamma_flip"], rows,
         gex_ratio=gex_info.get("gex_ratio"), max_pain=gex_info.get("max_pain"),
         dte=dte, vix_level=(vix_ctx or {}).get("level"), gex_strength_pct=gex_info.get("net_gex_share_pct"))
+    gex_input_signature = canonical_input.get("signature") or {}
+    if gex_input_signature.get("gex_quality") != "OK":
+        score, confidence, regime = 0, min(confidence, 30), "UNQUALIFIED GEX SNAPSHOT"
+        factors.append({
+            "name": "GEX data quality",
+            "value": f"Call/put OI balance {gex_input_signature.get('oi_balance_pct', 0)}%",
+            "signal": "Unqualified", "score": 0,
+            "note": "One option side is incomplete or severely imbalanced; do not use net GEX for directional regime.",
+        })
 
     plan = _build_trade_plan(spot, gex_info, walls, ta, score, sigma_1d)
 
@@ -4446,7 +4529,8 @@ def api_daily_plan():
         "chain_source": chain_source,
         "chain_note": chain_note,
         "chain_asof": canonical_input.get("fetched_at"),
-        "gex_input": canonical_input.get("signature"),
+        "gex_input": gex_input_signature,
+        "gex_quality": gex_input_signature.get("gex_quality"),
         "gex_input_cache_age_seconds": canonical_input.get("cache_age_seconds"),
         "iv_atm": round(iv_atm,2), "pcr": pcr,
         "skew_rr": skew_rr, "sigma_1d": sigma_1d,
