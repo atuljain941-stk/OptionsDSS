@@ -133,8 +133,9 @@ def _spot(con: sqlite3.Connection, symbol: str, asof: str, rows: List[sqlite3.Ro
     if vals:
         return vals[0]
     try:
-        row = con.execute("SELECT close FROM market_bars WHERE symbol=? AND interval='1d' AND bar_time<=? ORDER BY bar_time DESC LIMIT 1", (symbol, asof)).fetchone()
-        return _num(row[0]) if row else None
+        from ..scanners.sqlite_store import get_market_data_store
+        bars = get_market_data_store().get_bars(symbol, date.fromisoformat(asof) - timedelta(days=5), date.fromisoformat(asof), "1d")
+        return _num(bars["Close"].iloc[-1]) if bars is not None and not bars.empty else None
     except Exception:
         return None
 
@@ -171,7 +172,7 @@ def _builders() -> Dict[str, Any]:
 
 
 def _result_metrics(candidate: Dict[str, Any], q: Dict[Tuple[str, float], dict], spot: float, expiry: str, dte: int, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    ev = evaluate_legs(candidate.get("legs") or [], q, spot, expiry, candidate.get("avg_iv"))
+    ev = evaluate_legs(candidate.get("legs") or [], q, spot, expiry, candidate.get("avg_iv"), as_of=candidate.get("entry_date"))
     annotate_oi(ev, q, float(cfg["min_strike_oi_pct"]))
     if not ev.get("valid") or (ev.get("rr_value") is not None and ev["rr_value"] < cfg["min_rr"]):
         return None
@@ -195,11 +196,16 @@ def _result_metrics(candidate: Dict[str, Any], q: Dict[Tuple[str, float], dict],
 
 def _realize(con: sqlite3.Connection, row: Dict[str, Any], asof: str) -> None:
     expiry = row["expiry"]
-    bar = con.execute("SELECT close FROM market_bars WHERE symbol=? AND interval='1d' AND bar_time>=? AND bar_time<=? ORDER BY bar_time LIMIT 1", (row["symbol"], expiry, (date.fromisoformat(expiry) + timedelta(days=5)).isoformat())).fetchone()
-    if not bar:
+    try:
+        from ..scanners.sqlite_store import get_market_data_store
+        d0, d1 = date.fromisoformat(expiry), date.fromisoformat(expiry) + timedelta(days=5)
+        bars = get_market_data_store().get_bars(row["symbol"], d0, d1, "1d")
+        spot = _num(bars["Close"].iloc[0]) if bars is not None and not bars.empty else None
+    except Exception:
+        spot = None
+    if spot is None:
         row.update({"realized_outcome": "UNRESOLVED", "realized_pnl": None, "realized_r": None})
         return
-    spot = _num(bar[0])
     pnl = 0.0
     for leg in row.get("legs") or []:
         intrinsic = max(spot - leg["strike"], 0) if leg["option_type"] == "call" else max(leg["strike"] - spot, 0)
