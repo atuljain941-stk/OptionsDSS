@@ -81,6 +81,12 @@
       <input type="number" id="min-pop-input" min="0" max="100" step="5" value="0" style="width:60px" title="As a percentage (0-100), e.g. 50 for 50% -- converted internally, POP itself is stored as a 0-1 fraction."/>
       <span class="muted" style="font-size:12px">Min OI</span>
       <input type="number" id="min-oi-input" min="0" step="10" value="50" style="width:60px" title="Minimum open interest per leg -- a strategy is only as liquid as its worst leg."/>
+      <span class="muted" style="font-size:12px">Min expiry call OI</span>
+      <input type="number" id="min-call-oi-input" min="0" step="100" value="0" style="width:70px" title="Require at least this much total call OI across the selected symbol and expiry."/>
+      <span class="muted" style="font-size:12px">Min expiry put OI</span>
+      <input type="number" id="min-put-oi-input" min="0" step="100" value="0" style="width:70px" title="Require at least this much total put OI across the selected symbol and expiry."/>
+      <span class="muted" style="font-size:12px">Min suggested strike OI %</span>
+      <input type="number" id="min-strike-oi-input" min="0" max="100" step="1" value="0" style="width:55px" title="Require each short/suggested call or put strike to hold at least this percentage of total OI on its option side. Long protection wings remain subject to the normal liquidity gate."/>
       <span class="muted" style="font-size:12px">Max spread %</span>
       <input type="number" id="max-spread-input" min="1" step="1" value="15" style="width:55px" title="Maximum bid-ask spread as % of midpoint, per leg. Wide spreads are the real thin-market/manipulation signal, not just low OI."/>
       <span class="muted" style="font-size:12px">Earnings</span>
@@ -151,6 +157,20 @@ function fmtPOP(pop) {
   return `${pct}% <span class="pop-bar" style="width:${Math.max(2,pct*0.5)}px"></span>`;
 }
 
+function fmtOI(value) {
+  return value == null ? "—" : Number(value).toLocaleString();
+}
+function oiSummary(r) {
+  const expiry = `C ${fmtOI(r.expiry_call_oi)} / P ${fmtOI(r.expiry_put_oi)}`;
+  const shortLegs = (r.legs || []).filter(l => String(l.side).toLowerCase() === "sell");
+  const strikes = shortLegs.map(l => {
+    const type = String(l.option_type || "").toUpperCase().charAt(0);
+    const pct = l.oi_pct_of_side_total == null ? "—" : `${Number(l.oi_pct_of_side_total).toFixed(1)}%`;
+    return `${type} ${fmtOI(l.oi)} (${pct})`;
+  }).join(" • ");
+  return `<div title="Expiry totals: calls / puts">Exp: ${expiry}</div><div class="muted" title="Short/suggested strike OI: type, raw OI, share of that side's expiry OI">Strike: ${strikes || "—"}</div>`;
+}
+
 function legsSummary(r) {
   if (r.strategy === "Short Strangle") return `Sell ${r.put_strike}P / Sell ${r.call_strike}C`;
   if (r.strategy === "Short Straddle") return `Sell ${r.atm_strike}P / Sell ${r.atm_strike}C`;
@@ -170,7 +190,8 @@ function renderRows(rows, isEarnings) {
       <td>${r.dte}d${r.expiry_type ? ` (${r.expiry_type})` : ""}</td>
       <td>$${r.spot}</td>
       <td>${legsSummary(r)}</td>
-      <td>$${r.credit}</td>
+      <td>${oiSummary(r)}</td>
+      <td>${r.credit}</td>
       <td>$${r.max_profit} / $${Math.abs(r.max_loss)}</td>
       <td>${fmtRR(r.rr)}</td>
       <td>${fmtPOP(r.pop)}</td>
@@ -218,13 +239,13 @@ function renderTable(rows, isEarnings) {
   }
   return `<div class="card"><table class="dt">
     <thead><tr>
-      <th>Symbol</th><th>Strategy</th><th>DTE</th><th>Spot</th><th>Legs</th>
+      <th>Symbol</th><th>Strategy</th><th>DTE</th><th>Spot</th><th>Legs</th><th>Expiry / Strike OI</th>
       <th>Credit</th><th>Max Profit / Max Loss</th><th>RR</th><th>POP</th><th>Breakevens</th>
       <th>${isEarnings ? "Earnings / Plan" : "Earnings"}</th>
     </tr></thead>
     <tbody>${renderRows(rows, isEarnings)}</tbody>
   </table>
-  <div class="disclaimer">POP is a model estimate under lognormal/constant-vol assumptions (real markets have fatter tails and vol isn't constant through DTE) — treat it as "what the model says," not a guaranteed frequency. RR/max-loss come from the real expiry payoff curve, not an approximation. Every leg in every result shown has already passed the liquidity gate (min OI + max bid-ask spread %) — a structure is only as liquid as its worst leg, so any single thin/wide leg excludes the whole trade, not just that leg.</div>
+  <div class="disclaimer">Expiry / Strike OI shows total stored call OI / put OI for that symbol+expiry, followed by each short/suggested strike's raw OI and percentage of its option side's expiry OI. The minimum suggested-strike OI % filter applies to short legs; long protection wings still use the normal per-leg liquidity gate. POP is a model estimate under lognormal/constant-vol assumptions (real markets have fatter tails and vol isn't constant through DTE) — treat it as "what the model says," not a guaranteed frequency. RR/max-loss come from the real expiry payoff curve, not an approximation. Every leg in every result shown has already passed the liquidity gate (min OI + max bid-ask spread %) — a structure is only as liquid as its worst leg, so any single thin/wide leg excludes the whole trade, not just that leg.</div>
   </div>`;
 }
 
@@ -287,6 +308,9 @@ async function runScan() {
   const minPop = (document.getElementById("min-pop-input").value || 0) / 100;
   const minOi = document.getElementById("min-oi-input").value || 50;
   const maxSpread = document.getElementById("max-spread-input").value || 15;
+  const minCallOi = document.getElementById("min-call-oi-input").value || 0;
+  const minPutOi = document.getElementById("min-put-oi-input").value || 0;
+  const minStrikeOiPct = document.getElementById("min-strike-oi-input").value || 0;
   const watchlistId = document.getElementById("watchlist-select").value;
   const earningsGate = document.getElementById("earnings-gate-select").value;
   const minDte = document.getElementById("min-dte-input").value || 15;
@@ -296,7 +320,7 @@ async function runScan() {
   status.innerHTML = '<span class="spinner"></span> ' + (mode === "auto" ? "Evaluating each expiry..." : "Scanning...");
   document.getElementById("results-body").innerHTML = '<div class="card"><div class="spinner"></div> ' + (mode === "auto" ? "Computing candidates across available expiries..." : "Scanning selected expiry...") + '</div>';
   try {
-    const common = "strategies=" + strategies.join(",") + "&min_rr=" + minRr + "&min_pop=" + minPop + "&min_oi=" + minOi + "&max_spread_pct=" + maxSpread + "&earnings_gate=" + earningsGate;
+    const common = "strategies=" + strategies.join(",") + "&min_rr=" + minRr + "&min_pop=" + minPop + "&min_oi=" + minOi + "&max_spread_pct=" + maxSpread + "&min_call_oi_total=" + minCallOi + "&min_put_oi_total=" + minPutOi + "&min_strike_oi_pct=" + minStrikeOiPct + "&earnings_gate=" + earningsGate;
     let url = mode === "auto"
       ? "/greeks-strategy-scanner/api/auto_scan?" + common + "&min_dte=" + minDte + "&max_dte=" + maxDte
       : "/greeks-strategy-scanner/api/scan?expiry=" + encodeURIComponent(expiry) + "&" + common;
