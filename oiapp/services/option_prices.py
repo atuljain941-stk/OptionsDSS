@@ -468,6 +468,35 @@ def enrich_strategies(symbol: str, expiry: str, strategies: list, *, prefer_live
                 })
 
             total_credit = round(total_credit, 2)
+
+            # Canonical evaluation shared with the Greeks scanner. It uses
+            # executable bid/ask sides, expiry payoff, model POP, and OI
+            # annotations; legacy fields below remain as a safe fallback.
+            try:
+                from .trade_evaluator import evaluate_legs, annotate_oi
+                from ..scanners._spot_cache import get_spot
+                _spot = get_spot(symbol)
+                if _spot:
+                    _canonical = evaluate_legs(leg_prices, chain, _spot, expiry)
+                    annotate_oi(_canonical, chain)
+                    s["canonical_evaluation"] = _canonical
+                    s["pricing_warnings"] = list(_canonical.get("warnings") or [])
+                    if _canonical.get("model_pop") is not None:
+                        s["pop"] = round(_canonical["model_pop"] * 100)
+                        s["pop_method"] = "lognormal constant-IV expiry payoff"
+                    if _canonical.get("rr_value") is not None:
+                        s["rr"] = f"{_canonical['rr_value']:.2f}:1"
+                    if _canonical.get("max_profit") is not None:
+                        s["max_profit_dollar"] = round(_canonical["max_profit"] * 100, 2)
+                    if _canonical.get("max_loss") is not None:
+                        s["max_loss_dollar"] = round(abs(_canonical["max_loss"]) * 100, 2)
+                    s["net_credit"] = _canonical.get("net_credit")
+                    s["spread_width"] = _canonical.get("spread_width")
+                    s["breakeven_lower"] = _canonical.get("breakeven_lower")
+                    s["breakeven_upper"] = _canonical.get("breakeven_upper")
+            except Exception as _canonical_exc:
+                s.setdefault("pricing_warnings", []).append(f"canonical evaluation unavailable: {_canonical_exc}")
+
             width = 0.0
             if len(parsed) >= 2:
                 width = abs(parsed[0][1] - parsed[1][1])
