@@ -87,9 +87,10 @@ def _model_pop(spot: float, lower: Optional[float], upper: Optional[float],
 
 def evaluate_legs(legs: Iterable[dict], quote_map: Dict[Tuple[str, float], dict],
                   spot: float, expiry: str, fallback_iv: Optional[float] = None) -> Dict[str, Any]:
+    raw_legs = list(legs)
     normalized, warnings, ivs = [], [], []
     total_credit = 0.0
-    for raw in legs:
+    for raw in raw_legs:
         action = str(raw.get("side") or raw.get("action") or "").lower()
         action = "sell" if action.startswith("s") else "buy" if action.startswith("b") else action
         option_type = str(raw.get("option_type") or raw.get("type") or "").lower()
@@ -138,7 +139,7 @@ def evaluate_legs(legs: Iterable[dict], quote_map: Dict[Tuple[str, float], dict]
         "rr_value": stats["rr_value"], "breakeven_lower": stats["breakeven_lower"],
         "breakeven_upper": stats["breakeven_upper"], "model_pop": pop,
         "avg_iv": round(avg_iv, 6) if avg_iv is not None else None,
-        "warnings": warnings, "valid": bool(normalized) and not any("credit " in w for w in warnings),
+        "warnings": warnings, "valid": len(normalized) == len(raw_legs) and bool(normalized) and not any("credit " in w for w in warnings),
     }
 
 def annotate_oi(result: Dict[str, Any], quote_map: Dict[Tuple[str, float], dict],
