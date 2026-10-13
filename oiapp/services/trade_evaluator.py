@@ -14,9 +14,10 @@ def _finite(value: Any) -> Optional[float]:
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-def _dte(expiry: str) -> int:
+def _dte(expiry: str, as_of: Optional[str] = None) -> int:
     try:
-        return (datetime.strptime(str(expiry), "%Y-%m-%d").date() - date.today()).days
+        anchor = datetime.strptime(str(as_of)[:10], "%Y-%m-%d").date() if as_of else date.today()
+        return (datetime.strptime(str(expiry)[:10], "%Y-%m-%d").date() - anchor).days
     except Exception:
         return 0
 
@@ -86,7 +87,8 @@ def _model_pop(spot: float, lower: Optional[float], upper: Optional[float],
     return round(max(0.0, min(1.0, hi - lo)), 4)
 
 def evaluate_legs(legs: Iterable[dict], quote_map: Dict[Tuple[str, float], dict],
-                  spot: float, expiry: str, fallback_iv: Optional[float] = None) -> Dict[str, Any]:
+                  spot: float, expiry: str, fallback_iv: Optional[float] = None,
+                  as_of: Optional[str] = None) -> Dict[str, Any]:
     raw_legs = list(legs)
     normalized, warnings, ivs = [], [], []
     total_credit = 0.0
@@ -130,8 +132,15 @@ def evaluate_legs(legs: Iterable[dict], quote_map: Dict[Tuple[str, float], dict]
     if any(l["price_source"] not in ("bid", "ask") for l in normalized):
         warnings.append("one or more legs lack an executable bid/ask quote")
     avg_iv = sum(ivs) / len(ivs) if ivs else None
-    pop = _model_pop(float(spot), stats["breakeven_lower"], stats["breakeven_upper"], _dte(expiry), avg_iv)
+    dte = _dte(expiry, as_of)
+    pop = _model_pop(float(spot), stats["breakeven_lower"], stats["breakeven_upper"], dte, avg_iv)
+    rr_value = stats["rr_value"]
+    breakeven_pop = (1.0 / (1.0 + rr_value)) if rr_value is not None and rr_value >= 0 else None
+    expectancy_r = (pop * rr_value - (1.0 - pop)) if pop is not None and rr_value is not None else None
     return {
+        "dte": dte, "breakeven_pop": round(breakeven_pop, 4) if breakeven_pop is not None else None,
+        "pop_edge": round(pop - breakeven_pop, 4) if pop is not None and breakeven_pop is not None else None,
+        "expectancy_r": round(expectancy_r, 4) if expectancy_r is not None else None,
         "legs": normalized, "net_credit": total_credit,
         "spread_width": round(width, 4) if width is not None else None,
         "max_profit": round(stats["max_profit"], 4) if stats["max_profit"] is not None else None,
