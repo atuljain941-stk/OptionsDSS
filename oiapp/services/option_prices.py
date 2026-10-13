@@ -474,11 +474,16 @@ def enrich_strategies(symbol: str, expiry: str, strategies: list, *, prefer_live
 
             total_credit = round(total_credit, 2)
 
-            width = 0.0
-            if len(parsed) >= 2:
-                width = abs(parsed[0][1] - parsed[1][1])
-                if len(parsed) == 4:
-                    width = abs(parsed[0][1] - parsed[1][1])
+            # For a four-leg condor, width is the narrower of
+            # the put and call verticals, never the first two parsed legs.
+            by_type = {"call": [], "put": []}
+            for _action, _strike, _type in parsed:
+                by_type[_type].append(_strike)
+            widths = [
+                max(strikes) - min(strikes)
+                for strikes in by_type.values() if len(strikes) >= 2
+            ]
+            width = min(widths) if widths else 0.0
 
             max_profit = round(total_credit * 100, 2)
             max_loss = round((width - total_credit) * 100, 2) if width > 0 else None
