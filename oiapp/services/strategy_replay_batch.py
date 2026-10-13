@@ -271,9 +271,19 @@ def _run(run_id: str, cfg: Dict[str, Any]) -> None:
         wins = sum(r.get("realized_outcome") == "WIN" for r in closed)
         realized_r = [r["realized_r"] for r in closed if r.get("realized_r") is not None]
         exp_r = [r["expectancy_r"] for r in results if r.get("expectancy_r") is not None]
+        chronological_r = [r.get("realized_r") for r in sorted(closed, key=lambda x: (x.get("entry_date") or "", x.get("expiry") or "")) if r.get("realized_r") is not None]
+        equity = peak = max_dd = 0.0
+        for value in chronological_r:
+            equity += float(value)
+            peak = max(peak, equity)
+            max_dd = max(max_dd, peak - equity)
+        gross_profit = sum(v for v in chronological_r if v > 0)
+        gross_loss = abs(sum(v for v in chronological_r if v < 0))
         summary = {"total_candidates": len(results), "resolved": len(closed), "unresolved": len(results)-len(closed),
                    "realized_win_rate": wins / len(closed) if closed else None, "avg_realized_r": sum(realized_r)/len(realized_r) if realized_r else None,
-                   "total_realized_r": sum(realized_r) if realized_r else None, "avg_model_expectancy_r": sum(exp_r)/len(exp_r) if exp_r else None,
+                   "total_realized_r": sum(realized_r) if realized_r else None, "max_drawdown_r": round(max_dd, 4),
+                   "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss else (None if not gross_profit else "INF"),
+                   "avg_model_expectancy_r": sum(exp_r)/len(exp_r) if exp_r else None,
                    "model_vs_realized_gap": (wins / len(closed) - sum(r.get("model_pop") or 0 for r in closed)/len(closed)) if closed else None,
                    "warnings": ["Historical earnings exclusion was not applied because no as-of earnings series is available; do not treat excluded earnings as verified."]}
         with con:
