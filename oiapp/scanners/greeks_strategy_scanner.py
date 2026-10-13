@@ -649,6 +649,42 @@ def _trade_context(symbol: str, spot: float, universe: Dict[str, Any]) -> Dict[s
     }
 
 
+def _annotate_candidate_oi(res: Dict[str, Any], universe: Dict[str, Any], min_strike_oi_share: float = 0.0) -> bool:
+    """Expose expiry totals and real stored OI for every suggested leg.
+
+    The optional share gate applies to the short/suggested legs only. Long
+    protection wings still pass the existing raw-OI and spread liquidity gate,
+    but are not required to represent a fixed share of all OI on their side.
+    """
+    calls, puts = universe.get("calls", {}), universe.get("puts", {})
+    call_total = sum((row.get("oi") or 0) for row in calls.values())
+    put_total = sum((row.get("oi") or 0) for row in puts.values())
+    res["expiry_call_oi"] = call_total
+    res["expiry_put_oi"] = put_total
+    res["expiry_total_oi"] = call_total + put_total
+
+    short_legs = []
+    for leg in res.get("legs") or []:
+        option_type = str(leg.get("option_type") or "").lower()
+        side_map = calls if option_type == "call" else puts if option_type == "put" else {}
+        strike = float(leg.get("strike")) if leg.get("strike") is not None else None
+        row = side_map.get(strike, {}) if strike is not None else {}
+        oi = int(row.get("oi") or 0)
+        side_total = call_total if option_type == "call" else put_total if option_type == "put" else 0
+        share = (oi / side_total) if side_total else 0.0
+        leg["oi"] = oi
+        leg["oi_pct_of_side_total"] = round(share * 100, 2) if side_total else None
+        leg["oi_side_total"] = side_total
+        if str(leg.get("side") or "").lower() == "sell":
+            short_legs.append(share)
+
+    res["strike_oi_filter"] = {
+        "min_share_pct": round(min_strike_oi_share * 100, 2),
+        "short_legs_pass": all(share >= min_strike_oi_share for share in short_legs),
+    }
+    return res["strike_oi_filter"]["short_legs_pass"]
+
+
 def _candidate_score(res: Dict[str, Any], context: Dict[str, Any]) -> tuple[float, str]:
     """Transparent ranking score; it is deliberately not a win probability."""
     pop = float(res.get("pop") or 0)
@@ -675,7 +711,8 @@ def scan_auto_expiries(strategies: List[str], min_dte: int = 15, max_dte: int = 
                        min_rr: float = DEFAULT_MIN_RR, min_pop: float = DEFAULT_MIN_POP,
                        symbols: Optional[List[str]] = None, min_oi: int = 50,
                        max_spread_pct: float = 15.0, watchlist_id: Optional[str] = None,
-                       earnings_gate: str = "exclude") -> List[Dict[str, Any]]:
+                       earnings_gate: str = "exclude", min_call_oi_total: int = 0,
+                       min_put_oi_total: int = 0, min_strike_oi_share: float = 0.0) -> List[Dict[str, Any]]:
     """Evaluate every *available* stored expiry in the requested 15–45 DTE
     window and rank the viable structures.  The ranking is a candidate
     quality score, not a forecast or a probability of winning."""
@@ -685,6 +722,8 @@ def scan_auto_expiries(strategies: List[str], min_dte: int = 15, max_dte: int = 
         results.extend(scan_strategies(
             expiry, strategies, min_rr=min_rr, min_pop=min_pop, symbols=resolved_symbols,
             min_oi=min_oi, max_spread_pct=max_spread_pct, earnings_gate=earnings_gate,
+            min_call_oi_total=min_call_oi_total, min_put_oi_total=min_put_oi_total,
+            min_strike_oi_share=min_strike_oi_share,
         ))
     for res in results:
         score, reason = _candidate_score(res, res.get("context") or {})
@@ -815,7 +854,8 @@ def earnings_calendar_week(watchlist_id: Optional[str] = None, symbols: Optional
 def scan_strategies(expiry: str, strategies: List[str], min_rr: float = DEFAULT_MIN_RR,
                      min_pop: float = DEFAULT_MIN_POP, symbols: Optional[List[str]] = None,
                      min_oi: int = 50, max_spread_pct: float = 15.0, watchlist_id: Optional[str] = None,
-                     earnings_gate: str = "any") -> List[Dict[str, Any]]:
+                     earnings_gate: str = "any", min_call_oi_total: int = 0,
+                     min_put_oi_total: int = 0, min_strike_oi_share: float = 0.0) -> List[Dict[str, Any]]:
     """earnings_gate: "any" (no filtering, just shows the earnings date
     on every result -- default), "exclude" (skip any symbol whose
     earnings date falls before this expiry -- avoids accidentally
@@ -844,6 +884,8 @@ def scan_strategies(expiry: str, strategies: List[str], min_rr: float = DEFAULT_
                 continue
 
             context = _trade_context(sym, spot, universe)
+            if context["call_oi"] < min_call_oi_total or context["put_oi"] < min_put_oi_total:
+                continue
             earn = get_earnings_info(sym) or {}
             earn_date = earn.get("earn_date")
             earn_days = earn.get("earn_days")
@@ -859,6 +901,8 @@ def scan_strategies(expiry: str, strategies: List[str], min_rr: float = DEFAULT_
                     continue
                 res = builder(sym, expiry, spot, iv, T, dte, universe, min_oi=min_oi, max_spread_pct=max_spread_pct)
                 if not res:
+                    continue
+                if not _annotate_candidate_oi(res, universe, min_strike_oi_share):
                     continue
                 res["expiry_type"] = exp_type
                 res["ivp_proxy"] = ivp
@@ -969,6 +1013,9 @@ def api_scan():
     min_pop = float(request.args.get("min_pop", DEFAULT_MIN_POP))
     min_oi = int(request.args.get("min_oi", 50))
     max_spread_pct = float(request.args.get("max_spread_pct", 15.0))
+    min_call_oi_total = int(request.args.get("min_call_oi_total", 0))
+    min_put_oi_total = int(request.args.get("min_put_oi_total", 0))
+    min_strike_oi_share = float(request.args.get("min_strike_oi_pct", 0.0)) / 100.0
     watchlist_id = request.args.get("watchlist_id") or None
     symbol = (request.args.get("symbol") or "").strip().upper() or None
     if symbol and watchlist_id:
@@ -978,7 +1025,10 @@ def api_scan():
         results = scan_strategies(expiry, strategies, min_rr=min_rr, min_pop=min_pop,
                                    symbols=[symbol] if symbol else None, min_oi=min_oi,
                                    max_spread_pct=max_spread_pct, watchlist_id=watchlist_id,
-                                   earnings_gate=earnings_gate)
+                                   earnings_gate=earnings_gate,
+                                   min_call_oi_total=min_call_oi_total,
+                                   min_put_oi_total=min_put_oi_total,
+                                   min_strike_oi_share=min_strike_oi_share)
         return jsonify({"ok": True, "results": results, "count": len(results)})
     except Exception as e:
         import traceback
@@ -995,6 +1045,9 @@ def api_auto_scan():
     min_pop = float(request.args.get("min_pop", DEFAULT_MIN_POP))
     min_oi = int(request.args.get("min_oi", 50))
     max_spread_pct = float(request.args.get("max_spread_pct", 15.0))
+    min_call_oi_total = int(request.args.get("min_call_oi_total", 0))
+    min_put_oi_total = int(request.args.get("min_put_oi_total", 0))
+    min_strike_oi_share = float(request.args.get("min_strike_oi_pct", 0.0)) / 100.0
     watchlist_id = request.args.get("watchlist_id") or None
     symbol = (request.args.get("symbol") or "").strip().upper() or None
     earnings_gate = request.args.get("earnings_gate", "exclude")
@@ -1007,6 +1060,8 @@ def api_auto_scan():
             strategies, min_dte=min_dte, max_dte=max_dte, min_rr=min_rr, min_pop=min_pop,
             symbols=[symbol] if symbol else None, min_oi=min_oi, max_spread_pct=max_spread_pct,
             watchlist_id=watchlist_id, earnings_gate=earnings_gate,
+            min_call_oi_total=min_call_oi_total, min_put_oi_total=min_put_oi_total,
+            min_strike_oi_share=min_strike_oi_share,
         )
         return jsonify({"ok": True, "results": results, "count": len(results),
                         "analysis_window": {"min_dte": min_dte, "max_dte": max_dte}})
