@@ -902,6 +902,28 @@ def scan_strategies(expiry: str, strategies: List[str], min_rr: float = DEFAULT_
                 res = builder(sym, expiry, spot, iv, T, dte, universe, min_oi=min_oi, max_spread_pct=max_spread_pct)
                 if not res:
                     continue
+                # Re-evaluate every candidate through the same canonical
+                # executable-price/payoff/POP engine used by New Trade.
+                try:
+                    from ..services.trade_evaluator import evaluate_legs, annotate_oi
+                    _quote_map = {("call", float(k)): v for k, v in universe.get("calls", {}).items()}
+                    _quote_map.update({("put", float(k)): v for k, v in universe.get("puts", {}).items()})
+                    _canonical = evaluate_legs(res.get("legs") or [], _quote_map, spot, expiry, iv)
+                    annotate_oi(_canonical, _quote_map, min_strike_oi_share * 100)
+                    res["canonical_evaluation"] = _canonical
+                    res["legs"] = _canonical.get("legs") or res.get("legs")
+                    res["credit"] = _canonical.get("net_credit")
+                    res["pop"] = _canonical.get("model_pop")
+                    res["rr"] = _canonical.get("rr_value")
+                    res["max_profit"] = _canonical.get("max_profit")
+                    res["max_loss"] = _canonical.get("max_loss")
+                    res["breakeven_lower"] = _canonical.get("breakeven_lower")
+                    res["breakeven_upper"] = _canonical.get("breakeven_upper")
+                    res["pricing_warnings"] = _canonical.get("warnings") or []
+                    if not _canonical.get("valid"):
+                        continue
+                except Exception as _canonical_exc:
+                    res.setdefault("pricing_warnings", []).append(f"canonical evaluation unavailable: {_canonical_exc}")
                 if not _annotate_candidate_oi(res, universe, min_strike_oi_share):
                     continue
                 res["expiry_type"] = exp_type
