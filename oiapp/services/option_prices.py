@@ -365,9 +365,13 @@ def get_spread_prices(symbol: str, expiry: str,
     buy_data = _lookup_leg(chain, buy_type, buy_strike)
     sell_mid = sell_data.get("mid")
     buy_mid = buy_data.get("mid")
-
-    net = round(sell_mid - buy_mid, 2) if (sell_mid is not None and buy_mid is not None) else None
+    # Credit trades are evaluated at executable sides: sell at bid and buy
+    # at ask. Mid/last remains an explicitly flagged fallback for old rows.
+    sell_entry = sell_data.get("bid") if sell_data.get("bid") is not None else sell_mid
+    buy_entry = buy_data.get("ask") if buy_data.get("ask") is not None else buy_mid
+    net = round(sell_entry - buy_entry, 2) if (sell_entry is not None and buy_entry is not None) else None
     width = abs(float(sell_strike) - float(buy_strike))
+    pricing_method = "bid/ask executable" if (sell_data.get("bid") is not None and buy_data.get("ask") is not None) else "mid/last fallback"
     src = sell_data.get("source") or buy_data.get("source") or _source(key)
     real_prices = bool(sell_mid is not None and buy_mid is not None)
 
@@ -391,6 +395,7 @@ def get_spread_prices(symbol: str, expiry: str,
         "rr": round(net / (width - net), 2) if (net is not None and width > net > 0) else None,
         "pop_delta": round((1 - (sell_data.get("iv") or 0.3)) * 100) if sell_data.get("iv") else None,
         "real_prices": real_prices,
+        "pricing_method": pricing_method,
         "price_source": src or "local/yfinance option chain",
     }
 
