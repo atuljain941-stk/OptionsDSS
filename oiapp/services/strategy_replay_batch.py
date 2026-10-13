@@ -98,6 +98,12 @@ def _load_config(config: Dict[str, Any]) -> Dict[str, Any]:
         symbols = [x.strip().upper() for x in raw_symbols.split(",") if x.strip()]
     else:
         symbols = [str(x).strip().upper() for x in raw_symbols if str(x).strip()]
+    if not symbols and config.get("watchlist_id"):
+        try:
+            from ..scanners.watchlist_manager import _get_watchlist_symbols_by_id
+            symbols = [str(x).strip().upper() for x in (_get_watchlist_symbols_by_id(config.get("watchlist_id")) or []) if str(x).strip()]
+        except Exception as exc:
+            raise ValueError(f"Could not load watchlist: {exc}")
     if not symbols:
         raise ValueError("Select one symbol or an explicit symbol list/watchlist")
     if config.get("symbol") and config.get("watchlist_id"):
@@ -191,7 +197,9 @@ def _result_metrics(candidate: Dict[str, Any], q: Dict[Tuple[str, float], dict],
             "credit": ev.get("net_credit"), "breakeven_lower": ev.get("breakeven_lower"),
             "breakeven_upper": ev.get("breakeven_upper"), "expiry_call_oi": ev.get("expiry_call_oi"),
             "expiry_put_oi": ev.get("expiry_put_oi"), "oi_filter": ev.get("strike_oi_filter"),
-            "snapshot_date": candidate.get("snapshot_date"), "model_assumptions": "lognormal constant-IV; not historical win probability"}
+            "snapshot_date": candidate.get("snapshot_date"), "earnings_gate": cfg.get("earnings_gate"),
+            "earnings_filter_status": "historical earnings series unavailable; verify manually",
+            "model_assumptions": "lognormal constant-IV; not historical win probability"}
 
 
 def _realize(con: sqlite3.Connection, row: Dict[str, Any], asof: str) -> None:
@@ -266,7 +274,8 @@ def _run(run_id: str, cfg: Dict[str, Any]) -> None:
         summary = {"total_candidates": len(results), "resolved": len(closed), "unresolved": len(results)-len(closed),
                    "realized_win_rate": wins / len(closed) if closed else None, "avg_realized_r": sum(realized_r)/len(realized_r) if realized_r else None,
                    "total_realized_r": sum(realized_r) if realized_r else None, "avg_model_expectancy_r": sum(exp_r)/len(exp_r) if exp_r else None,
-                   "model_vs_realized_gap": (wins / len(closed) - sum(r.get("model_pop") or 0 for r in closed)/len(closed)) if closed else None}
+                   "model_vs_realized_gap": (wins / len(closed) - sum(r.get("model_pop") or 0 for r in closed)/len(closed)) if closed else None,
+                   "warnings": ["Historical earnings exclusion was not applied because no as-of earnings series is available; do not treat excluded earnings as verified."]}
         with con:
             for i, r in enumerate(results):
                 con.execute("INSERT INTO strategy_replay_results(run_id,result_no,result_json) VALUES(?,?,?)", (run_id, i, json.dumps(_json(r), allow_nan=False)))
