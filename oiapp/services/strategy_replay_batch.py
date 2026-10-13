@@ -314,3 +314,29 @@ def run_detail(run_id: str):
 @replay_batch_bp.route("/api/health")
 def health():
     return jsonify({"ok": True, "description": "manual historical option-chain replay; no startup scheduler"})
+
+@replay_batch_bp.route("/api/recommend")
+def recommend():
+    """Compare completed named runs without changing live scanner weights."""
+    ids = [x.strip() for x in (request.args.get("run_ids") or "").split(",") if x.strip()]
+    if not ids:
+        return jsonify({"ok": False, "error": "run_ids is required"}), 400
+    _ensure_tables()
+    rows = []
+    with _connect() as con:
+        for run_id in ids:
+            r = con.execute("SELECT run_id,run_name,status,config_json,summary_json FROM strategy_replay_runs WHERE run_id=?", (run_id,)).fetchone()
+            if not r:
+                continue
+            summary = json.loads(r["summary_json"] or "{}")
+            rows.append({"run_id": r["run_id"], "run_name": r["run_name"], "status": r["status"],
+                         "config": json.loads(r["config_json"] or "{}"), "summary": summary})
+    eligible = [r for r in rows if r["status"] == "completed" and (r["summary"].get("resolved") or 0) >= 10]
+    eligible.sort(key=lambda r: (r["summary"].get("total_realized_r") is not None,
+                                 r["summary"].get("total_realized_r") or -999), reverse=True)
+    best = eligible[0] if eligible else None
+    return jsonify({"ok": True, "runs": rows, "recommendation": (
+        {"run_id": best["run_id"], "run_name": best["run_name"],
+         "reason": "Highest total realized R among completed runs with at least 10 resolved trades; validate drawdown and calibration before adoption."}
+        if best else {"status": "INSUFFICIENT_DATA", "reason": "Need completed runs with at least 10 resolved trades."}
+    )})
