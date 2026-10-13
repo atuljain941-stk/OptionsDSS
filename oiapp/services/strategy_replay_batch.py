@@ -349,3 +349,74 @@ def recommend():
          "reason": "Highest total realized R among completed runs with at least 10 resolved trades; validate drawdown and calibration before adoption."}
         if best else {"status": "INSUFFICIENT_DATA", "reason": "Need completed runs with at least 10 resolved trades."}
     )})
+
+_autopilot_groups: Dict[str, Dict[str, Any]] = {}
+
+
+def _enqueue(cfg: Dict[str, Any]) -> str:
+    _ensure_tables()
+    run_id = uuid.uuid4().hex
+    name = str(cfg.get("run_name") or f"Replay {cfg['start_date']} to {cfg['end_date']}")
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with _connect() as con:
+        con.execute(
+            "INSERT INTO strategy_replay_runs(run_id,run_name,status,created_at,started_at,config_json) VALUES(?,?,?,?,?,?)",
+            (run_id, name, "running", now, now, json.dumps(_json(cfg), allow_nan=False)),
+        )
+    with _lock:
+        _jobs[run_id] = {"status": "running", "progress": 0}
+    ThreadPoolExecutor(max_workers=1).submit(_run, run_id, cfg)
+    return run_id
+
+
+@replay_batch_bp.route("/api/autopilot", methods=["POST"])
+def autopilot():
+    """Launch a bounded, explicit sweep; no unconstrained optimizer."""
+    base = _load_config(request.get_json(force=True) or {})
+    base_rr = float(base["min_rr"])
+    base_oi = float(base["min_strike_oi_pct"])
+    rr_values = sorted(set(round(max(0.60, min(1.20, x)), 2) for x in (base_rr, base_rr + 0.20, base_rr + 0.40)))
+    oi_values = sorted(set(round(max(0.0, min(30.0, x)), 2) for x in (base_oi, max(base_oi, 10.0), max(base_oi, 20.0))))
+    group_id = uuid.uuid4().hex
+    run_ids = []
+    configs = []
+    for rr in rr_values:
+        for oi in oi_values:
+            cfg = dict(base)
+            cfg["min_rr"] = rr
+            cfg["min_strike_oi_pct"] = oi
+            cfg["run_name"] = f"{base.get('run_name') or 'Autopilot'} | RR>={rr:.2f} | OI>={oi:.0f}%"
+            run_ids.append(_enqueue(cfg))
+            configs.append({"run_id": run_ids[-1], "min_rr": rr, "min_strike_oi_pct": oi})
+    _autopilot_groups[group_id] = {"group_id": group_id, "run_ids": run_ids, "configs": configs}
+    return jsonify({"ok": True, "group_id": group_id, "run_ids": run_ids, "configs": configs,
+                    "message": "Bounded sweep started. Poll each run, then call /api/recommend with the run IDs."}), 202
+
+
+@replay_batch_bp.route("/api/autopilot/<group_id>")
+def autopilot_status(group_id: str):
+    group = _autopilot_groups.get(group_id)
+    if not group:
+        return jsonify({"ok": False, "error": "autopilot group not found in this process"}), 404
+    _ensure_tables()
+    with _connect() as con:
+        rows = []
+        for run_id in group["run_ids"]:
+            row = con.execute(
+                "SELECT run_id,run_name,status,progress,summary_json,error_text FROM strategy_replay_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row:
+                d = dict(row)
+                d["summary"] = json.loads(d.pop("summary_json") or "null")
+                rows.append(d)
+    done = [r for r in rows if r["status"] in {"completed", "failed"}]
+    recommendation = None
+    if len(done) == len(rows) and rows:
+        eligible = [r for r in rows if r["status"] == "completed" and (r["summary"] or {}).get("resolved", 0) >= 10]
+        eligible.sort(key=lambda r: ((r["summary"] or {}).get("total_realized_r") is not None,
+                                     (r["summary"] or {}).get("total_realized_r") or -999), reverse=True)
+        recommendation = ({"run_id": eligible[0]["run_id"], "run_name": eligible[0]["run_name"],
+                           "reason": "Best total realized R among variants with at least 10 resolved trades; review drawdown and calibration before adoption."}
+                          if eligible else {"status": "INSUFFICIENT_DATA"})
+    return jsonify({"ok": True, **group, "runs": rows, "recommendation": recommendation})
