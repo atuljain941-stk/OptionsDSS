@@ -190,6 +190,12 @@ def _result_metrics(candidate: Dict[str, Any], q: Dict[Tuple[str, float], dict],
     pop = _num(ev.get("model_pop"))
     breakeven_pop = 1.0 / (1.0 + rr) if rr is not None and rr >= 0 else None
     expectancy_r = pop * rr - (1 - pop) if pop is not None and rr is not None else None
+    short_shares = [float(l.get("oi_pct_of_side_total")) for l in ev.get("legs", [])
+                    if l.get("side") == "sell" and l.get("oi_pct_of_side_total") is not None]
+    oi_quality = min(7.0, (sum(short_shares) / len(short_shares) / 20.0 * 3.5) if short_shares else 0.0)
+    candidate_score = min(100.0, (pop * 45.0 if pop is not None else 0.0) +
+                          (min(rr, 3.0) * 12.0 if rr is not None else 0.0) + oi_quality)
+    model_positive = bool(expectancy_r is not None and expectancy_r > 0)
     return {"symbol": candidate.get("symbol"), "strategy": candidate.get("strategy"), "expiry": expiry,
             "dte": dte, "spot": spot, "legs": ev.get("legs"), "model_pop": pop,
             "breakeven_pop": breakeven_pop, "pop_edge": pop - breakeven_pop if pop is not None and breakeven_pop is not None else None,
@@ -197,6 +203,15 @@ def _result_metrics(candidate: Dict[str, Any], q: Dict[Tuple[str, float], dict],
             "credit": ev.get("net_credit"), "breakeven_lower": ev.get("breakeven_lower"),
             "breakeven_upper": ev.get("breakeven_upper"), "expiry_call_oi": ev.get("expiry_call_oi"),
             "expiry_put_oi": ev.get("expiry_put_oi"), "oi_filter": ev.get("strike_oi_filter"),
+            "candidate_quality_score": round(candidate_score, 2),
+            "score_basis": "model POP + expiry RR + short-leg OI share; not a win probability",
+            "initial_hypothesis": {
+                "statement": "The defined-risk premium-selling structure should finish profitable if expiry remains between its breakevens.",
+                "model_positive_expectancy": model_positive,
+                "required_min_rr": cfg["min_rr"],
+                "required_min_short_oi_pct": cfg["min_strike_oi_pct"]
+            },
+            "hypothesis_result": "PENDING",
             "snapshot_date": candidate.get("snapshot_date"), "earnings_gate": cfg.get("earnings_gate"),
             "earnings_filter_status": "historical earnings series unavailable; verify manually",
             "model_assumptions": "lognormal constant-IV; not historical win probability"}
@@ -219,8 +234,14 @@ def _realize(con: sqlite3.Connection, row: Dict[str, Any], asof: str) -> None:
         intrinsic = max(spot - leg["strike"], 0) if leg["option_type"] == "call" else max(leg["strike"] - spot, 0)
         pnl += (intrinsic - leg["entry_price"]) * (1 if leg["side"] == "buy" else -1)
     risk = abs(_num(row.get("max_loss"), 0) or 0)
+    outcome = "WIN" if pnl > 0 else "LOSS" if pnl < 0 else "FLAT"
+    expected = bool(row.get("initial_hypothesis", {}).get("model_positive_expectancy"))
     row.update({"realized_pnl": round(pnl, 4), "realized_r": round(pnl / risk, 4) if risk else None,
-                "realized_outcome": "WIN" if pnl > 0 else "LOSS" if pnl < 0 else "FLAT"})
+                "realized_outcome": outcome,
+                "hypothesis_result": ("SUPPORTED" if expected and outcome == "WIN" else
+                                      "CONTRADICTED" if expected and outcome == "LOSS" else
+                                      "NO_MODEL_EDGE_BUT_WIN" if outcome == "WIN" else
+                                      "NO_MODEL_EDGE_AND_LOSS" if outcome == "LOSS" else "FLAT")})
 
 
 def _run(run_id: str, cfg: Dict[str, Any]) -> None:
@@ -268,6 +289,10 @@ def _run(run_id: str, cfg: Dict[str, Any]) -> None:
                 candidates.sort(key=lambda x: (x.get("expectancy_r") is not None, x.get("expectancy_r") or -999), reverse=True)
                 results.extend(candidates[:cfg["max_candidates_per_day"]])
         closed = [r for r in results if r.get("realized_outcome") in {"WIN", "LOSS", "FLAT"}]
+        hypothesis_counts = {}
+        for r in closed:
+            key = r.get("hypothesis_result") or "UNKNOWN"
+            hypothesis_counts[key] = hypothesis_counts.get(key, 0) + 1
         wins = sum(r.get("realized_outcome") == "WIN" for r in closed)
         realized_r = [r["realized_r"] for r in closed if r.get("realized_r") is not None]
         exp_r = [r["expectancy_r"] for r in results if r.get("expectancy_r") is not None]
@@ -285,6 +310,7 @@ def _run(run_id: str, cfg: Dict[str, Any]) -> None:
                    "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss else (None if not gross_profit else "INF"),
                    "avg_model_expectancy_r": sum(exp_r)/len(exp_r) if exp_r else None,
                    "model_vs_realized_gap": (wins / len(closed) - sum(r.get("model_pop") or 0 for r in closed)/len(closed)) if closed else None,
+                   "hypothesis_counts": hypothesis_counts,
                    "warnings": ["Historical earnings exclusion was not applied because no as-of earnings series is available; do not treat excluded earnings as verified."]}
         with con:
             for i, r in enumerate(results):
