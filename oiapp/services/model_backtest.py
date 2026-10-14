@@ -121,15 +121,20 @@ def _historical_iv(symbol: str, entry: date, expiry: date) -> Optional[float]:
         return None
 
 
-def _load_iv_history(symbol: str, start: date, end: date) -> Dict[str, List[Any]]:
+def _load_iv_history(symbol: str, start: date, end: date, expiries: Optional[List[str]] = None) -> Dict[str, List[Any]]:
     """Load all usable IV snapshots once, then resolve them in memory."""
     history: Dict[str, List[Any]] = {}
     try:
+        expiry_filter = ""
+        params: List[Any] = [symbol, start.isoformat(), end.isoformat()]
+        if expiries:
+            expiry_filter = " AND expiration IN (" + ",".join("?" for _ in expiries) + ")"
+            params.extend(expiries)
         with sqlite3.connect(DB_PATH) as con:
-            rows = con.execute("""SELECT date, expiration, AVG(iv) FROM options
-                WHERE symbol=? AND date>=? AND date<=? AND iv IS NOT NULL AND iv>0
-                GROUP BY date, expiration ORDER BY expiration, date""",
-                (symbol, start.isoformat(), end.isoformat())).fetchall()
+            sql = ("SELECT date, expiration, AVG(iv) FROM options "
+                   "WHERE symbol=? AND date>=? AND date<=? AND iv IS NOT NULL AND iv>0"
+                   + expiry_filter + " GROUP BY date, expiration ORDER BY expiration, date")
+            rows = con.execute(sql, params).fetchall()
         for day, expiry, value in rows:
             iv = _normal_iv(value)
             if iv is not None:
@@ -287,8 +292,9 @@ def _run(run_id: str, cfg: Dict[str, Any]) -> None:
             closes = [float(x) for x in bars["Close"].tolist()]
             dates = [x.date() for x in bars.index]
             date_to_idx = {day: idx for idx, day in enumerate(dates)}
-            iv_history = _load_iv_history(symbol, _d(cfg["start_date"]) - timedelta(days=cfg["rv_window"] + 5), _d(cfg["end_date"]))
             entry_days = _entries([x for x in dates if _d(cfg["start_date"]) <= x <= _d(cfg["end_date"])], cfg["entry_rule"])
+            target_expiries = sorted({_expiry_for(entry, cfg["expiry_rule"]).isoformat() for entry in entry_days})
+            iv_history = _load_iv_history(symbol, _d(cfg["start_date"]) - timedelta(days=cfg["rv_window"] + 5), _d(cfg["end_date"]), target_expiries)
             for i, entry in enumerate(entry_days):
                 try:
                     entry_idx = date_to_idx[entry]; expiry = _expiry_for(entry, cfg["expiry_rule"])
