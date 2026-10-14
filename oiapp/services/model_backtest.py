@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, render_template, request
 
 from ..config import DB_PATH
 from ..scanners.sqlite_store import get_market_data_store
@@ -23,6 +23,11 @@ from ..scanners.sqlite_store import get_market_data_store
 model_backtest_bp = Blueprint("model_backtest", __name__, url_prefix="/model-backtest")
 _jobs: Dict[str, Dict[str, Any]] = {}
 _lock = threading.RLock()
+
+
+@model_backtest_bp.route("/")
+def page():
+    return render_template("model_backtest.html")
 
 
 def _f(v: Any, default: Optional[float] = None) -> Optional[float]:
