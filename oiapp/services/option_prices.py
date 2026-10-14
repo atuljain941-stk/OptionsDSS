@@ -365,9 +365,13 @@ def get_spread_prices(symbol: str, expiry: str,
     buy_data = _lookup_leg(chain, buy_type, buy_strike)
     sell_mid = sell_data.get("mid")
     buy_mid = buy_data.get("mid")
-
-    net = round(sell_mid - buy_mid, 2) if (sell_mid is not None and buy_mid is not None) else None
+    # Credit trades are evaluated at executable sides: sell at bid and buy
+    # at ask. Mid/last remains an explicitly flagged fallback for old rows.
+    sell_entry = sell_data.get("bid") if sell_data.get("bid") is not None else sell_mid
+    buy_entry = buy_data.get("ask") if buy_data.get("ask") is not None else buy_mid
+    net = round(sell_entry - buy_entry, 2) if (sell_entry is not None and buy_entry is not None) else None
     width = abs(float(sell_strike) - float(buy_strike))
+    pricing_method = "bid/ask executable" if (sell_data.get("bid") is not None and buy_data.get("ask") is not None) else "mid/last fallback"
     src = sell_data.get("source") or buy_data.get("source") or _source(key)
     real_prices = bool(sell_mid is not None and buy_mid is not None)
 
@@ -391,6 +395,7 @@ def get_spread_prices(symbol: str, expiry: str,
         "rr": round(net / (width - net), 2) if (net is not None and width > net > 0) else None,
         "pop_delta": round((1 - (sell_data.get("iv") or 0.3)) * 100) if sell_data.get("iv") else None,
         "real_prices": real_prices,
+        "pricing_method": pricing_method,
         "price_source": src or "local/yfinance option chain",
     }
 
@@ -468,11 +473,17 @@ def enrich_strategies(symbol: str, expiry: str, strategies: list, *, prefer_live
                 })
 
             total_credit = round(total_credit, 2)
-            width = 0.0
-            if len(parsed) >= 2:
-                width = abs(parsed[0][1] - parsed[1][1])
-                if len(parsed) == 4:
-                    width = abs(parsed[0][1] - parsed[1][1])
+
+            # For a four-leg condor, width is the narrower of
+            # the put and call verticals, never the first two parsed legs.
+            by_type = {"call": [], "put": []}
+            for _action, _strike, _type in parsed:
+                by_type[_type].append(_strike)
+            widths = [
+                max(strikes) - min(strikes)
+                for strikes in by_type.values() if len(strikes) >= 2
+            ]
+            width = min(widths) if widths else 0.0
 
             max_profit = round(total_credit * 100, 2)
             max_loss = round((width - total_credit) * 100, 2) if width > 0 else None
@@ -508,6 +519,33 @@ def enrich_strategies(symbol: str, expiry: str, strategies: list, *, prefer_live
                 s["manage"] = "Cut at 50% loss of debit."
             if avg_iv is not None:
                 s["avg_short_iv"] = round(avg_iv, 4)
+
+            # Final canonical overwrite: legacy estimates above remain only
+            # as fallback metadata; displayed POP/RR/risk use one evaluator.
+            try:
+                from .trade_evaluator import evaluate_legs, annotate_oi
+                from ..scanners._spot_cache import get_spot
+                _spot = get_spot(symbol)
+                if _spot:
+                    _canonical = evaluate_legs(leg_prices, chain, _spot, expiry)
+                    annotate_oi(_canonical, chain)
+                    s["canonical_evaluation"] = _canonical
+                    s["pricing_warnings"] = list(_canonical.get("warnings") or [])
+                    if _canonical.get("model_pop") is not None:
+                        s["pop"] = round(_canonical["model_pop"] * 100)
+                        s["pop_method"] = "lognormal constant-IV expiry payoff"
+                    if _canonical.get("rr_value") is not None:
+                        s["rr"] = f"{_canonical['rr_value']:.2f}:1"
+                    if _canonical.get("max_profit") is not None:
+                        s["max_profit_dollar"] = round(_canonical["max_profit"] * 100, 2)
+                    if _canonical.get("max_loss") is not None:
+                        s["max_loss_dollar"] = round(abs(_canonical["max_loss"]) * 100, 2)
+                    s["net_credit"] = _canonical.get("net_credit")
+                    s["spread_width"] = _canonical.get("spread_width")
+                    s["breakeven_lower"] = _canonical.get("breakeven_lower")
+                    s["breakeven_upper"] = _canonical.get("breakeven_upper")
+            except Exception as _canonical_exc:
+                s.setdefault("pricing_warnings", []).append(f"canonical evaluation unavailable: {_canonical_exc}")
 
         except Exception as e:
             _log_once(f"[enrich_strategies] {name}: {e}")

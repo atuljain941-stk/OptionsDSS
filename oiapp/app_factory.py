@@ -574,6 +574,20 @@ def create_app():
         print(f"[app] WARNING: greeks_strategy_scanner not loaded — {e}")
 
     try:
+        from .services.strategy_replay_batch import replay_batch_bp
+        app.register_blueprint(replay_batch_bp)
+        print("[app] Historical Strategy Replay registered at /strategy-replay (manual trigger only)")
+    except Exception as e:
+        print(f"[app] WARNING: strategy replay batch not loaded — {e}")
+
+    try:
+        from .services.model_backtest import model_backtest_bp
+        app.register_blueprint(model_backtest_bp)
+        print("[app] Black-Scholes Model Backtest registered at /model-backtest (manual trigger only)")
+    except Exception as e:
+        print(f"[app] WARNING: model backtest not loaded — {e}")
+
+    try:
         from .services.option_sale_framework import option_sale_framework_bp
         app.register_blueprint(option_sale_framework_bp)
         print("[app] Option Sale Framework registered at /option-sale-framework")
