@@ -102,9 +102,14 @@ def _realized_vol(closes: List[float], window: int = 20) -> Optional[float]:
 def _historical_iv(symbol: str, entry: date, expiry: date) -> Optional[float]:
     try:
         with sqlite3.connect(DB_PATH) as con:
-            row = con.execute("""SELECT AVG(iv) FROM options
-                WHERE symbol=? AND date<=? AND expiration=? AND iv IS NOT NULL AND iv>0""",
+            snap = con.execute("""SELECT MAX(date) FROM options
+                WHERE symbol=? AND date<=? AND expiration=?""",
                 (symbol, entry.isoformat(), expiry.isoformat())).fetchone()
+            if not snap or not snap[0]:
+                return None
+            row = con.execute("""SELECT AVG(iv) FROM options
+                WHERE symbol=? AND date=? AND expiration=? AND iv IS NOT NULL AND iv>0""",
+                (symbol, snap[0], expiry.isoformat())).fetchone()
             return _normal_iv(row[0]) if row and row[0] is not None else None
     except Exception:
         return None
@@ -228,10 +233,14 @@ def _config(raw: Dict[str, Any]) -> Dict[str, Any]:
     symbols = raw.get("symbols") or raw.get("symbol") or []
     if isinstance(symbols, str): symbols = [x.strip().upper() for x in symbols.split(",") if x.strip()]
     if not symbols: raise ValueError("symbol or symbols is required")
+    entry_rule = raw.get("entry_rule") or {"type": "every_friday"}
+    expiry_rule = raw.get("expiry_rule") or {"type": "next_friday"}
+    strategy = raw.get("strategy") or {"type": "iron_fly", "wing_width": 15}
+    if isinstance(entry_rule, str): entry_rule = {"type": entry_rule}
+    if isinstance(expiry_rule, str): expiry_rule = {"type": expiry_rule}
+    if isinstance(strategy, str): strategy = {"type": strategy}
     return {**raw, "start_date": start.isoformat(), "end_date": end.isoformat(), "symbols": symbols,
-            "entry_rule": raw.get("entry_rule") or {"type": "every_friday"},
-            "expiry_rule": raw.get("expiry_rule") or {"type": "next_friday"},
-            "strategy": raw.get("strategy") or {"type": "iron_fly", "wing_width": 15},
+            "entry_rule": entry_rule, "expiry_rule": expiry_rule, "strategy": strategy,
             "rate": float(raw.get("rate", 0.04)), "dividend": float(raw.get("dividend", 0.0)),
             "iv_source": raw.get("iv_source", "historical_iv"), "rv_window": int(raw.get("rv_window", 20)),
             "slippage_pct": float(raw.get("slippage_pct", 0.0)), "contract_multiplier": int(raw.get("contract_multiplier", 100))}
