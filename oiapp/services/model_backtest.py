@@ -11,6 +11,7 @@ import math
 import sqlite3
 import threading
 import uuid
+from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -118,6 +119,31 @@ def _historical_iv(symbol: str, entry: date, expiry: date) -> Optional[float]:
             return _normal_iv(row[0]) if row and row[0] is not None else None
     except Exception:
         return None
+
+
+def _load_iv_history(symbol: str, start: date, end: date) -> Dict[str, List[Any]]:
+    """Load all usable IV snapshots once, then resolve them in memory."""
+    history: Dict[str, List[Any]] = {}
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            rows = con.execute("""SELECT date, expiration, AVG(iv) FROM options
+                WHERE symbol=? AND date>=? AND date<=? AND iv IS NOT NULL AND iv>0
+                GROUP BY date, expiration ORDER BY expiration, date""",
+                (symbol, start.isoformat(), end.isoformat())).fetchall()
+        for day, expiry, value in rows:
+            iv = _normal_iv(value)
+            if iv is not None:
+                history.setdefault(str(expiry)[:10], []).append((str(day)[:10], iv))
+        return history
+    except Exception:
+        return {}
+
+
+def _iv_from_history(history: Dict[str, List[Any]], entry: date, expiry: date) -> Optional[float]:
+    rows = history.get(expiry.isoformat()) or []
+    days = [x[0] for x in rows]
+    i = bisect_right(days, entry.isoformat()) - 1
+    return rows[i][1] if i >= 0 else None
 
 
 def _strike(spot: float, years: float, iv: float, side: str, rule: Dict[str, Any], rate: float, dividend: float) -> float:
@@ -260,15 +286,17 @@ def _run(run_id: str, cfg: Dict[str, Any]) -> None:
             if bars is None or bars.empty: continue
             closes = [float(x) for x in bars["Close"].tolist()]
             dates = [x.date() for x in bars.index]
+            date_to_idx = {day: idx for idx, day in enumerate(dates)}
+            iv_history = _load_iv_history(symbol, _d(cfg["start_date"]) - timedelta(days=cfg["rv_window"] + 5), _d(cfg["end_date"]))
             entry_days = _entries([x for x in dates if _d(cfg["start_date"]) <= x <= _d(cfg["end_date"])], cfg["entry_rule"])
             for i, entry in enumerate(entry_days):
                 try:
-                    entry_idx = dates.index(entry); expiry = _expiry_for(entry, cfg["expiry_rule"])
-                    expiry_candidates = [(d, j) for j, d in enumerate(dates) if d >= expiry]
-                    if not expiry_candidates: continue
-                    expiry_date, expiry_idx = expiry_candidates[0]
+                    entry_idx = date_to_idx[entry]; expiry = _expiry_for(entry, cfg["expiry_rule"])
+                    expiry_idx = bisect_left(dates, expiry)
+                    if expiry_idx >= len(dates): continue
+                    expiry_date = dates[expiry_idx]
                     spot = closes[entry_idx]; years = max((expiry_date - entry).days, 1) / 365.0
-                    iv = _historical_iv(symbol, entry, expiry_date)
+                    iv = _iv_from_history(iv_history, entry, expiry_date)
                     pricing_source = "HISTORICAL_IV_BS"
                     if iv is None or cfg["iv_source"] in {"realized_volatility", "rv"}:
                         iv = _realized_vol(closes[:entry_idx + 1], cfg["rv_window"])
