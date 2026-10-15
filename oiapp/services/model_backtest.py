@@ -10,6 +10,7 @@ import json
 import math
 import sqlite3
 import threading
+import time
 import uuid
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,7 @@ from ..scanners.sqlite_store import get_market_data_store
 
 model_backtest_bp = Blueprint("model_backtest", __name__, url_prefix="/model-backtest")
 _jobs: Dict[str, Dict[str, Any]] = {}
+_cancelled = set()
 _lock = threading.RLock()
 
 
@@ -279,14 +281,22 @@ def _config(raw: Dict[str, Any]) -> Dict[str, Any]:
             "entry_rule": entry_rule, "expiry_rule": expiry_rule, "strategy": strategy,
             "rate": float(raw.get("rate", 0.04)), "dividend": float(raw.get("dividend", 0.0)),
             "iv_source": raw.get("iv_source", "historical_iv"), "rv_window": int(raw.get("rv_window", 20)),
-            "slippage_pct": float(raw.get("slippage_pct", 0.0)), "contract_multiplier": int(raw.get("contract_multiplier", 100))}
+            "slippage_pct": float(raw.get("slippage_pct", 0.0)), "contract_multiplier": int(raw.get("contract_multiplier", 100)),
+            "timeout_minutes": max(1.0, float(raw.get("timeout_minutes", 30.0)))}
 
 
 def _run(run_id: str, cfg: Dict[str, Any]) -> None:
+    started = time.monotonic()
+    def checkpoint() -> None:
+        if run_id in _cancelled:
+            raise RuntimeError("cancelled by user")
+        if time.monotonic() - started > cfg["timeout_minutes"] * 60.0:
+            raise TimeoutError(f"model backtest exceeded {cfg['timeout_minutes']:.0f} minute timeout")
     try:
         all_trades: List[Dict[str, Any]] = []
         store = get_market_data_store()
         for symbol in cfg["symbols"]:
+            checkpoint()
             bars = store.get_bars(symbol, _d(cfg["start_date"]) - timedelta(days=cfg["rv_window"] + 5), _d(cfg["end_date"]) + timedelta(days=15), "1d")
             if bars is None or bars.empty: continue
             closes = [float(x) for x in bars["Close"].tolist()]
@@ -297,6 +307,7 @@ def _run(run_id: str, cfg: Dict[str, Any]) -> None:
             iv_history = _load_iv_history(symbol, _d(cfg["start_date"]) - timedelta(days=cfg["rv_window"] + 5), _d(cfg["end_date"]), target_expiries)
             for i, entry in enumerate(entry_days):
                 try:
+                    checkpoint()
                     entry_idx = date_to_idx[entry]; expiry = _expiry_for(entry, cfg["expiry_rule"])
                     expiry_idx = bisect_left(dates, expiry)
                     if expiry_idx >= len(dates): continue
@@ -330,8 +341,10 @@ def _run(run_id: str, cfg: Dict[str, Any]) -> None:
         with _lock: _jobs[run_id].update({"status": "completed", "summary": summary})
     except Exception as exc:
         _ensure_tables()
-        with sqlite3.connect(DB_PATH) as con: con.execute("UPDATE model_backtest_runs SET status='failed',error_text=? WHERE run_id=?", (str(exc), run_id))
-        with _lock: _jobs[run_id].update({"status": "failed", "error": str(exc)})
+        status = "cancelled" if run_id in _cancelled or str(exc) == "cancelled by user" else "failed"
+        with sqlite3.connect(DB_PATH) as con: con.execute("UPDATE model_backtest_runs SET status=?,error_text=? WHERE run_id=?", (status, str(exc), run_id))
+        with _lock: _jobs[run_id].update({"status": status, "error": str(exc)})
+        _cancelled.discard(run_id)
 
 
 @model_backtest_bp.route("/api/run", methods=["POST"])
@@ -363,3 +376,17 @@ def detail(run_id: str):
     out = dict(r); out["config"] = json.loads(out.pop("config_json") or "{}"); out["summary"] = json.loads(out.pop("summary_json") or "null"); out["trades"] = trades
     with _lock: out.update(_jobs.get(run_id, {}))
     return jsonify(out)
+
+
+@model_backtest_bp.route("/api/runs/<run_id>/cancel", methods=["POST"])
+def cancel(run_id: str):
+    _ensure_tables()
+    with sqlite3.connect(DB_PATH) as con:
+        row = con.execute("SELECT status FROM model_backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "run not found"}), 404
+        if row[0] == "running":
+            con.execute("UPDATE model_backtest_runs SET status='cancelling',error_text=? WHERE run_id=?", ("Cancellation requested", run_id))
+    _cancelled.add(run_id)
+    with _lock: _jobs.setdefault(run_id, {}).update({"status": "cancelling"})
+    return jsonify({"ok": True, "run_id": run_id, "status": "cancelling"})
