@@ -119,7 +119,9 @@ def _near_buildup_batch(con, symbols, min_pct, min_oi, max_distance_pct, lookbac
         side = str(row["side"] or "")
         strike = _number(row["strike"])
         if side in ("call", "put") and strike > 0:
-            key = (side, strike)
+            # Round strikes before matching snapshots so the same listed strike
+            # cannot fail validation because of insignificant float representation.
+            key = (side, round(strike, 4))
             bucket["oi"][key] = bucket["oi"].get(key, 0.0) + _number(row["oi"])
 
     results = []
@@ -138,14 +140,23 @@ def _near_buildup_batch(con, symbols, min_pct, min_oi, max_distance_pct, lookbac
             continue
         old_oi = previous.get(symbol, {}).get(expiry, {}).get("oi", {})
         for (side, strike), now in chain["oi"].items():
-            before = old_oi.get((side, strike), 0.0)
-            if now <= before:
+            # A buildup percentage is valid only when the prior snapshot contains
+            # the exact same expiry/side/strike.  Do not treat a missing contract
+            # as prior OI=0; that would manufacture +100% buildup for new rows.
+            key = (side, round(strike, 4))
+            if key not in old_oi:
+                continue
+            before = _number(old_oi[key])
+            if before <= 0:
+                continue
+            change = now - before
+            # Only positive OI change qualifies as buildup.
+            if change <= 0:
                 continue
             distance_pct = abs(strike - spot) / spot * 100.0
             if distance_pct > max_distance_pct:
                 continue
-            change = now - before
-            change_pct = 100.0 if before <= 0 else change / before * 100.0
+            change_pct = change / before * 100.0
             if change_pct < min_pct or now < min_oi:
                 continue
             results.append({
