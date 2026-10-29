@@ -203,7 +203,7 @@ PAGE = r"""<!doctype html>
 <style>
 body{max-width:1500px;margin:0 auto;padding:18px}.toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:14px 0}.toolbar label{display:grid;gap:5px;font-size:12px}.toolbar input,.toolbar select{min-width:105px}.muted{color:var(--muted)}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid var(--border);text-align:right}th{text-align:right;color:var(--muted)}th:first-child,td:first-child{text-align:left}.call{color:#60a5fa;font-weight:700}.put{color:#fb7185;font-weight:700}.positive{color:#86efac}
 </style></head><body>
-<div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><h1 style="margin:0">Near-Price OI Buildup</h1><p class="muted">Saved strike-level OI only — no multi-timeframe price logic. Finds fresh positive call or put buildup close to current saved spot.</p></div><a class="btn btn-ghost" href="/">← OI Viewer</a></div>
+<div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><h1 style="margin:0">Near-Price OI Buildup</h1><p class="muted">Saved strike-level OI only — no multi-timeframe price logic. Finds positive buildup near current saved spot only when prior OI exists for the exact expiry, side, and strike.</p></div><a class="btn btn-ghost" href="/">← OI Viewer</a></div>
 <div class="card" style="padding:14px"><div class="toolbar">
 <label>Watchlist<select id="watchlist"></select></label>
 <label>Minimum OI buildup %<input id="minPct" type="number" value="20" min="0" step="5"></label>
